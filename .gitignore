@@ -1,7 +1,6 @@
 checkpoints/
 *.pkl
 *.h5
-*.npz
 
 visualizations/
 logs/
