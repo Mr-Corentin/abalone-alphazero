@@ -1,0 +1,3 @@
+[submodule "abalone-ai"]
+	path = abalone-ai
+	url = https://github.com/altin/abalone-ai.git
