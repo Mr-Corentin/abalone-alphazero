@@ -68,4 +68,4 @@ def test_memory_capacity(num_simulations=800):
             break
 
 if __name__ == "__main__":
-    test_memory_capacity(num_simulations=800)
+    test_memory_capacity(num_simulations=500)

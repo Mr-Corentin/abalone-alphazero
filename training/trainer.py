@@ -17,28 +17,6 @@ from mcts.search import generate_parallel_games_pmap
 from evaluation.evaluator import evaluate_model
 
 
-
-def create_game_generator(num_simulations):
-    """
-    Crée une version personnalisée de generate_parallel_games_pmap avec num_simulations fixé
-    
-    Args:
-        num_simulations: Nombre de simulations MCTS par mouvement
-        
-    Returns:
-        Fonction pmappée pour générer des parties
-    """
-    from mcts.search import generate_game_mcts_batch
-    
-    @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
-    def custom_generate_parallel_games(rngs, params, network, env, batch_size_per_device):
-        return generate_game_mcts_batch(rngs, params, network, env, 
-                                       batch_size_per_device, 
-                                       num_simulations=num_simulations)
-    
-    return custom_generate_parallel_games
-
-
 class AbaloneTrainerSync:
     def __init__(self,
                 network,
@@ -200,7 +178,6 @@ class AbaloneTrainerSync:
     def _setup_jax_functions(self):
         """Configure les fonctions JAX pour la génération et l'entraînement."""
         # Utiliser la fonction factory pour créer une version avec num_simulations fixé
-        self.generate_games_pmap = create_game_generator(self.num_simulations)
       
         # Fonction d'entraînement parallèle (utilise tous les cœurs TPU)
         self.train_step_pmap = jax.pmap(
@@ -293,10 +270,11 @@ class AbaloneTrainerSync:
         print(f"Parties générées: {self.total_games}")
         print(f"Positions totales: {self.total_positions}")
         print(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
-    
+
     def _generate_games(self, rng_key, num_games):
         """
-        Génère des parties en parallèle sur tous les cœurs TPU.
+        Génère des parties en parallèle sur tous les cœurs TPU, basé sur l'ancienne version
+        plus efficace.
         
         Args:
             rng_key: Clé aléatoire JAX
@@ -306,28 +284,50 @@ class AbaloneTrainerSync:
             Données des parties générées
         """
         # Déterminer combien de parties par cœur
-        games_per_core = math.ceil(num_games / self.num_devices)
-        total_games = games_per_core * self.num_devices
+        batch_size_per_device = math.ceil(num_games / self.num_devices)
+        total_games = batch_size_per_device * self.num_devices
         
-        # Préparer les RNGs pour chaque cœur
+        # Mesure du temps total
+        t_total_start = time.time()
+        
+        # Préparer les RNGs pour chaque cœur et les distribuer directement
+        t_prep_start = time.time()
         sharded_rngs = jax.random.split(rng_key, self.num_devices)
+        sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
         
-        # Répliquer les paramètres pour pmap
-        sharded_params = jax.tree_util.tree_map(
-            lambda x: jnp.array([x] * self.num_devices),
-            self.params
-        )
+        # Répliquer les paramètres directement sur les devices
+        sharded_params = jax.device_put_replicated(self.params, self.devices)
+        t_prep_end = time.time()
         
-        # Générer les parties
-        games_data_pmap = self.generate_games_pmap(
-            sharded_rngs, sharded_params, self.network, self.env, games_per_core
+        # Générer les parties avec la version pmap directe
+        t_gen_start = time.time()
+        games_data_pmap = generate_parallel_games_pmap(
+            sharded_rngs, 
+            sharded_params, 
+            self.network, 
+            self.env, 
+            batch_size_per_device
         )
+        t_gen_end = time.time()
         
         # Récupérer les données sur CPU
+        t_fetch_start = time.time()
         games_data = jax.device_get(games_data_pmap)
+        t_fetch_end = time.time()
         
         # Mettre à jour le compteur
         self.total_games += total_games
+        
+        # Calcul et affichage des temps
+        t_prep = t_prep_end - t_prep_start
+        t_gen = t_gen_end - t_gen_start
+        t_fetch = t_fetch_end - t_fetch_start
+        t_total = time.time() - t_total_start
+        
+        print(f"  Préparation: {t_prep:.3f}s")
+        print(f"  Génération TPU: {t_gen:.3f}s ({total_games/t_gen:.1f} parties/s)")
+        print(f"  Récupération: {t_fetch:.3f}s ({t_fetch/total_games*1000:.1f} ms/partie)")
+        print(f"  Ratio génération/récupération: {t_gen/t_fetch:.2f}x")
         
         return games_data
     
