@@ -55,7 +55,14 @@ def run_search_batch(states: AbaloneState,
         gumbel_scale=1.0
     )
 
-    return policy_output
+    # Créer une structure de sortie simplifiée qui ne contient pas l'arbre de recherche
+    lightweight_output = type(policy_output)(
+        action=policy_output.action,
+        action_weights=policy_output.action_weights,
+        search_tree=None  # ou un placeholder minimal
+    )
+
+    return lightweight_output
 
 
 @partial(jax.jit, static_argnames=['env', 'network', 'num_simulations', 'batch_size'])
@@ -202,6 +209,10 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
         'final_white_out': final_states.white_out,  # Billes blanches sorties à la fin
         'final_player': final_states.actual_player  # Dernier joueur actif
     }
+    essential_data = jax.tree_util.tree_map(
+        jax.lax.stop_gradient, 
+        essential_data
+    )
 
     return essential_data
 
@@ -212,3 +223,110 @@ def generate_parallel_games_pmap(rngs, params, network, env, batch_size_per_devi
     Version pmappée de generate_game_mcts_batch pour paralléliser sur plusieurs devices
     """
     return generate_game_mcts_batch(rngs, params, network, env, batch_size_per_device)
+
+
+
+def create_optimized_game_generator(num_simulations=500):
+    """
+    Crée une version pmappée de la génération de parties optimisée
+    
+    Args:
+        num_simulations: Nombre de simulations MCTS par mouvement
+        
+    Returns:
+        Fonction pmappée pour générer des parties
+    """
+    
+    @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
+    def generate_optimized_games_pmap(rng_key, params, network, env, batch_size_per_device):
+        """Version optimisée avec lax.scan et filtrage des parties terminées"""
+
+        def game_step(carry, _):
+            states, rng, moves_per_game, active, game_data = carry
+
+            # Ignorer les états déjà terminés
+            terminal_states = jax.vmap(env.is_terminal)(states)
+            active_games = active & ~terminal_states
+
+            # Générer une nouvelle clé RNG
+            rng, search_rng = jax.random.split(rng)
+
+            # Exécuter MCTS uniquement sur les états actifs
+            search_outputs = run_search_batch(states, recurrent_fn, network, params, search_rng, env, num_simulations)
+
+            # Appliquer les actions pour obtenir les nouveaux états
+            next_states = jax.vmap(env.step)(states, search_outputs.action)
+
+            # Calculer les données pour ce tour
+            current_boards_2d = jax.vmap(cube_to_2d)(states.board)
+            
+            # Mise à jour des tableaux avec approche vectorisée
+            batch_indices = jnp.arange(batch_size_per_device)
+            move_indices = moves_per_game
+            
+            # Mettre à jour les données du jeu
+            for key, value in [
+                ('boards_2d', current_boards_2d),
+                ('policies', search_outputs.action_weights),
+                ('actual_players', states.actual_player),
+                ('black_outs', states.black_out),
+                ('white_outs', states.white_out),
+                ('is_terminal', terminal_states)
+            ]:
+                # Créer un masque adapté à la forme de la valeur
+                mask = active_games
+                if len(value.shape) > 1:
+                    reshape_dims = [len(value.shape) - 1]
+                    mask = mask.reshape(-1, *([1] * reshape_dims[0]))
+                
+                # Mettre à jour le tableau
+                game_data[key] = game_data[key].at[batch_indices, move_indices].set(
+                    jnp.where(mask, value, game_data[key][batch_indices, move_indices])
+                )
+
+            # Incrémenter le nombre de coups pour les parties actives
+            new_moves_per_game = jnp.where(active_games, moves_per_game + 1, moves_per_game)
+
+            return (next_states, rng, new_moves_per_game, active_games, game_data), None
+
+        # Initialiser l'état récurrent pour MCTS
+        recurrent_fn = AbaloneMCTSRecurrentFn(env, network)
+        
+        # Initialiser les états
+        init_states = env.reset_batch(rng_key, batch_size_per_device)
+
+        # Pré-allouer les tableaux de données
+        max_moves = 300  # Limiter le nombre maximum de coups
+        game_data = {
+            'boards_2d': jnp.zeros((batch_size_per_device, max_moves + 1, 9, 9), dtype=jnp.int8),
+            'policies': jnp.zeros((batch_size_per_device, max_moves + 1, 1734), dtype=jnp.float32),
+            'actual_players': jnp.zeros((batch_size_per_device, max_moves + 1), dtype=jnp.int32),
+            'black_outs': jnp.zeros((batch_size_per_device, max_moves + 1), dtype=jnp.int32),
+            'white_outs': jnp.zeros((batch_size_per_device, max_moves + 1), dtype=jnp.int32),
+            'is_terminal': jnp.zeros((batch_size_per_device, max_moves + 1), dtype=jnp.bool_)
+        }
+
+        # Initialiser les parties
+        active = jnp.ones(batch_size_per_device, dtype=jnp.bool_)
+        moves_per_game = jnp.zeros(batch_size_per_device, dtype=jnp.int32)
+
+        # Exécuter la simulation des parties avec lax.scan (plus efficace que while_loop)
+        (final_states, _, final_moves_per_game, _, final_data), _ = jax.lax.scan(
+            game_step,
+            (init_states, rng_key, moves_per_game, active, game_data),
+            None,
+            length=max_moves
+        )
+
+        # Ajouter les états finaux au dictionnaire de retour
+        essential_data = {
+            **final_data,
+            'moves_per_game': final_moves_per_game,
+            'final_black_out': final_states.black_out,
+            'final_white_out': final_states.white_out,
+            'final_player': final_states.actual_player
+        }
+
+        return essential_data
+    
+    return generate_optimized_games_pmap

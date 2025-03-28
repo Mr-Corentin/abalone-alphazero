@@ -13,7 +13,7 @@ from model.neural_net import AbaloneModel
 from environment.env import AbaloneEnv
 from training.replay_buffer import CPUReplayBuffer
 from training.loss import train_step_pmap_impl
-from mcts.search import generate_parallel_games_pmap
+from mcts.search import generate_parallel_games_pmap, create_optimized_game_generator
 from evaluation.evaluator import evaluate_model
 
 
@@ -174,18 +174,19 @@ class AbaloneTrainerSync:
             )
         
         return new_lr
-        
+
     def _setup_jax_functions(self):
         """Configure les fonctions JAX pour la génération et l'entraînement."""
-        # Utiliser la fonction factory pour créer une version avec num_simulations fixé
-      
+        # Utiliser notre générateur optimisé au lieu de l'ancien
+        self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
+        
         # Fonction d'entraînement parallèle (utilise tous les cœurs TPU)
         self.train_step_pmap = jax.pmap(
             partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
             axis_name='batch',
             devices=self.devices
         )
-      
+        
         # Fonction de mise à jour des paramètres avec l'optimiseur
         self.optimizer_update_pmap = jax.pmap(
             lambda g, o, p: self.optimizer.update(g, o, p),
@@ -271,10 +272,10 @@ class AbaloneTrainerSync:
         print(f"Positions totales: {self.total_positions}")
         print(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
 
+    
     def _generate_games(self, rng_key, num_games):
         """
-        Génère des parties en parallèle sur tous les cœurs TPU, basé sur l'ancienne version
-        plus efficace.
+        Génère des parties en parallèle sur tous les cœurs TPU avec la version optimisée.
         
         Args:
             rng_key: Clé aléatoire JAX
@@ -299,9 +300,9 @@ class AbaloneTrainerSync:
         sharded_params = jax.device_put_replicated(self.params, self.devices)
         t_prep_end = time.time()
         
-        # Générer les parties avec la version pmap directe
+        # Générer les parties avec la version optimisée
         t_gen_start = time.time()
-        games_data_pmap = generate_parallel_games_pmap(
+        games_data_pmap = self.generate_games_pmap(
             sharded_rngs, 
             sharded_params, 
             self.network, 
@@ -325,22 +326,14 @@ class AbaloneTrainerSync:
         t_total = time.time() - t_total_start
         
         print(f"  Préparation: {t_prep:.3f}s")
-        print(f"  Génération TPU: {t_gen:.3f}s ({total_games/t_gen:.1f} parties/s)")
+        print(f"  Génération: {t_gen:.3f}s ({total_games/t_gen:.1f} parties/s)")
         print(f"  Récupération: {t_fetch:.3f}s ({t_fetch/total_games*1000:.1f} ms/partie)")
         print(f"  Ratio génération/récupération: {t_gen/t_fetch:.2f}x")
         
         return games_data
     
     def _update_buffer(self, games_data):
-        """
-        Met à jour le buffer de replay avec les nouvelles parties.
-        
-        Args:
-            games_data: Données des parties générées
-            
-        Returns:
-            Nombre de positions ajoutées au buffer
-        """
+        """Met à jour le buffer avec les nouvelles parties générées"""
         positions_added = 0
         
         # Pour chaque dispositif
@@ -358,7 +351,7 @@ class AbaloneTrainerSync:
                     continue
                     
                 # Extraire les données pour cette partie
-                boards_2d = device_data['boards_2d'][game_idx][:game_length+1]  # +1 pour inclure l'état terminal potentiel
+                boards_2d = device_data['boards_2d'][game_idx][:game_length+1]
                 policies = device_data['policies'][game_idx][:game_length+1]
                 actual_players = device_data['actual_players'][game_idx][:game_length+1]
                 black_outs = device_data['black_outs'][game_idx][:game_length+1]
@@ -380,25 +373,27 @@ class AbaloneTrainerSync:
                     # Calculer les billes sorties pour le joueur courant
                     player = actual_players[move_idx]
                     our_marbles = np.where(player == 1,
-                                         black_outs[move_idx],
-                                         white_outs[move_idx])
+                                        black_outs[move_idx],
+                                        white_outs[move_idx])
                     opp_marbles = np.where(player == 1,
-                                         white_outs[move_idx],
-                                         black_outs[move_idx])
+                                        white_outs[move_idx],
+                                        black_outs[move_idx])
                     marbles_out = np.array([our_marbles, opp_marbles], dtype=np.int8)
                     
                     # Ajuster pour le point de vue du joueur courant
                     outcome_for_player = outcome * player
                     
-                    # Stocker dans le buffer
+                    # Stocker dans le buffer avec les métadonnées
                     self.buffer.add(
                         boards_2d[move_idx],
                         marbles_out,
                         policies[move_idx],
                         outcome_for_player,
                         player,
-                        game_id=self.total_games + game_idx,  # ID unique pour cette partie
-                        move_num=move_idx
+                        game_id=self.total_games + game_idx,
+                        move_num=move_idx,
+                        iteration=self.iteration,  # Ajouter l'itération actuelle
+                        model_version=self.total_games  # Utiliser total_games comme proxy pour version
                     )
                     
                     positions_added += 1
