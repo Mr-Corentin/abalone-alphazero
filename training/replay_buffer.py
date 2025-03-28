@@ -15,12 +15,15 @@ class CPUReplayBuffer:
             'outcome': np.zeros(capacity, dtype=np.int8),
             'player': np.zeros(capacity, dtype=np.int8),
             'game_id': np.zeros(capacity, dtype=np.int32),  # ID unique de partie
-            'move_num': np.zeros(capacity, dtype=np.int16)  # Numéro du coup dans la partie
+            'move_num': np.zeros(capacity, dtype=np.int16),  # Numéro du coup dans la partie
+            'iteration': np.zeros(capacity, dtype=np.int32),  # Itération d'entraînement
+            'model_version': np.zeros(capacity, dtype=np.int32)  # Version du modèle
         }
 
         self.current_game_id = 0  # Compteur pour les IDs de partie
 
-    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0):
+    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
+            iteration=0, model_version=0):
         """Ajoute une transition individuelle au buffer"""
         idx = self.position
 
@@ -44,6 +47,8 @@ class CPUReplayBuffer:
         self.buffer['player'][idx] = player
         self.buffer['game_id'][idx] = game_id
         self.buffer['move_num'][idx] = move_num
+        self.buffer['iteration'][idx] = iteration
+        self.buffer['model_version'][idx] = model_version
 
         # Mettre à jour les compteurs
         self.position = (self.position + 1) % self.capacity
@@ -53,13 +58,17 @@ class CPUReplayBuffer:
         """Ajoute un batch de transitions"""
         batch_size = batch['board'].shape[0]
 
-        # Si le batch inclut game_id et move_num, utilisez-les
+        # Vérifier la présence des champs optionnels
         has_game_id = 'game_id' in batch
         has_move_num = 'move_num' in batch
+        has_iteration = 'iteration' in batch
+        has_model_version = 'model_version' in batch
 
         for i in range(batch_size):
             game_id = batch['game_id'][i] if has_game_id else None
             move_num = batch['move_num'][i] if has_move_num else 0
+            iteration = batch['iteration'][i] if has_iteration else 0
+            model_version = batch['model_version'][i] if has_model_version else 0
 
             self.add(
                 batch['board'][i],
@@ -68,7 +77,9 @@ class CPUReplayBuffer:
                 batch['outcome'][i],
                 batch['player'][i],
                 game_id=game_id,
-                move_num=move_num
+                move_num=move_num,
+                iteration=iteration,
+                model_version=model_version
             )
 
     def start_new_game(self):
@@ -82,22 +93,21 @@ class CPUReplayBuffer:
             raise ValueError("Buffer vide, impossible d'échantillonner")
 
         if rng_key is None:
-            # Utiliser numpy si pas de clé JAX
             indices = np.random.randint(0, self.size, size=batch_size)
         else:
-            # Utiliser JAX sinon
             indices = jax.random.randint(
                 rng_key, shape=(batch_size,), minval=0, maxval=self.size
             ).astype(np.int32)
             indices = np.array(indices)
 
-        # Récupérer les données
         batch = {
             'board': self.buffer['board'][indices],
             'marbles_out': self.buffer['marbles_out'][indices],
             'policy': self.buffer['policy'][indices],
             'outcome': self.buffer['outcome'][indices],
-            'player': self.buffer['player'][indices]
+            'player': self.buffer['player'][indices],
+            'iteration': self.buffer['iteration'][indices],
+            'model_version': self.buffer['model_version'][indices]
         }
 
         return batch
@@ -133,12 +143,15 @@ class CPUReplayBuffer:
 
         # Récupérer les échantillons
         actual_indices = np.arange(self.size)[sampled_indices]
+ 
         batch = {
             'board': self.buffer['board'][actual_indices],
             'marbles_out': self.buffer['marbles_out'][actual_indices],
             'policy': self.buffer['policy'][actual_indices],
             'outcome': self.buffer['outcome'][actual_indices],
-            'player': self.buffer['player'][actual_indices]
+            'player': self.buffer['player'][actual_indices],
+            'iteration': self.buffer['iteration'][actual_indices],
+            'model_version': self.buffer['model_version'][actual_indices]
         }
 
         return batch
