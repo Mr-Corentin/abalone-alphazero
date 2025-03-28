@@ -24,7 +24,6 @@ class AbaloneTrainerSync:
                 buffer_size=1_000_000,
                 batch_size=128,
                 value_weight=1.0,
-                games_per_device=8,
                 num_simulations=500,
                 recency_bias=True,
                 recency_temperature=0.8,
@@ -42,7 +41,6 @@ class AbaloneTrainerSync:
             buffer_size: Taille du buffer de replay
             batch_size: Taille du batch pour l'entraînement
             value_weight: Poids de la perte de valeur
-            games_per_device: Nombre de parties par dispositif TPU
             num_simulations: Nombre de simulations MCTS par mouvement
             recency_bias: Si True, utilise l'échantillonnage biaisé vers les données récentes
             recency_temperature: Température pour le biais de récence
@@ -85,7 +83,6 @@ class AbaloneTrainerSync:
         self.batch_size = batch_size
         self.value_weight = value_weight
         self.checkpoint_path = checkpoint_path
-        self.games_per_device = games_per_device
         self.num_simulations = num_simulations
         self.recency_bias = recency_bias
         self.recency_temperature = recency_temperature
