@@ -152,13 +152,15 @@ class AbaloneTrainerSync:
             if iteration_percentage >= threshold:
                 new_lr = lr
         
-        # Si le LR a changé, recréer l'optimiseur
         if new_lr != self.current_lr:
             print(f"Learning rate mis à jour: {self.current_lr} -> {new_lr}")
             self.current_lr = new_lr
             
-            # Créer un nouvel optimiseur avec le nouveau learning rate
-            self.optimizer = optax.sgd(learning_rate=self.current_lr, momentum=self.momentum)
+            # Créer un nouvel optimiseur avec le clippage des gradients
+            self.optimizer = optax.chain(
+                optax.clip_by_global_norm(1.0),  # Maintenir le clippage des gradients
+                optax.sgd(learning_rate=self.current_lr, momentum=self.momentum)
+            )
             
             # Réinitialiser l'état de l'optimiseur
             self.opt_state = self.optimizer.init(self.params)
@@ -178,6 +180,33 @@ class AbaloneTrainerSync:
         self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
         
         # Fonction d'entraînement parallèle (utilise tous les cœurs TPU)
+        self.train_step_pmap = jax.pmap(
+            partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
+            axis_name='batch',
+            devices=self.devices
+        )
+        
+        # Fonction de mise à jour des paramètres avec l'optimiseur
+        self.optimizer_update_pmap = jax.pmap(
+            lambda g, o, p: self.optimizer.update(g, o, p),
+            axis_name='batch',
+            devices=self.devices
+        )
+    def _setup_jax_functions(self):
+        """Configure les fonctions JAX pour la génération et l'entraînement."""
+        
+        self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
+        
+        # Ajouter le clippage des gradients à l'optimiseur
+        self.optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),  # Limiter la norme des gradients à 1.0
+            optax.sgd(learning_rate=self.current_lr, momentum=self.momentum)
+        )
+        
+        # Réinitialiser l'état de l'optimiseur
+        self.opt_state = self.optimizer.init(self.params)
+        
+        # Fonction d'entraînement parallèle
         self.train_step_pmap = jax.pmap(
             partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
             axis_name='batch',
@@ -444,6 +473,12 @@ class AbaloneTrainerSync:
             opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
             
             # Exécuter l'étape d'entraînement parallèle
+            # Ajouter ce code juste avant l'appel à train_step_pmap
+            print(f"Step {step}, vérification des données:")
+            print(f"Boards: min={jnp.min(boards)}, max={jnp.max(boards)}")
+            print(f"Marbles: min={jnp.min(marbles)}, max={jnp.max(marbles)}")
+            print(f"Policies: min={jnp.min(policies)}, max={jnp.max(policies)}, somme moyenne={jnp.mean(jnp.sum(policies, axis=-1))}")
+            print(f"Values: min={jnp.min(values)}, max={jnp.max(values)}")
             loss, grads = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
             
             # Mettre à jour les paramètres avec l'optimiseur
