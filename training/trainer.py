@@ -7,6 +7,8 @@ import optax
 import os
 import pickle
 from functools import partial
+from tensorboardX import SummaryWriter
+import datetime
 
 # Importations locales
 from model.neural_net import AbaloneModel
@@ -30,7 +32,8 @@ class AbaloneTrainerSync:
                 initial_lr=0.2,
                 momentum=0.9,
                 lr_schedule=None,
-                checkpoint_path="checkpoints/model"):
+                checkpoint_path="checkpoints/model",
+                log_dir=None):
         """
         Initialise le coordinateur d'entraînement avec approche synchronisée par étapes.
         Utilise SGD avec momentum comme dans l'implémentation originale d'AlphaZero.
@@ -48,18 +51,8 @@ class AbaloneTrainerSync:
             momentum: Momentum pour SGD (0.9 standard)
             lr_schedule: Liste de tuples (pourcentage_iteration, learning_rate) ou None
             checkpoint_path: Chemin pour sauvegarder les checkpoints
+            log_dir : Chemin pour log tensorboard
         """
-        # Configuration TPU
-        #self.devices = jax.devices('tpu')
-        # if jax.device_count('tpu') > 0:
-        #     self.devices = jax.devices('tpu')
-        # elif jax.device_count('gpu') > 0:
-        #     self.devices = jax.devices('gpu')
-        # else:
-        #     self.devices = jax.devices('cpu')
-        # self.num_devices = len(self.devices)
-        # print(f"Utilisation de {self.num_devices} cœurs TPU en mode synchronisé par étapes")
-
         try:
             # Essayer d'abord les TPU (Google Cloud)
             self.devices = jax.devices('tpu')
@@ -131,6 +124,16 @@ class AbaloneTrainerSync:
         self.total_games = 0
         self.total_positions = 0
         self.metrics_history = []
+
+        #Log tensorboard
+        if log_dir is None:
+            current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.log_dir = os.path.join("logs", f"abalone_az_{current_time}")
+        else:
+            self.log_dir = log_dir
+            
+        print(f"Logs TensorBoard : {self.log_dir}")
+        self.writer = SummaryWriter(self.log_dir)
         
         # Configurer les fonctions JAX
         self._setup_jax_functions()
@@ -194,7 +197,7 @@ class AbaloneTrainerSync:
         )
     def _setup_jax_functions(self):
         """Configure les fonctions JAX pour la génération et l'entraînement."""
-        
+
         self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
         
         # Ajouter le clippage des gradients à l'optimiseur
@@ -290,7 +293,7 @@ class AbaloneTrainerSync:
         
         # Sauvegarde finale
         self._save_checkpoint(is_final=True)
-        
+        self.writer.close()
         # Statistiques globales
         total_time = time.time() - start_time_global
         print(f"\n=== Entraînement terminé ===")
@@ -354,7 +357,6 @@ class AbaloneTrainerSync:
         print(f"  Préparation: {t_prep:.3f}s")
         print(f"  Génération: {t_gen:.3f}s ({total_games/t_gen:.1f} parties/s)")
         print(f"  Récupération: {t_fetch:.3f}s ({t_fetch/total_games*1000:.1f} ms/partie)")
-        print(f"  Ratio génération/récupération: {t_gen/t_fetch:.2f}x")
         
         return games_data
     
@@ -474,11 +476,7 @@ class AbaloneTrainerSync:
             
             # Exécuter l'étape d'entraînement parallèle
             # Ajouter ce code juste avant l'appel à train_step_pmap
-            print(f"Step {step}, vérification des données:")
-            print(f"Boards: min={jnp.min(boards)}, max={jnp.max(boards)}")
-            print(f"Marbles: min={jnp.min(marbles)}, max={jnp.max(marbles)}")
-            print(f"Policies: min={jnp.min(policies)}, max={jnp.max(policies)}, somme moyenne={jnp.mean(jnp.sum(policies, axis=-1))}")
-            print(f"Values: min={jnp.min(values)}, max={jnp.max(values)}")
+           
             loss, grads = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
             
             # Mettre à jour les paramètres avec l'optimiseur
@@ -499,6 +497,14 @@ class AbaloneTrainerSync:
         
         # Calculer la moyenne des métriques
         avg_metrics = {k: v / num_steps for k, v in cumulative_metrics.items()}
+
+        for metric_name, metric_value in avg_metrics.items():
+            self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
+        
+        # Ajouter le learning rate actuel
+        self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
+        self.writer.add_scalar("stats/buffer_size", self.buffer.size, self.iteration)
+        self.writer.add_scalar("stats/total_games", self.total_games, self.iteration)
         
         # Enregistrer les métriques
         avg_metrics['iteration'] = self.iteration
@@ -509,11 +515,16 @@ class AbaloneTrainerSync:
         
         return avg_metrics
     
+    
     def _evaluate(self):
-        """
-        Évalue le modèle actuel contre plusieurs algorithmes classiques.
-        """
-        return evaluate_model(self)
+        """Évalue le modèle actuel contre plusieurs algorithmes classiques."""
+        results = evaluate_model(self)
+        
+        # Enregistrer les résultats d'évaluation
+        for algo_name, data in results.items():
+            self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", data["win_rate"], self.iteration)
+        
+        return results
     
     def _save_checkpoint(self, is_final=False):
         """
