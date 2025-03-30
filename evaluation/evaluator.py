@@ -212,11 +212,13 @@ def simulate_alphazero_vs_classical(params, network, env, classical_algo="tt_pvs
             elif classical_algo == "alphabeta":
                 _, move = alphabeta(grid, depth, current_player, -math.inf, math.inf)
             elif classical_algo == "tt_alphabeta":
+                #TT.table = {}
                 TT.initialize_keys()
                 _, move = TT.alphabeta(grid, depth, current_player, -math.inf, math.inf)
             elif classical_algo == "pvs":
                 _, move = pvs(grid, current_player, -math.inf, math.inf, depth)
             elif classical_algo == "tt_pvs":
+                #TT.table = {}
                 TT.initialize_keys()
                 _, move = TT.pvs(grid, current_player, -math.inf, math.inf, depth)
             
@@ -257,7 +259,7 @@ class Evaluator:
         self.network = network
         self.env = env
     
-    def evaluate_against_classical(self, algorithms=None, num_games_per_algo=5, verbose=True):
+    def evaluate_against_classical(self, algorithms=None, num_games_per_algo=2, verbose=True):
         """
         Évalue le modèle contre plusieurs algorithmes classiques
         """
@@ -285,6 +287,10 @@ class Evaluator:
             for game_idx in range(num_games_per_algo):
                 if verbose:
                     print(f"Partie {game_idx+1}/{num_games_per_algo}")
+                
+                # Réinitialiser la table de transposition avant chaque partie
+                TT.table = {}
+                TT.initialize_keys()
                 
                 # Jouer une partie
                 result = simulate_alphazero_vs_classical(
@@ -321,7 +327,6 @@ class Evaluator:
         
         return results
 
-
 # Fonction à intégrer dans AbaloneTrainerSync
 def evaluate_model(self):
     """
@@ -339,7 +344,7 @@ def evaluate_model(self):
     # Évaluer contre les algorithmes classiques
     results = evaluator.evaluate_against_classical(
         algorithms=algos,
-        num_games_per_algo=5,
+        num_games_per_algo=2,
         verbose=True
     )
     
