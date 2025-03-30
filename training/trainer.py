@@ -17,6 +17,7 @@ from training.replay_buffer import CPUReplayBuffer
 from training.loss import train_step_pmap_impl
 from mcts.search import generate_parallel_games_pmap, create_optimized_game_generator
 from evaluation.evaluator import evaluate_model
+from utils.game_storage import convert_games_batch, GameLogger, LocalGameLogger
 
 
 class AbaloneTrainerSync:
@@ -33,7 +34,11 @@ class AbaloneTrainerSync:
                 momentum=0.9,
                 lr_schedule=None,
                 checkpoint_path="checkpoints/model",
-                log_dir=None):
+                log_dir=None,
+                gcs_bucket=None,
+                save_games=True,
+                games_buffer_size=64,
+                games_flush_interval=300):
         """
         Initialise le coordinateur d'entraînement avec approche synchronisée par étapes.
         Utilise SGD avec momentum comme dans l'implémentation originale d'AlphaZero.
@@ -51,7 +56,11 @@ class AbaloneTrainerSync:
             momentum: Momentum pour SGD (0.9 standard)
             lr_schedule: Liste de tuples (pourcentage_iteration, learning_rate) ou None
             checkpoint_path: Chemin pour sauvegarder les checkpoints
-            log_dir : Chemin pour log tensorboard
+            log_dir: Chemin pour log tensorboard
+            gcs_bucket: Nom du bucket GCS pour stocker les parties (si None, stockage local)
+            save_games: Si True, sauvegarde les parties jouées pour analyse future
+            games_buffer_size: Nombre de parties à accumuler avant de les sauvegarder
+            games_flush_interval: Intervalle en secondes pour sauvegarder les parties
         """
         try:
             # Essayer d'abord les TPU (Google Cloud)
@@ -79,6 +88,7 @@ class AbaloneTrainerSync:
         self.num_simulations = num_simulations
         self.recency_bias = recency_bias
         self.recency_temperature = recency_temperature
+        self.save_games = save_games
         
         # Configuration du learning rate et de l'optimiseur
         self.initial_lr = initial_lr
@@ -125,7 +135,7 @@ class AbaloneTrainerSync:
         self.total_positions = 0
         self.metrics_history = []
 
-        #Log tensorboard
+        # Log tensorboard
         if log_dir is None:
             current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             self.log_dir = os.path.join("logs", f"abalone_az_{current_time}")
@@ -134,6 +144,24 @@ class AbaloneTrainerSync:
             
         print(f"Logs TensorBoard : {self.log_dir}")
         self.writer = SummaryWriter(self.log_dir)
+        
+        # Initialiser le logger de parties
+        if self.save_games:
+            if gcs_bucket:
+                print(f"Stockage des parties dans GCS: {gcs_bucket}")
+                self.game_logger = GameLogger(
+                    bucket_name=gcs_bucket,
+                    buffer_size=games_buffer_size,
+                    flush_interval=games_flush_interval
+                )
+            else:
+                games_dir = os.path.join(self.log_dir, "games")
+                print(f"Stockage local des parties: {games_dir}")
+                self.game_logger = LocalGameLogger(
+                    output_dir=games_dir,
+                    buffer_size=games_buffer_size,
+                    flush_interval=games_flush_interval
+                )
         
         # Configurer les fonctions JAX
         self._setup_jax_functions()
@@ -182,24 +210,6 @@ class AbaloneTrainerSync:
         # Utiliser notre générateur optimisé au lieu de l'ancien
         self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
         
-        # Fonction d'entraînement parallèle (utilise tous les cœurs TPU)
-        self.train_step_pmap = jax.pmap(
-            partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
-            axis_name='batch',
-            devices=self.devices
-        )
-        
-        # Fonction de mise à jour des paramètres avec l'optimiseur
-        self.optimizer_update_pmap = jax.pmap(
-            lambda g, o, p: self.optimizer.update(g, o, p),
-            axis_name='batch',
-            devices=self.devices
-        )
-    def _setup_jax_functions(self):
-        """Configure les fonctions JAX pour la génération et l'entraînement."""
-
-        self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
-        
         # Ajouter le clippage des gradients à l'optimiseur
         self.optimizer = optax.chain(
             optax.clip_by_global_norm(1.0),  # Limiter la norme des gradients à 1.0
@@ -242,64 +252,71 @@ class AbaloneTrainerSync:
         # RNG principal
         rng_key = jax.random.PRNGKey(42)
         
-        for iteration in range(num_iterations):
-            self.iteration = iteration
+        try:
+            for iteration in range(num_iterations):
+                self.iteration = iteration
+                
+                # Mettre à jour le learning rate selon le schedule
+                iteration_percentage = iteration / num_iterations
+                self._update_learning_rate(iteration_percentage)
+                
+                print(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
+                
+                # 1. Phase de génération
+                rng_key, gen_key = jax.random.split(rng_key)
+                t_start = time.time()
+                
+                # Générer le nombre de parties demandé
+                games_data = self._generate_games(gen_key, games_per_iteration)
+                
+                t_gen = time.time() - t_start
+                print(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
+                
+                # 2. Mise à jour du buffer
+                t_start = time.time()
+                positions_added = self._update_buffer(games_data)
+                t_buffer = time.time() - t_start
+                
+                self.total_positions += positions_added
+                print(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
+                
+                # 3. Phase d'entraînement
+                rng_key, train_key = jax.random.split(rng_key)
+                t_start = time.time()
+                
+                metrics = self._train_network(train_key, training_steps_per_iteration)
+                
+                t_train = time.time() - t_start
+                print(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
+                
+                # Afficher les métriques
+                print(f"  Loss totale: {metrics['total_loss']:.4f}")
+                print(f"  Loss policy: {metrics['policy_loss']:.4f}, Loss value: {metrics['value_loss']:.4f}")
+                print(f"  Précision policy: {metrics['policy_accuracy']:.2%}")
+                
+                # 4. Évaluation périodique
+                if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
+                    self._evaluate()
+                
+                # 5. Sauvegarde périodique
+                if save_frequency > 0 and (iteration + 1) % save_frequency == 0:
+                    self._save_checkpoint()
             
-            # Mettre à jour le learning rate selon le schedule
-            iteration_percentage = iteration / num_iterations
-            self._update_learning_rate(iteration_percentage)
+            # Sauvegarde finale
+            self._save_checkpoint(is_final=True)
             
-            print(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
+        finally:
+            # Assurer que les ressources sont libérées
+            self.writer.close()
+            if self.save_games and hasattr(self, 'game_logger'):
+                self.game_logger.stop()
             
-            # 1. Phase de génération
-            rng_key, gen_key = jax.random.split(rng_key)
-            t_start = time.time()
-            
-            # Générer le nombre de parties demandé
-            games_data = self._generate_games(gen_key, games_per_iteration)
-            
-            t_gen = time.time() - t_start
-            print(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
-            
-            # 2. Mise à jour du buffer
-            t_start = time.time()
-            positions_added = self._update_buffer(games_data)
-            t_buffer = time.time() - t_start
-            
-            self.total_positions += positions_added
-            print(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
-            
-            # 3. Phase d'entraînement
-            rng_key, train_key = jax.random.split(rng_key)
-            t_start = time.time()
-            
-            metrics = self._train_network(train_key, training_steps_per_iteration)
-            
-            t_train = time.time() - t_start
-            print(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
-            
-            # Afficher les métriques
-            print(f"  Loss totale: {metrics['total_loss']:.4f}")
-            print(f"  Loss policy: {metrics['policy_loss']:.4f}, Loss value: {metrics['value_loss']:.4f}")
-            print(f"  Précision policy: {metrics['policy_accuracy']:.2%}")
-            
-            # 4. Évaluation périodique
-            if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
-                self._evaluate()
-            
-            # 5. Sauvegarde périodique
-            if save_frequency > 0 and (iteration + 1) % save_frequency == 0:
-                self._save_checkpoint()
-        
-        # Sauvegarde finale
-        self._save_checkpoint(is_final=True)
-        self.writer.close()
-        # Statistiques globales
-        total_time = time.time() - start_time_global
-        print(f"\n=== Entraînement terminé ===")
-        print(f"Parties générées: {self.total_games}")
-        print(f"Positions totales: {self.total_positions}")
-        print(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
+            # Statistiques globales
+            total_time = time.time() - start_time_global
+            print(f"\n=== Entraînement terminé ===")
+            print(f"Parties générées: {self.total_games}")
+            print(f"Positions totales: {self.total_positions}")
+            print(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
 
     
     def _generate_games(self, rng_key, num_games):
@@ -357,6 +374,24 @@ class AbaloneTrainerSync:
         print(f"  Préparation: {t_prep:.3f}s")
         print(f"  Génération: {t_gen:.3f}s ({total_games/t_gen:.1f} parties/s)")
         print(f"  Récupération: {t_fetch:.3f}s ({t_fetch/total_games*1000:.1f} ms/partie)")
+        
+        # Enregistrer les parties pour analyse si activé
+        if self.save_games and hasattr(self, 'game_logger'):
+            t_convert_start = time.time()
+            
+            # Convertir les parties dans un format adapté à l'analyse
+            converted_games = convert_games_batch(
+                games_data,
+                self.env,
+                base_game_id=f"iter{self.iteration}",
+                model_iteration=self.iteration
+            )
+            
+            # Envoyer les parties au logger qui les écrira de façon asynchrone
+            self.game_logger.log_games_batch(converted_games)
+            
+            t_convert = time.time() - t_convert_start
+            print(f"  Conversion pour stockage: {t_convert:.3f}s")
         
         return games_data
     
@@ -475,8 +510,6 @@ class AbaloneTrainerSync:
             opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
             
             # Exécuter l'étape d'entraînement parallèle
-            # Ajouter ce code juste avant l'appel à train_step_pmap
-           
             loss, grads = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
             
             # Mettre à jour les paramètres avec l'optimiseur
