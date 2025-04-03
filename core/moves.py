@@ -220,9 +220,9 @@ def move_group_inline(board: chex.Array,
     out_of_bounds = push_possibility & ~push_in_bounds
     opposing_mask = jnp.roll(jnp.arange(3) < n_opposing, shift=1)
     potential_exits = jnp.where(opposing_mask, out_of_bounds, False)
-    billes_sorties = jnp.where(has_opposing & success, jnp.sum(potential_exits), 0)
+    # billes_sorties = jnp.where(has_opposing & success, jnp.sum(potential_exits), 0)
+    billes_sorties = jnp.where(has_opposing & success, jnp.minimum(jnp.sum(potential_exits), 1), 0)
 
-    # Finalisation
     new_board = jnp.where(success, push_updated_board, board)
 
     return new_board, success, billes_sorties
