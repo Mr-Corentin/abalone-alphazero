@@ -206,10 +206,17 @@ class Evaluator:
         return results
 
 
-def evaluate_model(self):
+
+def evaluate_model(self, num_games_per_algo=5):
     """
     Evaluates the current model against classical algorithms.
     This function is intended to be used within AbaloneTrainerSync.
+    
+    Args:
+        num_games_per_algo: Number of games to play against each algorithm
+        
+    Returns:
+        Dictionary with evaluation results
     """
     evaluator = Evaluator(self.params, self.network, self.env)
     
@@ -219,7 +226,7 @@ def evaluate_model(self):
     
     results = evaluator.evaluate_against_classical(
         algorithms=algos,
-        num_games_per_algo=5,
+        num_games_per_algo=num_games_per_algo,
         verbose=True
     )
     

@@ -22,23 +22,25 @@ from utils.game_storage import convert_games_batch, GameLogger, LocalGameLogger
 
 class AbaloneTrainerSync:
     def __init__(self,
-                network,
-                env,
-                buffer_size=1_000_000,
-                batch_size=128,
-                value_weight=1.0,
-                num_simulations=500,
-                recency_bias=True,
-                recency_temperature=0.8,
-                initial_lr=0.2,
-                momentum=0.9,
-                lr_schedule=None,
-                checkpoint_path="checkpoints/model",
-                log_dir=None,
-                gcs_bucket=None,
-                save_games=True,
-                games_buffer_size=64,
-                games_flush_interval=300):
+            network,
+            env,
+            buffer_size=1_000_000,
+            batch_size=128,
+            value_weight=1.0,
+            num_simulations=500,
+            recency_bias=True,
+            recency_temperature=0.8,
+            initial_lr=0.2,
+            momentum=0.9,
+            lr_schedule=None,
+            checkpoint_path="checkpoints/model",
+            log_dir=None,
+            gcs_bucket=None,
+            save_games=True,
+            games_buffer_size=64,
+            games_flush_interval=300,
+            eval_games=5): 
+    
         """
         Initialize the training coordinator with step-synchronized approach.
         Uses SGD with momentum as in the original AlphaZero implementation.
@@ -89,6 +91,7 @@ class AbaloneTrainerSync:
         self.recency_bias = recency_bias
         self.recency_temperature = recency_temperature
         self.save_games = save_games
+        self.eval_games = eval_games
         
         # Learning rate and optimizer configuration
         self.initial_lr = initial_lr
@@ -177,6 +180,23 @@ class AbaloneTrainerSync:
         
         # Configure JAX functions
         self._setup_jax_functions()
+    def set_evaluation_options(self, enable=True, frequency=10, num_games=5):
+        """
+        Configure evaluation options
+        
+        Args:
+            enable: If True, evaluation will be performed during training
+            frequency: Evaluation frequency (iterations)
+            num_games: Number of games to play against each algorithm
+        """
+        self.eval_enabled = enable
+        self.eval_frequency = frequency
+        self.eval_games = num_games
+        
+        print(f"Evaluation {'enabled' if enable else 'disabled'}")
+        if enable:
+            print(f"  Frequency: Every {frequency} iterations")
+            print(f"  Games per algorithm: {num_games}")
         
     def _update_learning_rate(self, iteration_percentage):
         """
@@ -246,8 +266,8 @@ class AbaloneTrainerSync:
         )
       
     def train(self, num_iterations=100, games_per_iteration=64, 
-             training_steps_per_iteration=100, eval_frequency=10, 
-             save_frequency=10):
+            training_steps_per_iteration=100, eval_frequency=10, 
+            save_frequency=10):
         """
         Start training with step approach.
         
@@ -308,7 +328,11 @@ class AbaloneTrainerSync:
                 
                 # 4. Periodic evaluation
                 if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
+                    eval_start = time.time()
+                    print("\nRunning evaluation...")
                     self._evaluate()
+                    eval_time = time.time() - eval_start
+                    print(f"Evaluation completed in {eval_time:.2f}s")
                 
                 # 5. Periodic saving
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0:
@@ -329,7 +353,6 @@ class AbaloneTrainerSync:
             print(f"Games generated: {self.total_games}")
             print(f"Total positions: {self.total_positions}")
             print(f"Total duration: {total_time:.1f}s ({num_iterations/total_time:.2f} iterations/s)")
-
     
     def _generate_games(self, rng_key, num_games):
         """
