@@ -142,9 +142,21 @@ class AbaloneTrainerSync:
         else:
             self.log_dir = log_dir
             
-        print(f"TensorBoard logs: {self.log_dir}")
         self.writer = SummaryWriter(self.log_dir)
-        
+        is_gcs = self.log_dir.startswith('gs://')
+        if is_gcs:
+            bucket_name = self.log_dir.split('/', 3)[2]  # Extrait le nom du bucket
+            log_path = '/'.join(self.log_dir.split('/')[3:])  # Chemin dans le bucket
+            print(f"TensorBoard logs: {self.log_dir}")
+            print(f"Pour visualiser les logs:")
+            print(f"  1. tensorboard --logdir=gs://{bucket_name}/{log_path}")
+            print(f"  2. ou avec proxy: python -m tensorboard.main --logdir={self.log_dir} --port=6006")
+        else:
+            # Obtenir le chemin absolu pour les logs locaux
+            abs_log_dir = os.path.abspath(self.log_dir)
+            print(f"TensorBoard logs: {abs_log_dir}")
+            print(f"Pour visualiser les logs: tensorboard --logdir={abs_log_dir}")
+                
         # Initialize game logger
         if self.save_games:
             if gcs_bucket:
