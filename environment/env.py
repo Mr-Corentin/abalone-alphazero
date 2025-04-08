@@ -138,6 +138,7 @@ class AbaloneEnv:
             'group_sizes': moves_data['group_sizes']
         }
 
+    @partial(jax.jit, static_argnames=['self'])
     def get_legal_moves(self, state: AbaloneState) -> chex.Array:
         """Retourne un masque des mouvements légaux"""
         return get_legal_moves(state.board, self.moves_index, self.radius)
@@ -220,3 +221,109 @@ class AbaloneEnv:
         """
         return jnp.where(actual_player == 1, board, -board)
 
+
+class AbaloneStateNonCanonical(NamedTuple):
+    """État du jeu d'Abalone (version non-canonique)"""
+    board: chex.Array  # Le plateau où noir=1, blanc=-1 (fixe)
+    current_player: int  # Le joueur qui doit jouer (1=noir, -1=blanc)
+    black_out: int  # Nombre de billes noires sorties
+    white_out: int  # Nombre de billes blanches sorties
+    moves_count: int
+
+class AbaloneEnvNonCanonical(AbaloneEnv):
+    def reset(self, rng: chex.PRNGKey) -> AbaloneStateNonCanonical:
+        """Reset avec une clé RNG pour compatibilité batch."""
+        board = initialize_board()  # Noir=1, blanc=-1
+        return AbaloneStateNonCanonical(
+            board=board,
+            current_player=1,  # Noir commence
+            black_out=0,
+            white_out=0,
+            moves_count=0
+        )
+    @partial(jax.jit, static_argnames=['self'])
+    def step(self, state: AbaloneStateNonCanonical, move_idx: int) -> AbaloneStateNonCanonical:
+        """Effectue un mouvement sans changer la représentation du plateau"""
+        move_idx = move_idx.astype(jnp.int32).reshape(())
+        
+        canonical_board = self.get_canonical_state(state.board, state.current_player)
+        canonical_state = AbaloneState(
+            board=canonical_board,
+            actual_player=state.current_player,
+            black_out=state.black_out,
+            white_out=state.white_out,
+            moves_count=state.moves_count
+        )
+        
+        positions = jnp.array(self.moves_index['positions'])
+        direction = jnp.array(self.moves_index['directions'])[move_idx]
+        move_type = jnp.array(self.moves_index['move_types'])[move_idx]
+        group_size = jnp.array(self.moves_index['group_sizes'])[move_idx]
+        position = positions[move_idx]
+        
+        def single_marble_case(inputs):
+            state, position, direction = inputs
+            new_board, _ = move_single_marble(state.board, position[0], direction, self.radius)
+            return new_board, 0
+
+        def group_parallel_case(inputs):
+            state, position, direction, group_size = inputs
+            new_board, _ = move_group_parallel(state.board, position, direction, group_size, self.radius)
+            return new_board, 0
+
+        def group_inline_case(inputs):
+            state, position, direction, group_size = inputs
+            new_board, _, billes_sorties = move_group_inline(state.board, position, direction, group_size, self.radius)
+            return new_board, billes_sorties
+
+        # Utiliser switch pour le type de mouvement
+        new_board, billes_sorties = jax.lax.switch(
+            move_type,
+            [
+                lambda x: single_marble_case((canonical_state, position, direction)),
+                lambda x: group_parallel_case((canonical_state, position, direction, group_size)),
+                lambda x: group_inline_case((canonical_state, position, direction, group_size))
+            ],
+            0
+        )
+        
+        non_canonical_board = jnp.where(state.current_player == 1, 
+                                       new_board, 
+                                       -new_board)
+        
+        black_out = state.black_out + billes_sorties * (state.current_player == -1)
+        white_out = state.white_out + billes_sorties * (state.current_player == 1)
+        return AbaloneStateNonCanonical(
+            board=non_canonical_board,
+            current_player=-state.current_player,  # Changer de joueur
+            black_out=black_out,
+            white_out=white_out,
+            moves_count=state.moves_count + 1
+        )
+    
+    @partial(jax.jit, static_argnames=['self'])
+    def get_legal_moves(self, state: AbaloneStateNonCanonical) -> chex.Array:
+        """Retourne un masque des mouvements légaux"""
+        # Convertir en représentation canonique pour utiliser la fonction existante
+        canonical_board = self.get_canonical_state(state.board, state.current_player)
+        return get_legal_moves(canonical_board, self.moves_index, self.radius)
+    
+    def is_terminal(self, state: AbaloneStateNonCanonical) -> bool:
+        """Vérifie si l'état est terminal"""
+        return jnp.logical_or(
+            jnp.logical_or(
+                state.black_out >= 6,
+                state.white_out >= 6
+            ),
+            state.moves_count >= 300
+        )
+    
+    def get_winner(self, state: AbaloneStateNonCanonical) -> int:
+        """Détermine le gagnant"""
+        if state.white_out >= 6:
+            return 1  # Noirs gagnent
+        elif state.black_out >= 6:
+            return -1  # Blancs gagnent
+        elif state.moves_count >= 300:
+            return 0  # Match nul
+        return 0  # Partie en cours
