@@ -10,11 +10,13 @@ import argparse
 import time
 import jax
 import datetime
-
+import warnings
+warnings.filterwarnings("ignore")
 from model.neural_net import AbaloneModel
 from environment.env import AbaloneEnv
 from training.trainer import AbaloneTrainerSync
 from training.config import DEFAULT_CONFIG, CPU_CONFIG, get_config
+
 
 
 def parse_args():
