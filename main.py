@@ -46,6 +46,8 @@ def parse_args():
                        help='GCS bucket name to store games')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Checkpoint to load for resuming training')
+    parser.add_argument('--no-eval', action='store_true',
+                   help='Disable evaluation during training')
     
     # Model options
     parser.add_argument('--num-filters', type=int, default=None,
