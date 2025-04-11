@@ -935,18 +935,8 @@ class AbaloneTrainerSync:
             self.opt_state = jax.tree_map(lambda x: x[0], new_opt_state)
 
             # === AJOUTER CES LIGNES POUR LE DÉBOGAGE (Utilise metrics_sharded) ===
-            print(f"--- DEBUG START (Process {self.process_id}, Iteration {self.iteration}, Step {step}) ---")
-            try:
-                print(f"DEBUG: Type of metrics_sharded = {type(metrics_sharded)}")
-                print(f"DEBUG: Value of metrics_sharded = {metrics_sharded}")
-                # Essayons d'accéder à .items() dans un try/except pour voir si ça échoue déjà ici
-                print(f"DEBUG: Trying metrics_sharded.items()...")
-                items_test = metrics_sharded.items()
-                print(f"DEBUG: metrics_sharded.items() SUCCESS. Type: {type(items_test)}")
-            except Exception as e:
-                print(f"DEBUG: ERROR accessing metrics_sharded.items(): {e}")
-            print(f"--- DEBUG END ---")
-            # ==========================================
+            
+            #items_test = metrics_sharded.items()
 
             # Aggregate metrics (calculer la moyenne locale sur les devices)
             # Utilisation de la variable renommée 'metrics_sharded' ici aussi

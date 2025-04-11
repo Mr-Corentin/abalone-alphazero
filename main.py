@@ -5,6 +5,10 @@ Main script to launch AlphaZero training for Abalone
 import jax
 jax.distributed.initialize()  # Auto-détection de l'environnement TPU
 
+
+from jax.sharding import Mesh
+from jax.experimental import mesh_utils
+
 import os
 import sys
 import json
@@ -151,6 +155,23 @@ def display_config_summary(config):
 #     cpu_devices = jax.devices('cpu')
 #     print(f"\n=== Hardware: {len(cpu_devices)} CPU cores detected ===")
 
+# def display_hardware_info():
+#     """Display information about available hardware"""
+#     local_device_count = jax.local_device_count()
+#     global_device_count = jax.device_count()
+#     process_index = jax.process_index()
+#     process_count = jax.process_count()
+
+#     print(f"\n=== Hardware Configuration ===")
+#     print(f"Process {process_index+1}/{process_count} - Local devices: {local_device_count}")
+#     print(f"Total devices across all processes: {global_device_count}")
+    
+#     if jax.devices()[0].platform == 'tpu':
+#         print(f"Platform: TPU (v{jax.devices()[0].device_kind})")
+#     elif jax.devices()[0].platform == 'gpu':
+#         print(f"Platform: GPU ({jax.devices()[0].device_kind})")
+#     else:
+#         print(f"Platform: {jax.devices()[0].platform}")
 def display_hardware_info():
     """Display information about available hardware"""
     local_device_count = jax.local_device_count()
@@ -161,14 +182,20 @@ def display_hardware_info():
     print(f"\n=== Hardware Configuration ===")
     print(f"Process {process_index+1}/{process_count} - Local devices: {local_device_count}")
     print(f"Total devices across all processes: {global_device_count}")
-    
-    if jax.devices()[0].platform == 'tpu':
-        print(f"Platform: TPU (v{jax.devices()[0].device_kind})")
-    elif jax.devices()[0].platform == 'gpu':
-        print(f"Platform: GPU ({jax.devices()[0].device_kind})")
-    else:
-        print(f"Platform: {jax.devices()[0].platform}")
 
+    # Correction: Accéder au premier device local pour déterminer la plateforme
+    local_devices = jax.local_devices()
+    if not local_devices:
+         print("Platform: No local devices found!")
+         return # Quitter si aucun device local n'est trouvé
+
+    first_device = local_devices[0]
+    if first_device.platform == 'tpu':
+        print(f"Platform: TPU ({first_device.device_kind})") # Utiliser device_kind pour la version
+    elif first_device.platform == 'gpu':
+        print(f"Platform: GPU ({first_device.device_kind})") # Utiliser device_kind pour la version
+    else:
+        print(f"Platform: {first_device.platform}")
 
 # Dans la fonction create_trainer du main.py:
 
@@ -221,6 +248,22 @@ def main():
     
     display_hardware_info()
     display_config_summary(config)
+    if jax.process_count() > 1: # Créer le mesh seulement si on est en multi-processus
+        num_processes = jax.process_count()
+        num_local_devices = jax.local_device_count()
+
+        # Crée un tableau NumPy décrivant la disposition des devices
+        # La forme est (nombre_de_processus, nombre_de_devices_locaux)
+        device_mesh_shape = (num_processes, num_local_devices)
+        device_mesh_np = mesh_utils.create_device_mesh(device_mesh_shape)
+
+        # Crée l'objet Mesh avec des noms pour les axes
+        # 'i' représente l'axe des processus, 'd' l'axe des devices locaux
+        mesh = Mesh(device_mesh_np, axis_names=('i', 'd'))
+        print(f"Created JAX device mesh with shape {device_mesh_np.shape} and axis names {mesh.axis_names}")
+    else:
+        mesh = None # Pas besoin de mesh en mono-processus
+        print("Running in single-process mode, no mesh created.")
     
     if args.mode == 'train':
         trainer = create_trainer(config, args)
