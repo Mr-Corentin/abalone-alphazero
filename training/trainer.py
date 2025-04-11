@@ -9,6 +9,7 @@ import pickle
 from functools import partial
 from tensorboardX import SummaryWriter
 import datetime
+from jax.sharding import Mesh
 
 # Local imports
 from model.neural_net import AbaloneModel
@@ -203,7 +204,8 @@ class AbaloneTrainerSync:
             save_games=True,
             games_buffer_size=64,
             games_flush_interval=300,
-            eval_games=5): 
+            eval_games=5,
+            mesh=None): 
     
         """
         Initialize the training coordinator with step-synchronized approach.
@@ -239,6 +241,8 @@ class AbaloneTrainerSync:
         self.process_id = jax.process_index()
         self.num_processes = jax.process_count()
         self.is_main_process = self.process_id == 0
+
+        self.mesh = mesh
         
         # Identifier le type d'appareil
         if self.devices[0].platform == 'tpu':
@@ -875,7 +879,8 @@ class AbaloneTrainerSync:
     #     avg_metrics['total_games'] = self.total_games
     #     self.metrics_history.append(avg_metrics)
         
-    #     return avg_metrics
+    #     return avg_metrics# In training/trainer.py
+
     def _train_network(self, rng_key, num_steps):
         """
         Train the network on batches from the buffer.
@@ -885,13 +890,13 @@ class AbaloneTrainerSync:
             num_steps: Number of training steps
 
         Returns:
-            Average metrics over all steps
+            Average metrics over all steps (globally averaged if multi-process)
         """
-        # Cumulative metrics
+        # Cumulative metrics for this process over the steps
         cumulative_metrics = None
 
         for step in range(num_steps):
-            # Sample a large batch for parallelization
+            # Sample a large batch for parallelization across local devices
             total_batch_size = self.batch_size * self.num_devices
 
             # Use recency-biased sampling if enabled
@@ -904,79 +909,94 @@ class AbaloneTrainerSync:
             else:
                 batch_data = self.buffer.sample(total_batch_size, rng_key)
 
+            # Update RNG key for the next sampling step
             rng_key = jax.random.fold_in(rng_key, step)
 
-            # Convert to JAX arrays
+            # Convert sampled data to JAX arrays
             boards = jnp.array(batch_data['board'])
             marbles = jnp.array(batch_data['marbles_out'])
             policies = jnp.array(batch_data['policy'])
             values = jnp.array(batch_data['outcome'])
 
-            # Split data into chunks for each local device
+            # Reshape data into chunks for each local device
+            # Shape becomes: (num_local_devices, batch_size_per_device, ...)
             boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
             marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
             policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
 
-            # Replicate parameters for pmap sur les dispositifs locaux
+            # Replicate parameters and optimizer state across local devices for pmap
             params_sharded = jax.device_put_replicated(self.params, self.devices)
             opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
 
-            # Execute parallel training step (renvoie dict de métriques par device et grads MOYENNÉS)
-            # Utilisation du nom 'metrics_sharded' pour la clarté
+            # Execute the parallel training step on local devices using pmap
+            # train_step_pmap returns metrics per device and gradients averaged across devices
             metrics_sharded, grads_averaged = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
 
-            # Update parameters with optimizer (utilise les gradients déjà moyennés)
+            # Update parameters using the averaged gradients and the optimizer
+            # optimizer_update_pmap applies the update identically on each device
             updates, new_opt_state = self.optimizer_update_pmap(grads_averaged, opt_state_sharded, params_sharded)
             new_params = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
 
-            # Retrieve results from first device
+            # Retrieve updated parameters and optimizer state from the first local device
+            # Since updates were identical, all devices hold the same new state.
             self.params = jax.tree_map(lambda x: x[0], new_params)
             self.opt_state = jax.tree_map(lambda x: x[0], new_opt_state)
 
-            # === AJOUTER CES LIGNES POUR LE DÉBOGAGE (Utilise metrics_sharded) ===
-            
-            #items_test = metrics_sharded.items()
-
-            # Aggregate metrics (calculer la moyenne locale sur les devices)
-            # Utilisation de la variable renommée 'metrics_sharded' ici aussi
+            # Aggregate metrics locally across devices for this step
+            # Calculate the mean of metrics returned by each device
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
 
-            # Cumuler les métriques locales pour calculer la moyenne sur les steps
+            # Cumulate metrics across steps for this process
             if cumulative_metrics is None:
                 cumulative_metrics = step_metrics
             else:
                 cumulative_metrics = {k: cumulative_metrics[k] + step_metrics[k] for k in step_metrics}
 
-        # Calculate average metrics over steps for this process
+        # Calculate average metrics over all steps for this process
         avg_metrics = {k: v / num_steps for k, v in cumulative_metrics.items()}
 
-        # Agréger les métriques moyennes entre tous les processus
-        if self.num_processes > 1:
-            metrics_keys = list(avg_metrics.keys())
-            metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
-            global_metrics_values = jax.lax.pmean(metrics_values, axis_name='i')
+        # Aggregate average metrics across all processes using the mesh if applicable
+        if self.num_processes > 1 and self.mesh is not None:
+            # Explicitly use the mesh context for the cross-process operation
+            with self.mesh:
+                metrics_keys = list(avg_metrics.keys())
+                # Ensure values are JAX arrays before pmean
+                metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
 
-            
-            avg_metrics = {k: float(v) for k, v in zip(metrics_keys, global_metrics_values)}
+                # pmean averages across the 'i' axis (processes) defined in the mesh
+                global_metrics_values = jax.lax.pmean(metrics_values, axis_name='i')
 
-        # Seul le processus principal enregistre dans TensorBoard
+                # Update avg_metrics with globally averaged values
+                avg_metrics = {k: float(v) for k, v in zip(metrics_keys, global_metrics_values)}
+        elif self.num_processes > 1 and self.mesh is None:
+            # Issue a warning if running distributed but mesh couldn't be created/passed
+            if self.is_main_process: # Avoid printing this from every process
+                print("WARNING: Running in multi-process mode but mesh is None. Cannot globally average metrics.")
+
+        # --- Logging ---
+        # Only the main process (process 0) writes to TensorBoard to avoid conflicts
         if self.is_main_process:
             for metric_name, metric_value in avg_metrics.items():
                 self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
+            # Log additional useful information
             self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
             self.writer.add_scalar("stats/buffer_size", self.buffer.size, self.iteration)
-            self.writer.add_scalar("stats/total_games_approx", self.total_games, self.iteration)
+            # Note: self.total_games tracks games generated by this process;
+            # total global games would be approx self.total_games * self.num_processes
+            self.writer.add_scalar("stats/total_games_local", self.total_games, self.iteration)
 
-        # Record metrics
-        avg_metrics['iteration'] = self.iteration
-        avg_metrics['learning_rate'] = self.current_lr
-        avg_metrics['buffer_size'] = self.buffer.size
-        avg_metrics['total_games'] = self.total_games # Note: total local
-        self.metrics_history.append(avg_metrics)
+        # --- Record metrics history (optional, could be process-specific or global) ---
+        # Here we record the (potentially globally averaged) metrics
+        local_metrics_record = avg_metrics.copy() # Make a copy before adding process-specific info
+        local_metrics_record['iteration'] = self.iteration
+        local_metrics_record['learning_rate'] = self.current_lr
+        local_metrics_record['buffer_size'] = self.buffer.size
+        local_metrics_record['total_games_local'] = self.total_games # Log local game count for this process
+        self.metrics_history.append(local_metrics_record)
 
+        # Return the final average metrics (globally averaged if multi-process)
         return avg_metrics
-    
     def _save_checkpoint(self, is_final=False):
         """
         Save a model checkpoint

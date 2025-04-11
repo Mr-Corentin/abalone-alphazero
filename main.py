@@ -197,22 +197,21 @@ def display_hardware_info():
     else:
         print(f"Platform: {first_device.platform}")
 
-# Dans la fonction create_trainer du main.py:
 
-def create_trainer(config, args):
+def create_trainer(config, args, mesh): # <-- Add mesh here
     """Create and configure the trainer"""
     # Create the model
     network = AbaloneModel(
         num_filters=config['model']['num_filters'],
         num_blocks=config['model']['num_blocks']
     )
-    
+
     # Create the environment
     env = AbaloneEnv()
-    
+
     # Get evaluation parameters
     eval_games = config.get('evaluation', {}).get('num_games', 2)
-    
+
     # Create the trainer
     trainer = AbaloneTrainerSync(
         network=network,
@@ -230,43 +229,53 @@ def create_trainer(config, args):
         log_dir=args.log_dir,
         gcs_bucket=args.gcs_bucket,
         save_games=True,
-        eval_games=eval_games
+        eval_games=eval_games,
+        mesh=mesh
     )
-    
+
     # Load checkpoint if specified
     if args.checkpoint:
         trainer.load_checkpoint(args.checkpoint)
-    
-    return trainer
 
+    return trainer
 
 
 def main():
     """Main entry point"""
     args = parse_args()
     config = get_merged_config(args)
-    
+
     display_hardware_info()
     display_config_summary(config)
-    if jax.process_count() > 1: # Créer le mesh seulement si on est en multi-processus
-        num_processes = jax.process_count()
-        num_local_devices = jax.local_device_count()
 
-        # Crée un tableau NumPy décrivant la disposition des devices
-        # La forme est (nombre_de_processus, nombre_de_devices_locaux)
-        device_mesh_shape = (num_processes, num_local_devices)
-        device_mesh_np = mesh_utils.create_device_mesh(device_mesh_shape)
+    # === Mesh Creation (as added before) ===
+    mesh = None # Initialize mesh to None
+    if jax.process_count() > 1:
+        try:
+            from jax.sharding import Mesh # Ensure Mesh is imported
+            from jax.experimental import mesh_utils # Ensure mesh_utils is imported
 
-        # Crée l'objet Mesh avec des noms pour les axes
-        # 'i' représente l'axe des processus, 'd' l'axe des devices locaux
-        mesh = Mesh(device_mesh_np, axis_names=('i', 'd'))
-        print(f"Created JAX device mesh with shape {device_mesh_np.shape} and axis names {mesh.axis_names}")
+            num_processes = jax.process_count()
+            num_local_devices = jax.local_device_count()
+            device_mesh_shape = (num_processes, num_local_devices)
+            device_mesh_np = mesh_utils.create_device_mesh(device_mesh_shape)
+            mesh = Mesh(device_mesh_np, axis_names=('i', 'd'))
+            print(f"Created JAX device mesh with shape {device_mesh_np.shape} and axis names {mesh.axis_names}")
+        except ImportError:
+            print("WARNING: jax.sharding or jax.experimental.mesh_utils not found. Cannot create mesh.")
+            mesh = None
+        except Exception as e:
+            print(f"ERROR creating JAX mesh: {e}")
+            mesh = None
+
     else:
-        mesh = None # Pas besoin de mesh en mono-processus
+        mesh = None
         print("Running in single-process mode, no mesh created.")
-    
+
+
     if args.mode == 'train':
-        trainer = create_trainer(config, args)
+        # MODIFICATION 3: Pass 'mesh' when calling create_trainer
+        trainer = create_trainer(config, args, mesh) # <-- Pass mesh here
         
         # Launch training with evaluation configuration
         print("\n=== Starting training ===")
