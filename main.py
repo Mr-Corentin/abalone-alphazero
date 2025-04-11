@@ -52,6 +52,10 @@ def parse_args():
                        help='Checkpoint to load for resuming training')
     parser.add_argument('--no-eval', action='store_true',
                    help='Disable evaluation during training')
+    parser.add_argument('--use-gcs-buffer', action='store_true',
+                   help='Use a global buffer on Google Cloud Storage')
+    parser.add_argument('--gcs-buffer-dir', type=str, default='buffer',
+                    help='Directory in the GCS bucket for the buffer')
     
     # Model options
     parser.add_argument('--num-filters', type=int, default=None,
@@ -115,6 +119,12 @@ def get_merged_config(args):
             if 'log_dir' not in config:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
                 args.log_dir = f"{bucket_path}/logs/abalone_az_{timestamp}"
+    if args.use_gcs_buffer:
+        config['buffer']['use_gcs'] = True
+        
+    if args.gcs_buffer_dir:
+        config['buffer']['gcs_dir'] = args.gcs_buffer_dir
+
     
     return config
 
@@ -130,45 +140,6 @@ def display_config_summary(config):
     print(f"Checkpoints: {config['checkpoint']['path']}")
 
 
-# def display_hardware_info():
-#     """Display information about available hardware"""
-#     try:
-#         # Try TPU first
-#         tpu_devices = jax.devices('tpu')
-#         print(f"\n=== Hardware: {len(tpu_devices)} TPU cores detected ===")
-#         return
-#     except RuntimeError:
-#         pass
-    
-#     try:
-#         # Then GPU
-#         gpu_devices = jax.devices('gpu')
-#         print(f"\n=== Hardware: {len(gpu_devices)} GPUs detected ===")
-#         return
-#     except RuntimeError:
-#         pass
-    
-#     # Finally CPU
-#     cpu_devices = jax.devices('cpu')
-#     print(f"\n=== Hardware: {len(cpu_devices)} CPU cores detected ===")
-
-# def display_hardware_info():
-#     """Display information about available hardware"""
-#     local_device_count = jax.local_device_count()
-#     global_device_count = jax.device_count()
-#     process_index = jax.process_index()
-#     process_count = jax.process_count()
-
-#     print(f"\n=== Hardware Configuration ===")
-#     print(f"Process {process_index+1}/{process_count} - Local devices: {local_device_count}")
-#     print(f"Total devices across all processes: {global_device_count}")
-    
-#     if jax.devices()[0].platform == 'tpu':
-#         print(f"Platform: TPU (v{jax.devices()[0].device_kind})")
-#     elif jax.devices()[0].platform == 'gpu':
-#         print(f"Platform: GPU ({jax.devices()[0].device_kind})")
-#     else:
-#         print(f"Platform: {jax.devices()[0].platform}")
 def display_hardware_info():
     """Display information about available hardware"""
     local_device_count = jax.local_device_count()
@@ -226,7 +197,9 @@ def create_trainer(config, args):
         log_dir=args.log_dir,
         gcs_bucket=args.gcs_bucket,
         save_games=True,
-        eval_games=eval_games    )
+        eval_games=eval_games,
+        use_gcs_buffer=args.use_gcs_buffer,
+        gcs_buffer_dir=args.gcs_buffer_dir)
 
     # Load checkpoint if specified
     if args.checkpoint:

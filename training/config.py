@@ -13,11 +13,6 @@ DEFAULT_CONFIG = {
         "max_num_considered_actions": 16,
     },
     
-    "buffer": {
-        "size": 1_000_000,
-        "recency_bias": True,
-        "recency_temperature": 0.8,
-    },
     
     "training": {
         "batch_size": 128,
@@ -38,8 +33,15 @@ DEFAULT_CONFIG = {
             (0.85, 0.0002)   
         ]
     },
+
+    "buffer": {
+        "size": 1_000_000,
+        "recency_bias": True,
+        "recency_temperature": 0.8,
+        "use_gcs": False,
+        "gcs_dir": "buffer"
+    },
     
-    # Paramètres de checkpoint
     "checkpoint": {
         "path": "checkpoints/model",
         "save_frequency": 10,

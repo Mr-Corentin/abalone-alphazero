@@ -40,6 +40,8 @@ class AbaloneTrainerSync:
             save_games=True,
             games_buffer_size=64,
             games_flush_interval=300,
+            use_gcs_buffer=False, 
+            gcs_buffer_dir='buffer',
             eval_games=5): 
     
         """
@@ -126,6 +128,19 @@ class AbaloneTrainerSync:
             print(f"Using recency bias with temperature {self.recency_temperature}")
         else:
             print("Using uniform sampling")
+        if use_gcs_buffer and gcs_bucket:
+            print(f"Utilisation d'un buffer global sur GCS: {gcs_bucket}/{gcs_buffer_dir}")
+            from training.replay_buffer import GCSReplayBuffer
+            self.buffer = GCSReplayBuffer(
+                bucket_name=gcs_bucket,
+                buffer_dir=gcs_buffer_dir,
+                max_local_size=buffer_size // 10,  # Cache local plus petit
+                recency_enabled=recency_bias,
+                recency_temperature=recency_temperature
+            )
+        else:
+            print(f"Utilisation d'un buffer local de taille {buffer_size}")
+            self.buffer = CPUReplayBuffer(buffer_size)
         
         # Initialize SGD optimizer
         self.optimizer = optax.sgd(learning_rate=self.initial_lr, momentum=self.momentum)
@@ -137,8 +152,6 @@ class AbaloneTrainerSync:
         self.params = network.init(rng, sample_board, sample_marbles)
         self.opt_state = self.optimizer.init(self.params)
         
-        # Create replay buffer
-        self.buffer = CPUReplayBuffer(buffer_size)
         
         # Statistics
         self.iteration = 0
@@ -277,91 +290,107 @@ class AbaloneTrainerSync:
             training_steps_per_iteration=100, eval_frequency=10, 
             save_frequency=10):
         """
-        Start training with step approach.
+        Démarre l'entraînement avec approche synchronisée par étapes.
+        Compatible avec le buffer GCS.
         
         Args:
-            num_iterations: Total number of iterations
-            games_per_iteration: Number of games to generate per iteration
-            training_steps_per_iteration: Number of training steps per iteration
-            eval_frequency: Evaluation frequency (in iterations)
-            save_frequency: Save frequency (in iterations)
+            num_iterations: Nombre total d'itérations
+            games_per_iteration: Nombre de parties à générer par itération
+            training_steps_per_iteration: Nombre d'étapes d'entraînement par itération
+            eval_frequency: Fréquence d'évaluation (en itérations)
+            save_frequency: Fréquence de sauvegarde (en itérations)
         """
-        # Initialize global timer
+        # Initialiser le timer global
         start_time_global = time.time()
         
-        # Main RNG
+        # RNG principal
         rng_key = jax.random.PRNGKey(42)
         
         try:
             for iteration in range(num_iterations):
                 self.iteration = iteration
                 
-                # Update learning rate according to schedule
+                # Mettre à jour le taux d'apprentissage selon le planning
                 iteration_percentage = iteration / num_iterations
                 self._update_learning_rate(iteration_percentage)
                 
-                print(f"\n=== Iteration {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
+                print(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
                 
-                # 1. Generation phase
+                # 1. Phase de génération
                 rng_key, gen_key = jax.random.split(rng_key)
                 t_start = time.time()
                 
-                # Generate requested number of games
+                # Générer le nombre de parties demandé
                 games_data = self._generate_games(gen_key, games_per_iteration)
                 
                 t_gen = time.time() - t_start
-                print(f"Generation: {games_per_iteration} games in {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} games/s)")
+                print(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
                 
-                # 2. Buffer update
+                # 2. Mise à jour du buffer
                 t_start = time.time()
                 positions_added = self._update_buffer(games_data)
                 t_buffer = time.time() - t_start
                 
                 self.total_positions += positions_added
-                print(f"Buffer updated: +{positions_added} positions (total: {self.buffer.size})")
                 
-                # 3. Training phase
+                # Afficher les infos du buffer appropriées
+                if hasattr(self.buffer, 'gcs_index'):
+                    # Buffer GCS
+                    print(f"Buffer mis à jour: +{positions_added} positions")
+                    print(f"  - Cache local: {self.buffer.local_size} positions")
+                    print(f"  - Total estimé: {self.buffer.total_size} positions")
+                else:
+                    # Buffer local
+                    print(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
+                
+                # 3. Phase d'entraînement
                 rng_key, train_key = jax.random.split(rng_key)
                 t_start = time.time()
                 
                 metrics = self._train_network(train_key, training_steps_per_iteration)
                 
                 t_train = time.time() - t_start
-                print(f"Training: {training_steps_per_iteration} steps in {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} steps/s)")
+                print(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
                 
-                # Display metrics
-                print(f"  Total loss: {metrics['total_loss']:.4f}")
-                print(f"  Policy loss: {metrics['policy_loss']:.4f}, Value loss: {metrics['value_loss']:.4f}")
-                print(f"  Policy accuracy: {metrics['policy_accuracy']:.2%}")
+                # Afficher les métriques
+                print(f"  Perte totale: {metrics['total_loss']:.4f}")
+                print(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
+                print(f"  Précision politique: {metrics['policy_accuracy']:.2%}")
                 
-                # 4. Periodic evaluation
+                # 4. Évaluation périodique
                 if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
                     eval_start = time.time()
-                    print("\nRunning evaluation...")
+                    print("\nExécution de l'évaluation...")
                     self._evaluate()
                     eval_time = time.time() - eval_start
-                    print(f"Evaluation completed in {eval_time:.2f}s")
+                    print(f"Évaluation terminée en {eval_time:.2f}s")
                 
-                # 5. Periodic saving
+                # 5. Sauvegarde périodique
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0:
                     self._save_checkpoint()
             
-            # Final save
+            # Sauvegarde finale
             self._save_checkpoint(is_final=True)
             
         finally:
-            # Ensure resources are released
+            # Assurer que les ressources sont libérées
             self.writer.close()
+            
+            # Fermer proprement le GameLogger si présent
             if self.save_games and hasattr(self, 'game_logger'):
                 self.game_logger.stop()
+                
+            # Fermer proprement le buffer GCS si présent
+            if hasattr(self.buffer, 'close'):
+                print("Fermeture du buffer GCS...")
+                self.buffer.close()
             
-            # Global statistics
+            # Statistiques globales
             total_time = time.time() - start_time_global
-            print(f"\n=== Training completed ===")
-            print(f"Games generated: {self.total_games}")
-            print(f"Total positions: {self.total_positions}")
-            print(f"Total duration: {total_time:.1f}s ({num_iterations/total_time:.2f} iterations/s)")
-
+            print(f"\n=== Entraînement terminé ===")
+            print(f"Parties générées: {self.total_games}")
+            print(f"Positions totales: {self.total_positions}")
+            print(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
 
     def _generate_games(self, rng_key, num_games):
         """
@@ -453,31 +482,43 @@ class AbaloneTrainerSync:
         return games_data
     
     def _update_buffer(self, games_data):
-        """Update buffer with newly generated games"""
+        """
+        Met à jour le buffer d'expérience avec les nouvelles parties générées.
+        Fonctionne avec les deux types de buffer (local et GCS).
+        
+        Args:
+            games_data: Données des parties générées
+            
+        Returns:
+            int: Nombre de positions ajoutées au buffer
+        """
         positions_added = 0
         
-        # For each device
+        # Identifier si nous utilisons un buffer GCS
+        using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
+        
+        # Pour chaque dispositif
         for device_idx in range(self.num_devices):
             device_data = jax.tree_util.tree_map(
                 lambda x: x[device_idx],
                 games_data
             )
             
-            # For each game generated on this device
+            # Pour chaque partie générée sur ce dispositif
             games_per_device = len(device_data['moves_per_game'])
             for game_idx in range(games_per_device):
                 game_length = int(device_data['moves_per_game'][game_idx])
                 if game_length == 0:
                     continue
                     
-                # Extract data for this game
+                # Extraire les données pour cette partie
                 boards_2d = device_data['boards_2d'][game_idx][:game_length+1]
                 policies = device_data['policies'][game_idx][:game_length+1]
                 actual_players = device_data['actual_players'][game_idx][:game_length+1]
                 black_outs = device_data['black_outs'][game_idx][:game_length+1]
                 white_outs = device_data['white_outs'][game_idx][:game_length+1]
                 
-                # Determine final result
+                # Déterminer le résultat final
                 final_black_out = device_data['final_black_out'][game_idx]
                 final_white_out = device_data['final_white_out'][game_idx]
                 
@@ -487,10 +528,18 @@ class AbaloneTrainerSync:
                     outcome = 1   # Black wins
                 else:
                     outcome = 0   # Draw
+                
+                # Générer un identifiant unique pour cette partie
+                if using_gcs_buffer:
+                    # Pour GCS, commencer une nouvelle partie
+                    game_id = self.buffer.start_new_game()
+                else:
+                    # Pour le buffer local, utiliser un nombre séquentiel
+                    game_id = self.total_games + game_idx
                     
-                # Add each position to buffer
+                # Ajouter chaque position au buffer
                 for move_idx in range(game_length):
-                    # Calculate marbles out for current player
+                    # Calculer les billes sorties pour le joueur courant
                     player = actual_players[move_idx]
                     our_marbles = np.where(player == 1,
                                         black_outs[move_idx],
@@ -500,122 +549,171 @@ class AbaloneTrainerSync:
                                         black_outs[move_idx])
                     marbles_out = np.array([our_marbles, opp_marbles], dtype=np.int8)
                     
-                    # Adjust for current player's perspective
+                    # Ajuster pour la perspective du joueur courant
                     outcome_for_player = outcome * player
                     
-                    # Store in buffer with metadata
+                    # Stocker dans le buffer avec métadonnées
                     self.buffer.add(
                         boards_2d[move_idx],
                         marbles_out,
                         policies[move_idx],
                         outcome_for_player,
                         player,
-                        game_id=self.total_games + game_idx,
+                        game_id=game_id,
                         move_num=move_idx,
                         iteration=self.iteration,
-                        model_version=self.total_games  # Use total_games as proxy for version
+                        model_version=self.total_games  # Utiliser total_games comme proxy pour la version
                     )
                     
                     positions_added += 1
-                    
+        
         return positions_added
     
-
     def _train_network(self, rng_key, num_steps):
         """
-        Train the network on batches from the buffer.
-
+        Entraîne le réseau sur des batchs depuis le buffer.
+        Compatible avec les deux types de buffer (local et GCS).
+        
         Args:
-            rng_key: JAX random key
-            num_steps: Number of training steps
-
+            rng_key: Clé aléatoire JAX
+            num_steps: Nombre d'étapes d'entraînement
+            
         Returns:
-            Average metrics over all steps (globally averaged if multi-process)
+            Métriques moyennes sur toutes les étapes (moyenne globale si multi-processus)
         """
-        # Cumulative metrics for this process over the steps
+        # Vérifier si le buffer est vide
+        if (hasattr(self.buffer, 'local_size') and self.buffer.local_size == 0) or \
+        (hasattr(self.buffer, 'size') and self.buffer.size == 0):
+            print("Buffer vide, impossible d'entraîner le réseau.")
+            # Retourner des métriques nulles
+            return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
+                    'policy_accuracy': 0.0, 'value_sign_match': 0.0}
+                    
+        # Identifier si nous utilisons un buffer GCS
+        using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
+        
+        # Cumul des métriques pour ce processus sur les étapes
         cumulative_metrics = None
-
+        
         for step in range(num_steps):
-            # Sample a large batch for parallelization across local devices
+            # Échantillonner un grand batch pour parallélisation sur les dispositifs locaux
             total_batch_size = self.batch_size * self.num_devices
-
-            # Use recency-biased sampling if enabled
-            if self.recency_bias:
-                batch_data = self.buffer.sample_with_recency_bias(
-                    total_batch_size,
-                    temperature=self.recency_temperature,
-                    rng_key=rng_key
-                )
+            
+            # Utiliser le sampling approprié selon le type de buffer
+            if using_gcs_buffer:
+                # Pour GCS buffer, le biais de récence est déjà intégré à la méthode sample
+                try:
+                    batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
+                except ValueError as e:
+                    print(f"Erreur lors de l'échantillonnage: {e}")
+                    # Si GCS pas encore disponible, attendre et sauter cette étape
+                    if step == 0:
+                        print("Attente de données sur GCS pour l'entraînement...")
+                        time.sleep(10)
+                        continue
+                    else:
+                        # Arrêter l'entraînement si on a déjà fait quelques étapes
+                        break
             else:
-                batch_data = self.buffer.sample(total_batch_size, rng_key)
-
-            # Update RNG key for the next sampling step
+                # Pour le buffer local classique
+                if self.recency_bias:
+                    batch_data = self.buffer.sample_with_recency_bias(
+                        total_batch_size,
+                        temperature=self.recency_temperature,
+                        rng_key=rng_key
+                    )
+                else:
+                    batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
+            
+            # Mettre à jour la clé RNG pour le prochain échantillonnage
             rng_key = jax.random.fold_in(rng_key, step)
-
-            # Convert sampled data to JAX arrays
+            
+            # Convertir les données échantillonnées en tableaux JAX
             boards = jnp.array(batch_data['board'])
             marbles = jnp.array(batch_data['marbles_out'])
             policies = jnp.array(batch_data['policy'])
             values = jnp.array(batch_data['outcome'])
-
-            # Reshape data into chunks for each local device
-            # Shape becomes: (num_local_devices, batch_size_per_device, ...)
+            
+            # Reshape des données en chunks pour chaque dispositif local
+            # Shape devient: (num_local_devices, batch_size_per_device, ...)
             boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
             marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
             policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
-
-            # Replicate parameters and optimizer state across local devices for pmap
+            
+            # Répliquer les paramètres et l'état de l'optimiseur sur les dispositifs locaux pour pmap
             params_sharded = jax.device_put_replicated(self.params, self.devices)
             opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
-
-            # Execute the parallel training step on local devices using pmap
-            # train_step_pmap returns metrics per device and gradients averaged across devices
-            metrics_sharded, grads_averaged = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
-
-            # Update parameters using the averaged gradients and the optimizer
-            # optimizer_update_pmap applies the update identically on each device
-            updates, new_opt_state = self.optimizer_update_pmap(grads_averaged, opt_state_sharded, params_sharded)
+            
+            # Exécuter l'étape d'entraînement parallèle sur les dispositifs locaux
+            metrics_sharded, grads_averaged = self.train_step_pmap(
+                params_sharded, (boards, marbles), policies, values
+            )
+            
+            # Mettre à jour les paramètres avec les gradients moyennés
+            updates, new_opt_state = self.optimizer_update_pmap(
+                grads_averaged, opt_state_sharded, params_sharded
+            )
             new_params = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
-
-            # Retrieve updated parameters and optimizer state from the first local device
-            # Since updates were identical, all devices hold the same new state.
+            
+            # Récupérer les paramètres et l'état de l'optimiseur depuis le premier dispositif
             self.params = jax.tree_map(lambda x: x[0], new_params)
             self.opt_state = jax.tree_map(lambda x: x[0], new_opt_state)
-
-            # Aggregate metrics locally across devices for this step
-            # Calculate the mean of metrics returned by each device
+            
+            # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
-
-            # Cumulate metrics across steps for this process
+            
+            # Cumuler les métriques sur les étapes pour ce processus
             if cumulative_metrics is None:
                 cumulative_metrics = step_metrics
             else:
                 cumulative_metrics = {k: cumulative_metrics[k] + step_metrics[k] for k in step_metrics}
-
-        # Calculate average metrics over all steps for this process
-        avg_metrics = {k: v / num_steps for k, v in cumulative_metrics.items()}
-
+        
+        # Si aucune étape d'entraînement n'a été effectuée
+        if cumulative_metrics is None:
+            return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
+                    'policy_accuracy': 0.0, 'value_sign_match': 0.0}
+                    
+        # Calculer les métriques moyennes sur toutes les étapes pour ce processus
+        steps_completed = min(num_steps, len(cumulative_metrics))
+        avg_metrics = {k: v / steps_completed for k, v in cumulative_metrics.items()}
+        
+        # Enregistrer les métriques si c'est le processus principal
         if self.is_main_process:
             for metric_name, metric_value in avg_metrics.items():
                 self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
-            # Log additional useful information
+            
+            # Enregistrer des informations supplémentaires utiles
             self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
-            self.writer.add_scalar("stats/buffer_size", self.buffer.size, self.iteration)
-            # Note: self.total_games tracks games generated by this process;
-            # total global games would be approx self.total_games * self.num_processes
+            
+            # Choisir la bonne métrique de taille du buffer
+            if using_gcs_buffer:
+                buffer_size = self.buffer.total_size
+                self.writer.add_scalar("stats/buffer_size_total", buffer_size, self.iteration)
+                self.writer.add_scalar("stats/buffer_size_local", self.buffer.local_size, self.iteration)
+            else:
+                buffer_size = self.buffer.size
+                self.writer.add_scalar("stats/buffer_size", buffer_size, self.iteration)
+                
             self.writer.add_scalar("stats/total_games_local", self.total_games, self.iteration)
-
-  
-        local_metrics_record = avg_metrics.copy() # Make a copy before adding process-specific info
+        
+        # Enregistrer l'historique des métriques
+        local_metrics_record = avg_metrics.copy()
         local_metrics_record['iteration'] = self.iteration
         local_metrics_record['learning_rate'] = self.current_lr
-        local_metrics_record['buffer_size'] = self.buffer.size
-        local_metrics_record['total_games_local'] = self.total_games # Log local game count for this process
+        
+        # Enregistrer la bonne métrique de taille du buffer
+        if using_gcs_buffer:
+            local_metrics_record['buffer_size_total'] = self.buffer.total_size
+            local_metrics_record['buffer_size_local'] = self.buffer.local_size
+        else:
+            local_metrics_record['buffer_size'] = self.buffer.size
+            
+        local_metrics_record['total_games_local'] = self.total_games
         self.metrics_history.append(local_metrics_record)
-
-        # Return the final average metrics (globally averaged if multi-process)
+        
         return avg_metrics
+    
     def _save_checkpoint(self, is_final=False):
         """
         Save a model checkpoint
@@ -706,3 +804,76 @@ class AbaloneTrainerSync:
         
         print(f"Checkpoint loaded: {checkpoint_path}")
         print(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
+
+    def initialize_existing_buffer(self, gcs_bucket, gcs_buffer_dir='buffer', 
+                            recency_bias=None, recency_temperature=None,
+                            max_local_size=None):
+        """
+        Initialise un buffer GCS existant pour poursuivre un entraînement.
+        
+        Args:
+            gcs_bucket: Nom du bucket GCS contenant le buffer
+            gcs_buffer_dir: Dossier dans le bucket pour le buffer
+            recency_bias: Activer/désactiver le biais de récence (None pour conserver la valeur actuelle)
+            recency_temperature: Température pour le biais de récence
+            max_local_size: Taille maximale du cache local
+            
+        Returns:
+            bool: True si l'initialisation a réussi
+        """
+        try:
+            from training.replay_buffer import GCSReplayBuffer
+            
+            # Conserver les paramètres actuels si non spécifiés
+            if recency_bias is None:
+                recency_bias = self.recency_bias
+            
+            if recency_temperature is None:
+                recency_temperature = self.recency_temperature
+                
+            if max_local_size is None:
+                # Par défaut, utiliser 10% de la taille du buffer spécifiée initialement
+                if hasattr(self.buffer, 'max_local_size'):
+                    max_local_size = self.buffer.max_local_size
+                else:
+                    max_local_size = 100000  # Valeur par défaut
+            
+            # Fermer le buffer existant si c'est un GCSReplayBuffer
+            if hasattr(self.buffer, 'close'):
+                print("Fermeture du buffer existant...")
+                self.buffer.close()
+            
+            print(f"Initialisation du buffer GCS existant: {gcs_bucket}/{gcs_buffer_dir}")
+            
+            # Créer le nouveau buffer
+            self.buffer = GCSReplayBuffer(
+                bucket_name=gcs_bucket,
+                buffer_dir=gcs_buffer_dir,
+                max_local_size=max_local_size,
+                recency_enabled=recency_bias,
+                recency_temperature=recency_temperature
+            )
+            
+            # Forcer la mise à jour de l'index
+            self.buffer._update_gcs_index()
+            
+            # Attendre un peu que l'indexation se termine
+            time.sleep(2)
+            
+            # Vérifier si des données sont disponibles
+            if self.buffer.gcs_index:
+                print(f"Buffer GCS initialisé avec succès")
+                print(f"  - Itérations disponibles: {len(self.buffer.gcs_index)}")
+                print(f"  - Nombre estimé d'exemples: {self.buffer.total_size}")
+                return True
+            else:
+                print("Avertissement: Aucune donnée trouvée dans le buffer GCS.")
+                print("Le buffer est prêt mais vide.")
+                return True
+        
+        except Exception as e:
+            print(f"Erreur lors de l'initialisation du buffer GCS: {e}")
+            # Revenir au buffer original en cas d'erreur
+            if not hasattr(self.buffer, 'gcs_index'):
+                print("Conservation du buffer local original.")
+            return False
