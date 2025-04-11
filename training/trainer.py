@@ -401,7 +401,7 @@ class AbaloneTrainerSync:
             # Update JAX functions that use the optimizer
             self.optimizer_update_pmap = jax.pmap(
                 lambda g, o, p: self.optimizer.update(g, o, p),
-                axis_name='batch',
+                axis_name='devices',
                 devices=self.devices
             )
         
@@ -923,14 +923,13 @@ class AbaloneTrainerSync:
             params_sharded = jax.device_put_replicated(self.params, self.devices)
             opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
 
-            # Execute parallel training step (renvoie loss et grads par device)
+            # Execute parallel training step (renvoie loss par device et grads MOYENNÉS)
+            # Note: grads sont maintenant déjà moyennés car pmean est dans train_step_pmap_impl
             loss, grads = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
 
-            # === AJOUT : Moyennage des gradients sur l'axe des devices ===
-            grads = jax.lax.pmean(grads, axis_name='devices')
-            # ============================================================
+            # === La ligne pmean a été SUPPRIMÉE ici ===
 
-            # Update parameters with optimizer (maintenant avec les gradients moyennés)
+            # Update parameters with optimizer (utilise les gradients déjà moyennés)
             updates, new_opt_state = self.optimizer_update_pmap(grads, opt_state_sharded, params_sharded)
             new_params = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
 
@@ -958,8 +957,6 @@ class AbaloneTrainerSync:
             metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
 
             # Faire la moyenne globale à travers tous les processus sur l'axe 'devices'
-            # Note: Même si on moyenne des scalaires, pmean nécessite un axe.
-            # L'important ici est que 'devices' est le nom d'axe utilisé pour pmap et pmean dans ce contexte.
             global_metrics_values = jax.lax.pmean(
                 metrics_values,
                 axis_name='devices'
@@ -976,29 +973,16 @@ class AbaloneTrainerSync:
             # Add current learning rate and other stats
             self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
             self.writer.add_scalar("stats/buffer_size", self.buffer.size, self.iteration)
-            # total_games est mis à jour dans _generate_games, peut nécessiter une synchro si on veut le chiffre global exact ici
             self.writer.add_scalar("stats/total_games_approx", self.total_games, self.iteration)
 
-        # Record metrics in all processes (peuvent être légèrement différentes si non moyennées globalement avant)
-        # On stocke les métriques potentiellement moyennées globalement si num_processes > 1
+        # Record metrics (potentiellement moyennées globalement)
         avg_metrics['iteration'] = self.iteration
         avg_metrics['learning_rate'] = self.current_lr
         avg_metrics['buffer_size'] = self.buffer.size
-        avg_metrics['total_games'] = self.total_games # Note: ceci est le total local, pas global synchronisé
+        avg_metrics['total_games'] = self.total_games # Note: total local
         self.metrics_history.append(avg_metrics)
 
         return avg_metrics
-    def _evaluate(self):
-        """Evaluate current model against classical algorithms."""
-        if not self.is_main_process:
-            return
-        results = evaluate_model(self)
-        
-        # Record evaluation results
-        for algo_name, data in results.items():
-            self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", data["win_rate"], self.iteration)
-        
-        return results
     
     def _save_checkpoint(self, is_final=False):
         """

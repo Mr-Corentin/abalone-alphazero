@@ -69,39 +69,65 @@ def compute_loss(params, batch, network, value_weight=1.0):
 
     return total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match)
 
+# @partial(jax.jit, static_argnames=['network', 'value_weight'])
+# def train_step_pmap_impl(params, inputs, target_policies, target_values, network, value_weight=1.0):
+#     """
+#     Implémentation de train_step pour utilisation avec pmap.
+
+#     Args:
+#         params: Paramètres actuels du réseau
+#         inputs: Tuple (boards, marbles) - entrées du réseau
+#         target_policies: Politiques cibles
+#         target_values: Valeurs cibles
+#         network: Le réseau de neurones
+#         value_weight: Poids de la loss de valeur
+
+#     Returns:
+#         Tuple (métriques, gradients)
+#     """
+#     def loss_fn(p):
+#         batch = (inputs, target_policies, target_values)
+#         total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match) = compute_loss(
+#             p, batch, network, value_weight
+#         )
+
+#         metrics = {
+#             'total_loss': total_loss,
+#             'policy_loss': policy_loss,
+#             'value_loss': value_loss,
+#             'policy_accuracy': policy_accuracy,
+#             'value_sign_accuracy': value_sign_match
+#         }
+
+#         return total_loss, metrics
+
+#     # Calculer la perte et les gradients
+#     (_, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+
+#     return metrics, grads
+
+
+# Dans le fichier training/loss.py
+
 @partial(jax.jit, static_argnames=['network', 'value_weight'])
 def train_step_pmap_impl(params, inputs, target_policies, target_values, network, value_weight=1.0):
     """
     Implémentation de train_step pour utilisation avec pmap.
-
-    Args:
-        params: Paramètres actuels du réseau
-        inputs: Tuple (boards, marbles) - entrées du réseau
-        target_policies: Politiques cibles
-        target_values: Valeurs cibles
-        network: Le réseau de neurones
-        value_weight: Poids de la loss de valeur
-
-    Returns:
-        Tuple (métriques, gradients)
+    MAINTENANT INCLUT LE MOYENNAGE DES GRADIENTS.
     """
     def loss_fn(p):
         batch = (inputs, target_policies, target_values)
-        total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match) = compute_loss(
+        total_loss, metrics_dict = compute_loss( # Renommé 'metrics' en 'metrics_dict' pour éviter conflit
             p, batch, network, value_weight
         )
-
-        metrics = {
-            'total_loss': total_loss,
-            'policy_loss': policy_loss,
-            'value_loss': value_loss,
-            'policy_accuracy': policy_accuracy,
-            'value_sign_accuracy': value_sign_match
-        }
-
-        return total_loss, metrics
+        return total_loss, metrics_dict # Retourne la perte et le dict de métriques
 
     # Calculer la perte et les gradients
     (_, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
 
+    # === AJOUTER CECI : Moyennage des gradients ===
+    grads = jax.lax.pmean(grads, axis_name='devices')
+    # ============================================
+
+    # Retourner les métriques (qui sont par device) et les gradients (maintenant moyennés)
     return metrics, grads
