@@ -892,7 +892,6 @@ class AbaloneTrainerSync:
 
         for step in range(num_steps):
             # Sample a large batch for parallelization
-            # Utiliser la taille de batch adaptée aux dispositifs locaux
             total_batch_size = self.batch_size * self.num_devices
 
             # Use recency-biased sampling if enabled
@@ -923,23 +922,35 @@ class AbaloneTrainerSync:
             params_sharded = jax.device_put_replicated(self.params, self.devices)
             opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
 
-            # Execute parallel training step (renvoie loss par device et grads MOYENNÉS)
-            # Note: grads sont maintenant déjà moyennés car pmean est dans train_step_pmap_impl
-            loss, grads = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
-
-            # === La ligne pmean a été SUPPRIMÉE ici ===
+            # Execute parallel training step (renvoie dict de métriques par device et grads MOYENNÉS)
+            # Utilisation du nom 'metrics_sharded' pour la clarté
+            metrics_sharded, grads_averaged = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
 
             # Update parameters with optimizer (utilise les gradients déjà moyennés)
-            updates, new_opt_state = self.optimizer_update_pmap(grads, opt_state_sharded, params_sharded)
+            updates, new_opt_state = self.optimizer_update_pmap(grads_averaged, opt_state_sharded, params_sharded)
             new_params = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
 
-            # Retrieve results from first device (les paramètres et l'état de l'opt sont identiques sur tous les devices après pmean/update)
+            # Retrieve results from first device
             self.params = jax.tree_map(lambda x: x[0], new_params)
             self.opt_state = jax.tree_map(lambda x: x[0], new_opt_state)
 
+            # === AJOUTER CES LIGNES POUR LE DÉBOGAGE (Utilise metrics_sharded) ===
+            print(f"--- DEBUG START (Process {self.process_id}, Iteration {self.iteration}, Step {step}) ---")
+            try:
+                print(f"DEBUG: Type of metrics_sharded = {type(metrics_sharded)}")
+                print(f"DEBUG: Value of metrics_sharded = {metrics_sharded}")
+                # Essayons d'accéder à .items() dans un try/except pour voir si ça échoue déjà ici
+                print(f"DEBUG: Trying metrics_sharded.items()...")
+                items_test = metrics_sharded.items()
+                print(f"DEBUG: metrics_sharded.items() SUCCESS. Type: {type(items_test)}")
+            except Exception as e:
+                print(f"DEBUG: ERROR accessing metrics_sharded.items(): {e}")
+            print(f"--- DEBUG END ---")
+            # ==========================================
+
             # Aggregate metrics (calculer la moyenne locale sur les devices)
-            # 'loss' contient les métriques par device renvoyées par train_step_pmap
-            step_metrics = {k: float(jnp.mean(v)) for k, v in loss.items()}
+            # Utilisation de la variable renommée 'metrics_sharded' ici aussi
+            step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
 
             # Cumuler les métriques locales pour calculer la moyenne sur les steps
             if cumulative_metrics is None:
@@ -950,32 +961,22 @@ class AbaloneTrainerSync:
         # Calculate average metrics over steps for this process
         avg_metrics = {k: v / num_steps for k, v in cumulative_metrics.items()}
 
-        # Agréger les métriques moyennes entre tous les processus (en utilisant pmean)
+        # Agréger les métriques moyennes entre tous les processus
         if self.num_processes > 1:
-            # Créer des tableaux JAX avec les métriques moyennes locales
             metrics_keys = list(avg_metrics.keys())
             metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
-
-            # Faire la moyenne globale à travers tous les processus sur l'axe 'devices'
-            global_metrics_values = jax.lax.pmean(
-                metrics_values,
-                axis_name='devices'
-            )
-
-            # Reconstruire le dictionnaire avec les moyennes globales
+            global_metrics_values = jax.lax.pmean(metrics_values, axis_name='devices')
             avg_metrics = {k: float(v) for k, v in zip(metrics_keys, global_metrics_values)}
 
         # Seul le processus principal enregistre dans TensorBoard
         if self.is_main_process:
             for metric_name, metric_value in avg_metrics.items():
                 self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
-
-            # Add current learning rate and other stats
             self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
             self.writer.add_scalar("stats/buffer_size", self.buffer.size, self.iteration)
             self.writer.add_scalar("stats/total_games_approx", self.total_games, self.iteration)
 
-        # Record metrics (potentiellement moyennées globalement)
+        # Record metrics
         avg_metrics['iteration'] = self.iteration
         avg_metrics['learning_rate'] = self.current_lr
         avg_metrics['buffer_size'] = self.buffer.size
