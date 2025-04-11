@@ -455,16 +455,18 @@ class AbaloneTrainerSync:
         #     axis_name='batch',
         #     devices=self.devices  # Uniquement les dispositifs locaux
         # )
+
         self.train_step_pmap = jax.pmap(
-            partial(train_step_pmap_impl, ...),
-            axis_name='devices',  # Consistent axis name
+            # Remplacer la ligne avec '...' par celle-ci :
+            partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
+            axis_name='devices',  # Utiliser 'devices'
             devices=self.devices
         )
         
         # Parameter update function with optimizer
         self.optimizer_update_pmap = jax.pmap(
             lambda g, o, p: self.optimizer.update(g, o, p),
-            axis_name='batch',
+            axis_name='devices',
             devices=self.devices  # Uniquement les dispositifs locaux
     )
       
@@ -877,108 +879,115 @@ class AbaloneTrainerSync:
     def _train_network(self, rng_key, num_steps):
         """
         Train the network on batches from the buffer.
-        
+
         Args:
             rng_key: JAX random key
             num_steps: Number of training steps
-            
+
         Returns:
             Average metrics over all steps
         """
         # Cumulative metrics
         cumulative_metrics = None
-        
+
         for step in range(num_steps):
             # Sample a large batch for parallelization
             # Utiliser la taille de batch adaptée aux dispositifs locaux
             total_batch_size = self.batch_size * self.num_devices
-            
+
             # Use recency-biased sampling if enabled
             if self.recency_bias:
                 batch_data = self.buffer.sample_with_recency_bias(
-                    total_batch_size, 
-                    temperature=self.recency_temperature, 
+                    total_batch_size,
+                    temperature=self.recency_temperature,
                     rng_key=rng_key
                 )
             else:
                 batch_data = self.buffer.sample(total_batch_size, rng_key)
-                
+
             rng_key = jax.random.fold_in(rng_key, step)
-            
+
             # Convert to JAX arrays
             boards = jnp.array(batch_data['board'])
             marbles = jnp.array(batch_data['marbles_out'])
             policies = jnp.array(batch_data['policy'])
             values = jnp.array(batch_data['outcome'])
-            
+
             # Split data into chunks for each local device
             boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
             marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
             policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
-            
+
             # Replicate parameters for pmap sur les dispositifs locaux
             params_sharded = jax.device_put_replicated(self.params, self.devices)
             opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
-            
-            # Execute parallel training step
+
+            # Execute parallel training step (renvoie loss et grads par device)
             loss, grads = self.train_step_pmap(params_sharded, (boards, marbles), policies, values)
-            
-            # Update parameters with optimizer
+
+            # === AJOUT : Moyennage des gradients sur l'axe des devices ===
+            grads = jax.lax.pmean(grads, axis_name='devices')
+            # ============================================================
+
+            # Update parameters with optimizer (maintenant avec les gradients moyennés)
             updates, new_opt_state = self.optimizer_update_pmap(grads, opt_state_sharded, params_sharded)
             new_params = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
-            
-            # Retrieve results from first device
+
+            # Retrieve results from first device (les paramètres et l'état de l'opt sont identiques sur tous les devices après pmean/update)
             self.params = jax.tree_map(lambda x: x[0], new_params)
             self.opt_state = jax.tree_map(lambda x: x[0], new_opt_state)
-            
-            # Aggregate metrics
+
+            # Aggregate metrics (calculer la moyenne locale sur les devices)
+            # 'loss' contient les métriques par device renvoyées par train_step_pmap
             step_metrics = {k: float(jnp.mean(v)) for k, v in loss.items()}
-            
+
+            # Cumuler les métriques locales pour calculer la moyenne sur les steps
             if cumulative_metrics is None:
                 cumulative_metrics = step_metrics
             else:
                 cumulative_metrics = {k: cumulative_metrics[k] + step_metrics[k] for k in step_metrics}
-        
-        # Calculate average metrics
+
+        # Calculate average metrics over steps for this process
         avg_metrics = {k: v / num_steps for k, v in cumulative_metrics.items()}
 
-        # Agréger les métriques entre tous les processus (en utilisant pmean)
+        # Agréger les métriques moyennes entre tous les processus (en utilisant pmean)
         if self.num_processes > 1:
-            # Créer des tableaux avec les métriques et faire un allreduce
+            # Créer des tableaux JAX avec les métriques moyennes locales
             metrics_keys = list(avg_metrics.keys())
             metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
-            
-            # Faire la moyenne à travers tous les processus
-            #global_metrics_values = jax.lax.pmean(metrics_values, axis_name='batch')
-            # Modified code with proper axis binding
+
+            # Faire la moyenne globale à travers tous les processus sur l'axe 'devices'
+            # Note: Même si on moyenne des scalaires, pmean nécessite un axe.
+            # L'important ici est que 'devices' est le nom d'axe utilisé pour pmap et pmean dans ce contexte.
             global_metrics_values = jax.lax.pmean(
-                metrics_values, 
-                axis_name='devices'  
+                metrics_values,
+                axis_name='devices'
             )
-            
-            # Reconstruire le dictionnaire
+
+            # Reconstruire le dictionnaire avec les moyennes globales
             avg_metrics = {k: float(v) for k, v in zip(metrics_keys, global_metrics_values)}
 
         # Seul le processus principal enregistre dans TensorBoard
         if self.is_main_process:
             for metric_name, metric_value in avg_metrics.items():
                 self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
-            
-            # Add current learning rate
+
+            # Add current learning rate and other stats
             self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
             self.writer.add_scalar("stats/buffer_size", self.buffer.size, self.iteration)
-            self.writer.add_scalar("stats/total_games", self.total_games, self.iteration)
-        
-        # Record metrics in all processes
+            # total_games est mis à jour dans _generate_games, peut nécessiter une synchro si on veut le chiffre global exact ici
+            self.writer.add_scalar("stats/total_games_approx", self.total_games, self.iteration)
+
+        # Record metrics in all processes (peuvent être légèrement différentes si non moyennées globalement avant)
+        # On stocke les métriques potentiellement moyennées globalement si num_processes > 1
         avg_metrics['iteration'] = self.iteration
         avg_metrics['learning_rate'] = self.current_lr
         avg_metrics['buffer_size'] = self.buffer.size
-        avg_metrics['total_games'] = self.total_games
+        avg_metrics['total_games'] = self.total_games # Note: ceci est le total local, pas global synchronisé
         self.metrics_history.append(avg_metrics)
-        
+
         return avg_metrics
-    
     def _evaluate(self):
         """Evaluate current model against classical algorithms."""
         if not self.is_main_process:
