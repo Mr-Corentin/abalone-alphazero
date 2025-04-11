@@ -711,6 +711,9 @@ class AbaloneTrainerSync:
             
         local_metrics_record['total_games_local'] = self.total_games
         self.metrics_history.append(local_metrics_record)
+        print(f"DEBUG _train_network avg_metrics['policy_accuracy']: {avg_metrics['policy_accuracy']}") # Log de débogage
+        # Aussi, vérifions le type pour être sûr
+        print(f"DEBUG _train_network type: {type(avg_metrics['policy_accuracy'])}")
         
         return avg_metrics
     

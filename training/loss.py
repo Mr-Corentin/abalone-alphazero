@@ -66,6 +66,7 @@ def compute_loss(params, batch, network, value_weight=1.0):
                                jnp.sign(target_values))
 
     total_loss = policy_loss + value_weight * value_loss
+    print(f"DEBUG compute_loss accuracy: {policy_accuracy}")
 
     return total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match)
 
@@ -95,6 +96,8 @@ def train_step_pmap_impl(params, inputs, target_policies, target_values, network
 
     # Moyennage des gradients
     grads = jax.lax.pmean(grads, axis_name='devices')
+    print(f"DEBUG train_step_pmap_impl metrics['policy_accuracy']: {metrics['policy_accuracy']}") # Log de débogage
+
 
     # Retourner le dictionnaire metrics et les grads moyennés
     return metrics, grads
