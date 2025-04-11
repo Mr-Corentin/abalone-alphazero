@@ -355,7 +355,7 @@ class AbaloneTrainerSync:
                 # Afficher les métriques
                 print(f"  Perte totale: {metrics['total_loss']:.4f}")
                 print(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
-                print(f"  Précision politique: {metrics['policy_accuracy']:.2%}")
+                print(f"  Précision politique: {metrics['policy_accuracy']}")
                 
                 # 4. Évaluation périodique
                 if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
