@@ -2,13 +2,15 @@
 """
 Main script to launch AlphaZero training for Abalone
 """
+import jax
+jax.distributed.initialize()  # Auto-détection de l'environnement TPU
 
 import os
 import sys
 import json
 import argparse
 import time
-import jax
+#import jax
 import datetime
 import warnings
 warnings.filterwarnings("ignore")
@@ -16,7 +18,6 @@ from model.neural_net import AbaloneModel
 from environment.env import AbaloneEnv
 from training.trainer import AbaloneTrainerSync
 from training.config import DEFAULT_CONFIG, CPU_CONFIG, get_config
-jax.distributed.initialize()
 
 
 def parse_args():
@@ -128,27 +129,45 @@ def display_config_summary(config):
     print(f"Checkpoints: {config['checkpoint']['path']}")
 
 
+# def display_hardware_info():
+#     """Display information about available hardware"""
+#     try:
+#         # Try TPU first
+#         tpu_devices = jax.devices('tpu')
+#         print(f"\n=== Hardware: {len(tpu_devices)} TPU cores detected ===")
+#         return
+#     except RuntimeError:
+#         pass
+    
+#     try:
+#         # Then GPU
+#         gpu_devices = jax.devices('gpu')
+#         print(f"\n=== Hardware: {len(gpu_devices)} GPUs detected ===")
+#         return
+#     except RuntimeError:
+#         pass
+    
+#     # Finally CPU
+#     cpu_devices = jax.devices('cpu')
+#     print(f"\n=== Hardware: {len(cpu_devices)} CPU cores detected ===")
+
 def display_hardware_info():
     """Display information about available hardware"""
-    try:
-        # Try TPU first
-        tpu_devices = jax.devices('tpu')
-        print(f"\n=== Hardware: {len(tpu_devices)} TPU cores detected ===")
-        return
-    except RuntimeError:
-        pass
+    local_device_count = jax.local_device_count()
+    global_device_count = jax.device_count()
+    process_index = jax.process_index()
+    process_count = jax.process_count()
+
+    print(f"\n=== Hardware Configuration ===")
+    print(f"Process {process_index+1}/{process_count} - Local devices: {local_device_count}")
+    print(f"Total devices across all processes: {global_device_count}")
     
-    try:
-        # Then GPU
-        gpu_devices = jax.devices('gpu')
-        print(f"\n=== Hardware: {len(gpu_devices)} GPUs detected ===")
-        return
-    except RuntimeError:
-        pass
-    
-    # Finally CPU
-    cpu_devices = jax.devices('cpu')
-    print(f"\n=== Hardware: {len(cpu_devices)} CPU cores detected ===")
+    if jax.devices()[0].platform == 'tpu':
+        print(f"Platform: TPU (v{jax.devices()[0].device_kind})")
+    elif jax.devices()[0].platform == 'gpu':
+        print(f"Platform: GPU ({jax.devices()[0].device_kind})")
+    else:
+        print(f"Platform: {jax.devices()[0].platform}")
 
 
 # Dans la fonction create_trainer du main.py:

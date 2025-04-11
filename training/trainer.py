@@ -65,9 +65,14 @@ class AbaloneTrainerSync:
             games_flush_interval: Interval in seconds to save games
         """
         try:
-            # Try TPU first (Google Cloud)
-            self.devices = jax.devices('tpu')
+            # # Try TPU first (Google Cloud)
+            # self.devices = jax.devices('tpu')
+
+            # self.device_type = 'tpu'
+            self.devices = jax.devices()  # Obtient tous les appareils à travers les hôtes
+            self.num_devices = len(self.devices)
             self.device_type = 'tpu'
+            print(f"Utilisation de {self.num_devices} TPUs dans une configuration pod")
         except RuntimeError:
             try:
                 # Then GPU
