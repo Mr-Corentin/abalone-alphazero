@@ -945,7 +945,7 @@ class AbaloneTrainerSync:
             metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
             
             # Faire la moyenne à travers tous les processus
-            global_metrics_values = jax.lax.pmean(metrics_values, axis_name=None)
+            global_metrics_values = jax.lax.pmean(metrics_values, axis_name='batch')
             
             # Reconstruire le dictionnaire
             avg_metrics = {k: float(v) for k, v in zip(metrics_keys, global_metrics_values)}
