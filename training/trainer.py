@@ -965,7 +965,9 @@ class AbaloneTrainerSync:
         if self.num_processes > 1:
             metrics_keys = list(avg_metrics.keys())
             metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
-            global_metrics_values = jax.lax.pmean(metrics_values)
+            global_metrics_values = jax.lax.pmean(metrics_values, axis_name='i')
+
+            
             avg_metrics = {k: float(v) for k, v in zip(metrics_keys, global_metrics_values)}
 
         # Seul le processus principal enregistre dans TensorBoard
