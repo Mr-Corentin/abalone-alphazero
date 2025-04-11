@@ -450,10 +450,15 @@ class AbaloneTrainerSync:
         self.opt_state = self.optimizer.init(self.params)
         
         # Parallel training function with local devices
+        # self.train_step_pmap = jax.pmap(
+        #     partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
+        #     axis_name='batch',
+        #     devices=self.devices  # Uniquement les dispositifs locaux
+        # )
         self.train_step_pmap = jax.pmap(
-            partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
-            axis_name='batch',
-            devices=self.devices  # Uniquement les dispositifs locaux
+            partial(train_step_pmap_impl, ...),
+            axis_name='devices',  # Consistent axis name
+            devices=self.devices
         )
         
         # Parameter update function with optimizer
@@ -945,7 +950,12 @@ class AbaloneTrainerSync:
             metrics_values = jnp.array([avg_metrics[k] for k in metrics_keys])
             
             # Faire la moyenne à travers tous les processus
-            global_metrics_values = jax.lax.pmean(metrics_values, axis_name='batch')
+            #global_metrics_values = jax.lax.pmean(metrics_values, axis_name='batch')
+            # Modified code with proper axis binding
+            global_metrics_values = jax.lax.pmean(
+                metrics_values, 
+                axis_name='devices'  
+            )
             
             # Reconstruire le dictionnaire
             avg_metrics = {k: float(v) for k, v in zip(metrics_keys, global_metrics_values)}
