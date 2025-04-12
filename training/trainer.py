@@ -596,17 +596,19 @@ class AbaloneTrainerSync:
                     
         # Identifier si nous utilisons un buffer GCS
         using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
+        gcs_index_available = False
+        if using_gcs_buffer:
+            gcs_index_available = bool(self.buffer.gcs_index) 
+            if not gcs_index_available:
+                print("Avertissement: Index GCS non disponible ou vide au début de cette phase d'entraînement. Utilisation du cache local si possible.")
         
         # Cumul des métriques pour ce processus sur les étapes
         cumulative_metrics = None
         
         for step in range(num_steps):
-            # Échantillonner un grand batch pour parallélisation sur les dispositifs locaux
             total_batch_size = self.batch_size * self.num_devices
             
-            # Utiliser le sampling approprié selon le type de buffer
             if using_gcs_buffer:
-                # Pour GCS buffer, le biais de récence est déjà intégré à la méthode sample
                 try:
                     batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
                 except ValueError as e:
@@ -630,10 +632,8 @@ class AbaloneTrainerSync:
                 else:
                     batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
             
-            # Mettre à jour la clé RNG pour le prochain échantillonnage
             rng_key = jax.random.fold_in(rng_key, step)
             
-            # Convertir les données échantillonnées en tableaux JAX
             boards = jnp.array(batch_data['board'])
             marbles = jnp.array(batch_data['marbles_out'])
             policies = jnp.array(batch_data['policy'])
@@ -682,14 +682,9 @@ class AbaloneTrainerSync:
             return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
                     'policy_accuracy': 0.0, 'value_sign_match': 0.0}
                     
-        #steps_completed = min(num_steps, len(cumulative_metrics))
         steps_completed = num_steps
         avg_metrics = {k: v / steps_completed for k, v in cumulative_metrics.items()}
-        # print("avg_metrics", avg_metrics)
-        # print("steps_completed",steps_completed)
-        # print("ccumulative_metrics",cumulative_metrics)
-        
-        # Enregistrer les métriques si c'est le processus principal
+
         if self.is_main_process:
             for metric_name, metric_value in avg_metrics.items():
                 self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)

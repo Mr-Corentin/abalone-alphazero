@@ -559,12 +559,10 @@ class GCSReplayBuffer:
             Dict contenant les données échantillonnées
         """
         if not self.gcs_index:
-            # Si aucune donnée n'est encore disponible sur GCS, essayer le cache local
             if self.local_size == 0:
                 raise ValueError("Buffer vide, impossible d'échantillonner")
             
-            print("Avertissement: Aucune donnée disponible sur GCS, utilisation du cache local.")
-            # Utiliser le cache local uniquement si GCS est vide
+            #print("Avertissement: Aucune donnée disponible sur GCS, utilisation du cache local.")
             if rng_key is None:
                 local_indices = np.random.randint(0, self.local_size, size=batch_size)
             else:
@@ -579,7 +577,6 @@ class GCSReplayBuffer:
             
             return result
         
-        # Échantillonner uniquement depuis GCS
         return self._sample_from_gcs(batch_size, rng_key)
 
     def _sample_from_gcs(self, n_samples, rng_key=None):
