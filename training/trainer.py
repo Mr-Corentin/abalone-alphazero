@@ -146,7 +146,9 @@ class AbaloneTrainerSync:
         self.optimizer = optax.sgd(learning_rate=self.initial_lr, momentum=self.momentum)
         
         # Initialize parameters and optimization state
-        rng = jax.random.PRNGKey(42)
+        #rng = jax.random.PRNGKey(42)
+        rng = jax.random.PRNGKey(42 + self.process_id * 1000)
+
         sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
         self.params = network.init(rng, sample_board, sample_marbles)
@@ -304,8 +306,10 @@ class AbaloneTrainerSync:
         # Initialiser le timer global
         start_time_global = time.time()
         
-        # RNG principal
-        rng_key = jax.random.PRNGKey(42)
+        #rng_key = jax.random.PRNGKey(42)
+        seed_base = 42
+        process_specific_seed = seed_base + (self.process_id * 1000)
+        rng_key = jax.random.PRNGKey(process_specific_seed)
         
         try:
             for iteration in range(num_iterations):
