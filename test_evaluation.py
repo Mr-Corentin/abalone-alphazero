@@ -2,6 +2,8 @@
 """
 Script de test d'évaluation alphabeta sur TPU
 """
+import jax
+jax.distributed.initialize()  
 import os
 import time
 import argparse
@@ -42,7 +44,7 @@ def initialize_game():
 def run_alphabeta_test(num_games, depth, verbose=False):
     """Exécute un test d'alphabeta sur TPU"""
     # Initialiser JAX pour TPU
-    jax.distributed.initialize()
+    #jax.distributed.initialize()
     
     # Obtenir des informations sur l'environnement
     process_id = jax.process_index()
