@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "checkpoint": {
         "path": "checkpoints/model",
         "save_frequency": 10,
-        "eval_frequency": 20,
+        "eval_frequency": 2,
     }
 }
 

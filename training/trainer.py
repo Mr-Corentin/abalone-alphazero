@@ -16,7 +16,7 @@ from environment.env import AbaloneEnv
 from training.replay_buffer import CPUReplayBuffer
 from training.loss import train_step_pmap_impl
 from mcts.search import generate_parallel_games_pmap, create_optimized_game_generator
-from evaluation.evaluator import evaluate_model
+from evaluation.evaluator import Evaluator
 from utils.game_storage import convert_games_batch, GameLogger, LocalGameLogger
 
 
@@ -362,13 +362,15 @@ class AbaloneTrainerSync:
                 print(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
                 print(f"  Précision politique: {metrics['policy_accuracy']}")
                 
+    
                 # 4. Évaluation périodique
                 if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
-                    eval_start = time.time()
-                    print("\nExécution de l'évaluation...")
-                    self._evaluate()
-                    eval_time = time.time() - eval_start
-                    print(f"Évaluation terminée en {eval_time:.2f}s")
+                    if self.is_main_process:  # Uniquement sur le processus principal
+                        eval_start = time.time()
+                        print("\nExécution de l'évaluation...")
+                        self._evaluate()
+                        eval_time = time.time() - eval_start
+                        print(f"Évaluation terminée en {eval_time:.2f}s")
                 
                 # 5. Sauvegarde périodique
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0:
@@ -883,3 +885,35 @@ class AbaloneTrainerSync:
             if not hasattr(self.buffer, 'gcs_index'):
                 print("Conservation du buffer local original.")
             return False
+        
+    def _evaluate(self):
+        """
+        Évalue le modèle actuel contre des algorithmes classiques.
+        Exécuté uniquement sur le processus principal.
+        """
+    
+        evaluator = Evaluator(self.params, self.network, self.env)
+        
+        algorithms = [
+            ("alphabeta_pruning", 3)  
+        ]
+        
+        results = evaluator.evaluate_against_classical(
+            algorithms=algorithms,
+            num_games_per_algo=self.eval_games,
+            verbose=True
+        )
+        
+        for algo_name, data in results.items():
+            win_rate = data["win_rate"]
+            self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
+            self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
+            self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
+            self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
+        
+        print("\n=== Résultats d'évaluation ===")
+        for algo_name, data in results.items():
+            win_rate = data["win_rate"]
+            print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
+        
+        return results
