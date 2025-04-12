@@ -204,7 +204,7 @@ class AbaloneTrainerSync:
         
         # Configure JAX functions
         self._setup_jax_functions()
-    def set_evaluation_options(self, enable=True, frequency=10, num_games=5):
+    def set_evaluation_options(self, enable=True, frequency=10, num_games=1):
         """
         Configure evaluation options
         
@@ -365,13 +365,13 @@ class AbaloneTrainerSync:
     
                 # 4. Évaluation périodique
                 if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
-                    if self.is_main_process:  # Uniquement sur le processus principal
-                        eval_start = time.time()
-                        print("\nExécution de l'évaluation...")
-                        self._evaluate()
-                        eval_time = time.time() - eval_start
-                        print(f"Évaluation terminée en {eval_time:.2f}s")
-                
+                    #if self.is_main_process:  # Uniquement sur le processus principal
+                    eval_start = time.time()
+                    print("\nExécution de l'évaluation...")
+                    self._evaluate()
+                    eval_time = time.time() - eval_start
+                    print(f"Évaluation terminée en {eval_time:.2f}s")
+            
                 # 5. Sauvegarde périodique
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0:
                     self._save_checkpoint()
