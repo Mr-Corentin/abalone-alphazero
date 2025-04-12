@@ -886,34 +886,73 @@ class AbaloneTrainerSync:
                 print("Conservation du buffer local original.")
             return False
         
-    def _evaluate(self):
-        """
-        Évalue le modèle actuel contre des algorithmes classiques.
-        Exécuté uniquement sur le processus principal.
-        """
+    # def _evaluate(self):
+    #     """
+    #     Évalue le modèle actuel contre des algorithmes classiques.
+    #     Exécuté uniquement sur le processus principal.
+    #     """
     
-        evaluator = Evaluator(self.params, self.network, self.env)
+    #     evaluator = Evaluator(self.params, self.network, self.env)
         
-        algorithms = [
-            ("alphabeta_pruning", 3)  
-        ]
+    #     algorithms = [
+    #         ("alphabeta_pruning", 3)  
+    #     ]
         
-        results = evaluator.evaluate_against_classical(
-            algorithms=algorithms,
-            num_games_per_algo=self.eval_games,
-            verbose=True
-        )
+    #     results = evaluator.evaluate_against_classical(
+    #         algorithms=algorithms,
+    #         num_games_per_algo=self.eval_games,
+    #         verbose=True
+    #     )
         
-        for algo_name, data in results.items():
-            win_rate = data["win_rate"]
-            self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
-            self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
-            self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
-            self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
+        # for algo_name, data in results.items():
+        #     win_rate = data["win_rate"]
+        #     self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
+        #     self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
+        #     self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
+        #     self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
         
-        print("\n=== Résultats d'évaluation ===")
-        for algo_name, data in results.items():
-            win_rate = data["win_rate"]
-            print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
+        # print("\n=== Résultats d'évaluation ===")
+        # for algo_name, data in results.items():
+        #     win_rate = data["win_rate"]
+        #     print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
         
+        # return results
+    
+    def _evaluate(self):
+        # Ne faire l'évaluation que sur le processus principal
+        if not self.is_main_process:
+            return {}
+        
+        # Sauvegarde des paramètres du modèle (qui sont sur TPU)
+        cpu_params = jax.device_get(self.params)
+        
+        # Basculer temporairement sur CPU
+        with jax.default_device(jax.devices('cpu')[0]):
+            # Créer un évaluateur avec les paramètres sur CPU
+            evaluator = Evaluator(cpu_params, self.network, self.env)
+            
+            algorithms = [
+                ("alphabeta_pruning", 1)
+            ]
+            
+            results = evaluator.evaluate_against_classical(
+                algorithms=algorithms,
+                num_games_per_algo=self.eval_games,
+                verbose=True
+            )
+            for algo_name, data in results.items():
+                win_rate = data["win_rate"]
+                self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
+                self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
+                self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
+                self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
+            
+            print("\n=== Résultats d'évaluation ===")
+            for algo_name, data in results.items():
+                win_rate = data["win_rate"]
+                print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
+            
         return results
+        
+        # Enregistrer les résultats dans TensorBoard, etc.
+        
