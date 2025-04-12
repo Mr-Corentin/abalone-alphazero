@@ -152,7 +152,7 @@ class GameLogger:
     """
     Classe asynchrone pour le stockage des parties dans Google Cloud Storage
     """
-    def __init__(self, bucket_name: str, buffer_size: int = 64, flush_interval: int = 300):
+    def __init__(self, bucket_name: str, process_id, buffer_size: int = 64, flush_interval: int = 300):
         """
         Initialise le logger de parties
         
@@ -163,6 +163,7 @@ class GameLogger:
         """
         self.bucket_name = bucket_name
         self.buffer_size = buffer_size
+        self.process_id = process_id
         self.flush_interval = flush_interval
         self.game_queue = queue.Queue()
         self.buffer = []
@@ -215,19 +216,21 @@ class GameLogger:
     def _flush_buffer(self):
         """Écrit toutes les parties du buffer vers GCS"""
         timestamp = int(time.time())
-        batch_id = f"batch_{timestamp}"
+        #batch_id = f"batch_{timestamp}"
+        batch_id = f"batch_{timestamp}_worker{self.process_id}"
         
         # Créer un objet blob pour cette batch
         blob = self.bucket.blob(f"games/{batch_id}.json")
         
-        # Sauvegarder les parties en JSON
+    
         blob.upload_from_string(
-            json.dumps({
-                "timestamp": timestamp,
-                "games": self.buffer
-            }),
-            content_type="application/json"
-        )
+        json.dumps({
+            "timestamp": timestamp,
+            "process_id": self.process_id, 
+            "games": self.buffer
+        }),
+        content_type="application/json"
+    )
         
         print(f"Sauvegardé {len(self.buffer)} parties dans GCS: {batch_id}")
         self.buffer = []

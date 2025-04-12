@@ -187,6 +187,7 @@ class AbaloneTrainerSync:
                 print(f"Storing games in GCS: {gcs_bucket}")
                 self.game_logger = GameLogger(
                     bucket_name=gcs_bucket,
+                    process_id=self.process_id,
                     buffer_size=games_buffer_size,
                     flush_interval=games_flush_interval
                 )
