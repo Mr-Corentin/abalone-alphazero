@@ -680,6 +680,9 @@ class AbaloneTrainerSync:
         # Calculer les métriques moyennes sur toutes les étapes pour ce processus
         steps_completed = min(num_steps, len(cumulative_metrics))
         avg_metrics = {k: v / steps_completed for k, v in cumulative_metrics.items()}
+        print("avg_metrics", avg_metrics)
+        print("steps_completed",steps_completed)
+        print("ccumulative_metrics",cumulative_metrics)
         
         # Enregistrer les métriques si c'est le processus principal
         if self.is_main_process:
@@ -714,10 +717,7 @@ class AbaloneTrainerSync:
             
         local_metrics_record['total_games_local'] = self.total_games
         self.metrics_history.append(local_metrics_record)
-       # print(f"DEBUG _train_network avg_metrics['policy_accuracy']: {avg_metrics['policy_accuracy']}") # Log de débogage
-        # Aussi, vérifions le type pour être sûr
-        #print(f"DEBUG _train_network type: {type(avg_metrics['policy_accuracy'])}")
-        
+
         return avg_metrics
     
     def _save_checkpoint(self, is_final=False):

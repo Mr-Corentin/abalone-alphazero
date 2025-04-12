@@ -44,7 +44,7 @@ from functools import partial
 
 #     return total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match)
 
-#@partial(jax.jit, static_argnames=['network', 'value_weight'])
+@partial(jax.jit, static_argnames=['network', 'value_weight'])
 def compute_loss(params, batch, network, value_weight=1.0):
     """
     Calcule la fonction de perte pour l'entraînement du réseau
@@ -66,7 +66,7 @@ def compute_loss(params, batch, network, value_weight=1.0):
                                jnp.sign(target_values))
 
     total_loss = policy_loss + value_weight * value_loss
-    print(f"DEBUG compute_loss accuracy: {policy_accuracy}")
+    #print(f"DEBUG compute_loss accuracy: {policy_accuracy}")
 
     return total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match)
 
