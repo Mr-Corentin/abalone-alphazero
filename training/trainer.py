@@ -918,6 +918,42 @@ class AbaloneTrainerSync:
         
         # return results
     
+    # def _evaluate(self):
+    #     # Ne faire l'évaluation que sur le processus principal
+    #     if not self.is_main_process:
+    #         return {}
+        
+    #     # Sauvegarde des paramètres du modèle (qui sont sur TPU)
+    #     cpu_params = jax.device_get(self.params)
+        
+    #     # Basculer temporairement sur CPU
+    #     with jax.default_device(jax.devices('cpu')[0]):
+    #         # Créer un évaluateur avec les paramètres sur CPU
+    #         evaluator = Evaluator(cpu_params, self.network, self.env)
+            
+    #         algorithms = [
+    #             ("alphabeta_pruning", 1)
+    #         ]
+            
+    #         results = evaluator.evaluate_against_classical(
+    #             algorithms=algorithms,
+    #             num_games_per_algo=self.eval_games,
+    #             verbose=True
+    #         )
+    #         for algo_name, data in results.items():
+    #             win_rate = data["win_rate"]
+    #             self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
+    #             self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
+    #             self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
+    #             self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
+            
+    #         print("\n=== Résultats d'évaluation ===")
+    #         for algo_name, data in results.items():
+    #             win_rate = data["win_rate"]
+    #             print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
+            
+    #     return results
+        
     def _evaluate(self):
         # Ne faire l'évaluation que sur le processus principal
         if not self.is_main_process:
@@ -926,13 +962,20 @@ class AbaloneTrainerSync:
         # Sauvegarde des paramètres du modèle (qui sont sur TPU)
         cpu_params = jax.device_get(self.params)
         
-        # Basculer temporairement sur CPU
-        with jax.default_device(jax.devices('cpu')[0]):
+        # Temporairement configurer JAX pour utiliser le CPU
+        # Cette approche est plus robuste que jax.default_device
+        original_platform = os.environ.get("JAX_PLATFORM_NAME")
+        os.environ["JAX_PLATFORM_NAME"] = "cpu"
+        
+        try:
+            # Force réinitialisation du cache des dispositifs JAX
+            jax.devices()  # Ceci relit les dispositifs avec la nouvelle config
+            
             # Créer un évaluateur avec les paramètres sur CPU
             evaluator = Evaluator(cpu_params, self.network, self.env)
             
             algorithms = [
-                ("alphabeta_pruning", 1)
+                ("alphabeta_pruning", 3)
             ]
             
             results = evaluator.evaluate_against_classical(
@@ -940,6 +983,8 @@ class AbaloneTrainerSync:
                 num_games_per_algo=self.eval_games,
                 verbose=True
             )
+            
+            # Enregistrement des métriques et affichage...
             for algo_name, data in results.items():
                 win_rate = data["win_rate"]
                 self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
@@ -952,7 +997,15 @@ class AbaloneTrainerSync:
                 win_rate = data["win_rate"]
                 print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
             
-        return results
+            return results
         
-        # Enregistrer les résultats dans TensorBoard, etc.
-        
+        finally:
+            # Restaurer la configuration d'origine et forcer réinitialisation 
+            if original_platform:
+                os.environ["JAX_PLATFORM_NAME"] = original_platform
+            else:
+                os.environ.pop("JAX_PLATFORM_NAME", None)
+                
+            # Réinitialiser les dispositifs JAX pour TPU
+            jax.devices()
+            
