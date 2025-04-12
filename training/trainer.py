@@ -649,7 +649,7 @@ class AbaloneTrainerSync:
             metrics_sharded, grads_averaged = self.train_step_pmap(
                 params_sharded, (boards, marbles), policies, values
             )
-            print(f"metrics_sharded['policy_accuracy']: {metrics_sharded['policy_accuracy']}")
+            #print(f"metrics_sharded['policy_accuracy']: {metrics_sharded['policy_accuracy']}")
 
             
             # Mettre à jour les paramètres avec les gradients moyennés
@@ -664,7 +664,7 @@ class AbaloneTrainerSync:
             
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
-            print(f"step_metrics['policy_accuracy']: {step_metrics['policy_accuracy']}")
+            #print(f"step_metrics['policy_accuracy']: {step_metrics['policy_accuracy']}")
             
             # Cumuler les métriques sur les étapes pour ce processus
             if cumulative_metrics is None:
@@ -677,12 +677,12 @@ class AbaloneTrainerSync:
             return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
                     'policy_accuracy': 0.0, 'value_sign_match': 0.0}
                     
-        # Calculer les métriques moyennes sur toutes les étapes pour ce processus
-        steps_completed = min(num_steps, len(cumulative_metrics))
+        #steps_completed = min(num_steps, len(cumulative_metrics))
+        steps_completed = num_steps
         avg_metrics = {k: v / steps_completed for k, v in cumulative_metrics.items()}
-        print("avg_metrics", avg_metrics)
-        print("steps_completed",steps_completed)
-        print("ccumulative_metrics",cumulative_metrics)
+        # print("avg_metrics", avg_metrics)
+        # print("steps_completed",steps_completed)
+        # print("ccumulative_metrics",cumulative_metrics)
         
         # Enregistrer les métriques si c'est le processus principal
         if self.is_main_process:
