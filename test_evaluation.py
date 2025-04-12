@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 """
-Script de test d'évaluation avec Evaluator (TPU vs CPU forcé)
+Script de test de l'évaluation dans AbaloneTrainerSync (modes TPU et CPU)
 """
 import os
 import time
 import argparse
 import numpy as np
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Test d\'évaluation avec AbaloneTrainerSync')
+    parser.add_argument('--mode', type=str, default='tpu', choices=['tpu', 'cpu'],
+                      help='Mode d\'exécution (tpu ou cpu)')
+    parser.add_argument('--num_games', type=int, default=2,
+                      help='Nombre de parties à simuler par algorithme')
+    parser.add_argument('--depth', type=int, default=3,
+                      help='Profondeur de recherche alphabeta')
+    parser.add_argument('--verbose', action='store_true',
+                      help='Activer les logs détaillés')
+    return parser.parse_args()
 
 # Initialiser JAX avec la bonne configuration selon le mode
 def initialize_jax(force_cpu=False):
@@ -25,18 +37,6 @@ def initialize_jax(force_cpu=False):
         print(f"JAX configuré pour TPU: {jax.devices()}")
         return jax
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Test d\'évaluation avec Evaluator (TPU vs CPU)')
-    parser.add_argument('--mode', type=str, default='tpu', choices=['tpu', 'cpu'],
-                      help='Mode d\'exécution (tpu ou cpu)')
-    parser.add_argument('--num_games', type=int, default=2,
-                      help='Nombre de parties à simuler par algorithme')
-    parser.add_argument('--depth', type=int, default=3,
-                      help='Profondeur de recherche alphabeta')
-    parser.add_argument('--verbose', action='store_true',
-                      help='Activer les logs détaillés')
-    return parser.parse_args()
-
 def main():
     args = parse_args()
     
@@ -48,7 +48,7 @@ def main():
     import jax.numpy as jnp
     from model.neural_net import AbaloneModel
     from environment.env import AbaloneEnv
-    from evaluation.evaluator import Evaluator
+    from training.trainer import AbaloneTrainerSync
     
     # Obtenir des informations sur l'environnement
     process_id = jax.process_index()
@@ -57,56 +57,58 @@ def main():
     devices = jax.local_devices()
     
     if is_main_process:
-        print(f"\n=== Test d'évaluation avec Evaluator en mode {args.mode.upper()} ===")
+        print(f"\n=== Test d'évaluation avec AbaloneTrainerSync en mode {args.mode.upper()} ===")
         print(f"Nombre de processus: {num_processes}")
         print(f"Dispositifs locaux: {len(devices)} ({[d.platform for d in devices]})")
-        print(f"Profondeur alphabeta: {args.depth}")
+        print(f"Profondeur alphabeta: {args.depth} (sera transmise à l'Evaluator)")
         print(f"Nombre de parties par algorithme: {args.num_games}")
     
-    # Initialiser un environnement
+    # Initialiser le modèle et l'environnement
+    network = AbaloneModel(num_filters=32, num_blocks=3)
     env = AbaloneEnv()
     
-    # Créer un modèle avec une configuration légère
-    model = AbaloneModel(num_filters=32, num_blocks=3)
+    # Créer le trainer avec une configuration minimale
+    trainer = AbaloneTrainerSync(
+        network=network,
+        env=env,
+        buffer_size=1000,
+        batch_size=8,
+        value_weight=1.0,
+        num_simulations=10,
+        initial_lr=0.01,
+        checkpoint_path="/tmp/test_checkpoint",
+        eval_games=args.num_games  # Important: utiliser le nombre de parties spécifié
+    )
     
-    # Initialiser des paramètres aléatoires
-    rng = jax.random.PRNGKey(42)
-    sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
-    sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
-    params = model.init(rng, sample_board, sample_marbles)
+    # Patch pour modifier la profondeur d'alphabeta dans l'Evaluator
+    # Cette modification affecte le code de l'Evaluator généré plus tard
+    import types
+    import evaluation.alphabeta.heuristics
+    original_alphabeta = evaluation.alphabeta.heuristics.alphabeta_pruning
     
-    # Créer l'évaluateur
-    evaluator = Evaluator(params, model, env)
+    def patched_alphabeta(state, depth, alpha, beta, env, radius=4, original_player=None):
+        # Forcer la profondeur à la valeur spécifiée
+        return original_alphabeta(state, args.depth, alpha, beta, env, radius, original_player)
     
-    # Définir les algorithmes à tester
-    algorithms = [
-        ("alphabeta_pruning", args.depth)
-    ]
+    evaluation.alphabeta.heuristics.alphabeta_pruning = patched_alphabeta
     
-    # Mesurer le temps d'exécution
+    # Mesurer le temps d'exécution pour l'évaluation
     if is_main_process:
         print("\nDémarrage de l'évaluation...")
-        
+    
+    # Synchroniser tous les processus avant de démarrer
+    jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+    
     start_time = time.time()
     
-    # Exécuter l'évaluation uniquement sur le processus principal
-    if is_main_process:
-        results = evaluator.evaluate_against_classical(
-            algorithms=algorithms,
-            num_games_per_algo=args.num_games,
-            verbose=args.verbose
-        )
-    else:
-        # Les autres processus attendent simplement
-        time.sleep(1)
-        results = {}
+    # Exécuter l'évaluation
+    results = trainer._evaluate()
     
     elapsed = time.time() - start_time
     
     # Afficher les résultats
     if is_main_process:
         print(f"\nÉvaluation terminée en {elapsed:.3f} secondes")
-        
         if results:
             print("\nRésultats d'évaluation:")
             for algo_name, data in results.items():
@@ -114,6 +116,9 @@ def main():
                 print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
         
         print(f"\nTemps moyen par partie: {elapsed/args.num_games:.3f}s")
+    
+    # Nettoyer
+    evaluation.alphabeta.heuristics.alphabeta_pruning = original_alphabeta
     
     # Attendre que tous les processus terminent
     jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
