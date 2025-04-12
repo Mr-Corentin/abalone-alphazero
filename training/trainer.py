@@ -649,6 +649,8 @@ class AbaloneTrainerSync:
             metrics_sharded, grads_averaged = self.train_step_pmap(
                 params_sharded, (boards, marbles), policies, values
             )
+            print(f"metrics_sharded['policy_accuracy']: {metrics_sharded['policy_accuracy']}")
+
             
             # Mettre à jour les paramètres avec les gradients moyennés
             updates, new_opt_state = self.optimizer_update_pmap(
@@ -662,6 +664,7 @@ class AbaloneTrainerSync:
             
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
+            print(f"step_metrics['policy_accuracy']: {step_metrics['policy_accuracy']}")
             
             # Cumuler les métriques sur les étapes pour ce processus
             if cumulative_metrics is None:
@@ -711,9 +714,9 @@ class AbaloneTrainerSync:
             
         local_metrics_record['total_games_local'] = self.total_games
         self.metrics_history.append(local_metrics_record)
-        print(f"DEBUG _train_network avg_metrics['policy_accuracy']: {avg_metrics['policy_accuracy']}") # Log de débogage
+       # print(f"DEBUG _train_network avg_metrics['policy_accuracy']: {avg_metrics['policy_accuracy']}") # Log de débogage
         # Aussi, vérifions le type pour être sûr
-        print(f"DEBUG _train_network type: {type(avg_metrics['policy_accuracy'])}")
+        #print(f"DEBUG _train_network type: {type(avg_metrics['policy_accuracy'])}")
         
         return avg_metrics
     
