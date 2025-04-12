@@ -1,51 +1,48 @@
 #!/usr/bin/env python3
 """
-Script de test d'évaluation alphabeta sur TPU
+Script de test d'évaluation avec Evaluator sur TPU
 """
 import jax
-jax.distributed.initialize()  
+jax.distributed.initialize()  # Initialisation JAX pour TPU dès le début
+
 import os
 import time
 import argparse
-import jax
 import jax.numpy as jnp
 import numpy as np
 
-from environment.env import AbaloneEnv, AbaloneEnvNonCanonical, AbaloneStateNonCanonical
-from core.board import initialize_board
-from evaluation.alphabeta.heuristics import alphabeta_pruning
+from model.neural_net import AbaloneModel
+from environment.env import AbaloneEnv
+from evaluation.evaluator import Evaluator
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Test alphabeta sur TPU')
-    parser.add_argument('--num_games', type=int, default=2,
-                       help='Nombre de parties à simuler')
+    parser = argparse.ArgumentParser(description='Test d\'évaluation avec Evaluator sur TPU')
+    parser.add_argument('--num_games', type=int, default=1,
+                      help='Nombre de parties à simuler par algorithme')
     parser.add_argument('--depth', type=int, default=3,
-                       help='Profondeur de recherche alphabeta')
+                      help='Profondeur de recherche alphabeta')
     parser.add_argument('--verbose', action='store_true',
-                       help='Activer les logs détaillés')
+                      help='Activer les logs détaillés')
     return parser.parse_args()
 
-def initialize_game():
-    """Initialise un état de jeu pour test"""
-    env = AbaloneEnvNonCanonical()
-    board = initialize_board()
+def initialize_model_and_env():
+    """Initialise le modèle et l'environnement pour le test"""
+    # Initialiser un environnement
+    env = AbaloneEnv()
     
-    # Créer un état initial
-    state = AbaloneStateNonCanonical(
-        board=board,
-        current_player=1,  # Noir commence
-        black_out=0,
-        white_out=0,
-        moves_count=0
-    )
+    # Créer un modèle avec une configuration légère
+    model = AbaloneModel(num_filters=32, num_blocks=3)
     
-    return env, state
+    # Initialiser des paramètres aléatoires
+    rng = jax.random.PRNGKey(42)
+    sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
+    sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
+    params = model.init(rng, sample_board, sample_marbles)
+    
+    return params, model, env
 
-def run_alphabeta_test(num_games, depth, verbose=False):
-    """Exécute un test d'alphabeta sur TPU"""
-    # Initialiser JAX pour TPU
-    #jax.distributed.initialize()
-    
+def run_evaluator_test(num_games, depth, verbose=False):
+    """Exécute un test d'évaluation avec Evaluator"""
     # Obtenir des informations sur l'environnement
     process_id = jax.process_index()
     num_processes = jax.process_count()
@@ -53,98 +50,66 @@ def run_alphabeta_test(num_games, depth, verbose=False):
     devices = jax.local_devices()
     
     if is_main_process:
-        print(f"\n=== Test d'évaluation alphabeta sur TPU ===")
+        print(f"\n=== Test d'évaluation avec Evaluator sur TPU ===")
         print(f"Nombre de processus: {num_processes}")
-        print(f"Dispositifs locaux: {len(devices)}")
+        print(f"Dispositifs locaux: {len(devices)} ({[d.platform for d in devices]})")
         print(f"Profondeur alphabeta: {depth}")
-        print(f"Nombre de parties: {num_games}")
+        print(f"Nombre de parties par algorithme: {num_games}")
     
-    env, initial_state = initialize_game()
+    # Initialiser le modèle et l'environnement
+    params, model, env = initialize_model_and_env()
     
-    # Chaque processus exécute num_games parties
-    total_time = 0
-    total_nodes = 0
-    moves_counter = 0
+    # Créer l'évaluateur
+    evaluator = Evaluator(params, model, env)
     
-    # Traçage initial pour compiler la fonction et éviter les pénalités de première exécution
-    _, _ = alphabeta_pruning(
-        initial_state, 
-        1,  # profondeur minimale pour le traçage 
-        float('-inf'),
-        float('inf'),
-        env,
-        radius=env.radius
-    )
+    # Définir les algorithmes à tester
+    algorithms = [
+        ("alphabeta_pruning", depth)
+    ]
     
-    # Simuler plusieurs parties partielles
-    for game_idx in range(num_games):
-        if is_main_process and verbose:
-            print(f"\nProcessus {process_id}: Partie {game_idx+1}/{num_games}")
-        
-        # Réinitialiser l'état pour chaque partie
-        state = initial_state
-        
-        # Jouer quelques coups (max 5 par partie)
-        for move_num in range(5):
-            if is_main_process and verbose:
-                print(f"  Coup {move_num+1}/5")
-            
-            start_time = time.time()
-            
-            # Mesurer le temps pour alphabeta_pruning
-            _, best_move = alphabeta_pruning(
-                state, 
-                depth,
-                float('-inf'), 
-                float('inf'),
-                env, 
-                radius=env.radius
-            )
-            
-            elapsed = time.time() - start_time
-            total_time += elapsed
-            moves_counter += 1
-            
-            # Estimation grossière du nombre de nœuds
-            estimated_nodes = sum(20**d for d in range(depth+1))
-            total_nodes += estimated_nodes
-            
-            if is_main_process and verbose:
-                print(f"    Temps: {elapsed:.3f}s, ~{estimated_nodes/elapsed:.0f} nœuds/sec")
-            
-            # Appliquer le coup et continuer
-            if best_move >= 0:
-                state = env.step(state, best_move)
-            else:
-                if is_main_process and verbose:
-                    print("  Aucun coup légal trouvé, fin de la partie")
-                break
-    
-    # Agréger les résultats de tous les processus
-    avg_time = total_time / moves_counter if moves_counter > 0 else 0
-    nodes_per_sec = total_nodes / total_time if total_time > 0 else 0
-    
-    # Seulement le processus principal affiche les résultats finaux
+    # Mesurer le temps d'exécution
     if is_main_process:
-        print("\nRésultats (processus principal):")
-        print(f"  Nombre de coups joués: {moves_counter}")
-        print(f"  Temps total: {total_time:.3f}s")
-        print(f"  Temps moyen par coup: {avg_time:.3f}s")
-        print(f"  Performance: ~{nodes_per_sec:.0f} nœuds/sec")
+        print("\nDémarrage de l'évaluation...")
+        
+    start_time = time.time()
     
-    return {
-        'total_time': total_time,
-        'avg_time': avg_time,
-        'nodes_per_sec': nodes_per_sec,
-        'moves_played': moves_counter
-    }
+    # Exécuter l'évaluation uniquement sur le processus principal
+    if is_main_process:
+        results = evaluator.evaluate_against_classical(
+            algorithms=algorithms,
+            num_games_per_algo=num_games,
+            verbose=verbose
+        )
+    else:
+        # Les autres processus attendent simplement
+        # Cela simule le comportement correct où l'évaluation est limitée au processus principal
+        time.sleep(1)
+        results = {}
+    
+    elapsed = time.time() - start_time
+    
+    # Afficher les résultats
+    if is_main_process:
+        print(f"\nÉvaluation terminée en {elapsed:.3f} secondes")
+        
+        if results:
+            print("\nRésultats d'évaluation:")
+            for algo_name, data in results.items():
+                win_rate = data["win_rate"]
+                print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
+        
+        print(f"\nTemps moyen par partie: {elapsed/num_games:.3f}s")
+    
+    return elapsed
 
 def main():
     args = parse_args()
     
-    # Exécuter le test sur TPU
-    results = run_alphabeta_test(args.num_games, args.depth, args.verbose)
+    # Exécuter le test avec Evaluator
+    total_time = run_evaluator_test(args.num_games, args.depth, args.verbose)
     
+    # Attendre que tous les processus terminent
+    jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
 
 if __name__ == "__main__":
     main()
