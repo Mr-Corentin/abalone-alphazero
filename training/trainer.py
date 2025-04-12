@@ -363,12 +363,20 @@ class AbaloneTrainerSync:
                 print(f"  Précision politique: {metrics['policy_accuracy']}")
                 
     
-                # 4. Évaluation périodique
+                # # 4. Évaluation périodique
+                # if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
+                #     #if self.is_main_process:  # Uniquement sur le processus principal
+                #     eval_start = time.time()
+                #     print("\nExécution de l'évaluation...")
+                #     self._evaluate()
+                #     eval_time = time.time() - eval_start
+                #     print(f"Évaluation terminée en {eval_time:.2f}s")
+                # 4. Évaluation périodique contre les modèles précédents
                 if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
-                    #if self.is_main_process:  # Uniquement sur le processus principal
                     eval_start = time.time()
-                    print("\nExécution de l'évaluation...")
-                    self._evaluate()
+                    print("\nExécution de l'évaluation contre modèles précédents...")
+                    # Passer le nombre total d'itérations prévues
+                    self.evaluate_against_previous_models(num_iterations)
                     eval_time = time.time() - eval_start
                     print(f"Évaluation terminée en {eval_time:.2f}s")
             
@@ -918,94 +926,123 @@ class AbaloneTrainerSync:
         
         # return results
     
-    # def _evaluate(self):
-    #     # Ne faire l'évaluation que sur le processus principal
-    #     if not self.is_main_process:
-    #         return {}
+    def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
+        """
+        Évalue le modèle actuel contre des versions précédentes sur TPU.
+        Exécuté uniquement sur le processus principal.
         
-    #     # Sauvegarde des paramètres du modèle (qui sont sur TPU)
-    #     cpu_params = jax.device_get(self.params)
+        Args:
+            total_iterations: Nombre total d'itérations prévues pour l'entraînement
+            num_reference_models: Nombre approximatif de modèles de référence à utiliser
+            
+        Returns:
+            Dictionary contenant les résultats d'évaluation
+        """
+        from evaluation.models_evaluator import (
+            generate_evaluation_checkpoints, 
+            check_checkpoint_exists,
+            download_checkpoint,
+            load_checkpoint_params,
+            ModelsEvaluator
+        )
         
-    #     # Basculer temporairement sur CPU
-    #     with jax.default_device(jax.devices('cpu')[0]):
-    #         # Créer un évaluateur avec les paramètres sur CPU
-    #         evaluator = Evaluator(cpu_params, self.network, self.env)
-            
-    #         algorithms = [
-    #             ("alphabeta_pruning", 1)
-    #         ]
-            
-    #         results = evaluator.evaluate_against_classical(
-    #             algorithms=algorithms,
-    #             num_games_per_algo=self.eval_games,
-    #             verbose=True
-    #         )
-    #         for algo_name, data in results.items():
-    #             win_rate = data["win_rate"]
-    #             self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
-    #             self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
-    #             self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
-    #             self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
-            
-    #         print("\n=== Résultats d'évaluation ===")
-    #         for algo_name, data in results.items():
-    #             win_rate = data["win_rate"]
-    #             print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
-            
-    #     return results
-        
-    def _evaluate(self):
         # Ne faire l'évaluation que sur le processus principal
         if not self.is_main_process:
             return {}
         
-        # Sauvegarde des paramètres du modèle (qui sont sur TPU)
-        cpu_params = jax.device_get(self.params)
+        current_iter = self.iteration
+        results = {}
         
-        # Temporairement configurer JAX pour utiliser le CPU
-        # Cette approche est plus robuste que jax.default_device
-        original_platform = os.environ.get("JAX_PLATFORM_NAME")
-        os.environ["JAX_PLATFORM_NAME"] = "cpu"
+        # Générer les itérations de référence
+        target_references = generate_evaluation_checkpoints(total_iterations, num_reference_models)
         
-        try:
-            # Force réinitialisation du cache des dispositifs JAX
-            jax.devices()  # Ceci relit les dispositifs avec la nouvelle config
-            
-            # Créer un évaluateur avec les paramètres sur CPU
-            evaluator = Evaluator(cpu_params, self.network, self.env)
-            
-            algorithms = [
-                ("alphabeta_pruning", 3)
-            ]
-            
-            results = evaluator.evaluate_against_classical(
-                algorithms=algorithms,
-                num_games_per_algo=self.eval_games,
-                verbose=True
-            )
-            
-            # Enregistrement des métriques et affichage...
-            for algo_name, data in results.items():
-                win_rate = data["win_rate"]
-                self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
-                self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
-                self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
-                self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
-            
-            print("\n=== Résultats d'évaluation ===")
-            for algo_name, data in results.items():
-                win_rate = data["win_rate"]
-                print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
-            
-            return results
+        # Filtrer pour ne garder que celles qui sont disponibles et antérieures à l'itération actuelle
+        available_refs = []
+        for ref in target_references:
+            if ref < current_iter:
+                # Vérifier si le checkpoint existe
+                ref_path = self._get_checkpoint_path(ref)
+                if check_checkpoint_exists(ref_path):
+                    available_refs.append(ref)
         
-        finally:
-            # Restaurer la configuration d'origine et forcer réinitialisation 
-            if original_platform:
-                os.environ["JAX_PLATFORM_NAME"] = original_platform
+        if not available_refs:
+            print("Aucun modèle précédent disponible pour l'évaluation")
+            return {}
+        
+        print(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
+        print(f"Itérations sélectionnées: {available_refs}")
+        
+        # Initialiser l'évaluateur
+        evaluator = ModelsEvaluator(
+            network=self.network,
+            num_simulations=max(20, self.num_simulations // 2),  # Réduire le nombre de simulations pour l'évaluation
+            games_per_model=10  # 10 parties par modèle (5 comme noir, 5 comme blanc)
+        )
+        
+        # Obtenir les paramètres du modèle actuel
+        current_params = self.params
+        
+        # Évaluer contre chaque modèle de référence
+        for ref_iter in available_refs:
+            print(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
+            
+            # Construire le chemin du checkpoint
+            ref_path = self._get_checkpoint_path(ref_iter)
+            
+            # Télécharger le checkpoint s'il est sur GCS
+            local_path = f"/tmp/ref_model_{ref_iter}.pkl"
+            if ref_path.startswith("gs://"):
+                if not download_checkpoint(ref_path, local_path):
+                    print(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
+                    continue
             else:
-                os.environ.pop("JAX_PLATFORM_NAME", None)
-                
-            # Réinitialiser les dispositifs JAX pour TPU
-            jax.devices()
+                local_path = ref_path
             
+            # Charger les paramètres du modèle de référence
+            ref_params = load_checkpoint_params(local_path)
+            if ref_params is None:
+                print(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
+                continue
+            
+            # Évaluer le modèle actuel contre le modèle de référence
+            eval_results = evaluator.evaluate_model_pair(current_params, ref_params)
+            
+            # Stocker les résultats
+            results[ref_iter] = eval_results
+            
+            # Afficher les résultats
+            win_rate = eval_results['win_rate']
+            print(f"Résultats vs iter {ref_iter}: {win_rate:.1%} taux de victoire")
+            print(f"  Victoires: {eval_results['current_wins']}, Défaites: {eval_results['reference_wins']}, Nuls: {eval_results['draws']}")
+            
+            # Enregistrer dans TensorBoard
+            self.writer.add_scalar(f"eval_vs_prev/win_rate_iter_{ref_iter}", win_rate, self.iteration)
+            self.writer.add_scalar(f"eval_vs_prev/games_iter_{ref_iter}", eval_results['total_games'], self.iteration)
+        
+        # Enregistrer les tendances de performance globales
+        if results:
+            # Calculer le taux de victoire moyen sur tous les modèles de référence
+            avg_win_rate = sum(res['win_rate'] for res in results.values()) / len(results)
+            self.writer.add_scalar("eval_vs_prev/avg_win_rate", avg_win_rate, self.iteration)
+            
+            # Ajouter un résumé à l'historique des métriques
+            if self.metrics_history and self.iteration > 0:
+                latest_metrics = self.metrics_history[-1]
+                latest_metrics['avg_win_rate_vs_prev'] = avg_win_rate
+                
+                # Stocker les taux de victoire individuels
+                for ref_iter, ref_results in results.items():
+                    latest_metrics[f'win_rate_vs_iter_{ref_iter}'] = ref_results['win_rate']
+        
+        print(f"\n=== Évaluation terminée ===")
+        return results
+
+    def _get_checkpoint_path(self, iteration):
+        """Obtient le chemin vers un checkpoint pour l'itération donnée."""
+        # Le format correspond à votre méthode save_checkpoint
+        prefix = f"iter{iteration}"
+        
+        if self.checkpoint_path.startswith("gs://"):
+            return f"{self.checkpoint_path}_{prefix}.pkl"
+        else:
+            return f"{self.checkpoint_path}_{prefix}.pkl"
