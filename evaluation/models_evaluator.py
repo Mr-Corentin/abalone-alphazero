@@ -154,7 +154,7 @@ class ModelsEvaluator:
                     current_rng, action_key = jax.random.split(current_rng)
                     
                     # Sélectionner l'action en fonction du joueur actuel
-                    is_black = state.current_player == 1
+                    is_black = state.actual_player == 1 
                     
                     action = jax.lax.cond(
                         is_black,
