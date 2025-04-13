@@ -96,8 +96,5 @@ def train_step_pmap_impl(params, inputs, target_policies, target_values, network
 
     # Moyennage des gradients
     grads = jax.lax.pmean(grads, axis_name='devices')
-    print(f"DEBUG train_step_pmap_impl metrics['policy_accuracy']: {metrics['policy_accuracy']}") # Log de débogage
 
-
-    # Retourner le dictionnaire metrics et les grads moyennés
     return metrics, grads

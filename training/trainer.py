@@ -584,9 +584,156 @@ class AbaloneTrainerSync:
         
         return positions_added
     
+    # def _train_network(self, rng_key, num_steps):
+    #     """
+    #     Entraîne le réseau sur des batchs depuis le buffer.
+    #     Compatible avec les deux types de buffer (local et GCS).
+        
+    #     Args:
+    #         rng_key: Clé aléatoire JAX
+    #         num_steps: Nombre d'étapes d'entraînement
+            
+    #     Returns:
+    #         Métriques moyennes sur toutes les étapes (moyenne globale si multi-processus)
+    #     """
+    #     # Vérifier si le buffer est vide
+    #     if (hasattr(self.buffer, 'local_size') and self.buffer.local_size == 0) or \
+    #     (hasattr(self.buffer, 'size') and self.buffer.size == 0):
+    #         print("Buffer vide, impossible d'entraîner le réseau.")
+    #         # Retourner des métriques nulles
+    #         return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
+    #                 'policy_accuracy': 0.0, 'value_sign_match': 0.0}
+                    
+    #     # Identifier si nous utilisons un buffer GCS
+    #     using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
+    #     gcs_index_available = False
+    #     if using_gcs_buffer:
+    #         gcs_index_available = bool(self.buffer.gcs_index) 
+    #         if not gcs_index_available:
+    #             print("Avertissement: Index GCS non disponible ou vide au début de cette phase d'entraînement. Utilisation du cache local si possible.")
+        
+    #     # Cumul des métriques pour ce processus sur les étapes
+    #     cumulative_metrics = None
+        
+    #     for step in range(num_steps):
+    #         total_batch_size = self.batch_size * self.num_devices
+            
+    #         if using_gcs_buffer:
+    #             try:
+    #                 batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
+    #             except ValueError as e:
+    #                 print(f"Erreur lors de l'échantillonnage: {e}")
+    #                 # Si GCS pas encore disponible, attendre et sauter cette étape
+    #                 if step == 0:
+    #                     print("Attente de données sur GCS pour l'entraînement...")
+    #                     time.sleep(10)
+    #                     continue
+    #                 else:
+    #                     # Arrêter l'entraînement si on a déjà fait quelques étapes
+    #                     break
+    #         else:
+    #             # Pour le buffer local classique
+    #             if self.recency_bias:
+    #                 batch_data = self.buffer.sample_with_recency_bias(
+    #                     total_batch_size,
+    #                     temperature=self.recency_temperature,
+    #                     rng_key=rng_key
+    #                 )
+    #             else:
+    #                 batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
+            
+    #         rng_key = jax.random.fold_in(rng_key, step)
+            
+    #         boards = jnp.array(batch_data['board'])
+    #         marbles = jnp.array(batch_data['marbles_out'])
+    #         policies = jnp.array(batch_data['policy'])
+    #         values = jnp.array(batch_data['outcome'])
+            
+    #         # Reshape des données en chunks pour chaque dispositif local
+    #         # Shape devient: (num_local_devices, batch_size_per_device, ...)
+    #         boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
+    #         marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
+    #         policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
+    #         values = values.reshape(self.num_devices, -1, *values.shape[1:])
+            
+    #         # Répliquer les paramètres et l'état de l'optimiseur sur les dispositifs locaux pour pmap
+    #         params_sharded = jax.device_put_replicated(self.params, self.devices)
+    #         opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
+            
+    #         # Exécuter l'étape d'entraînement parallèle sur les dispositifs locaux
+    #         metrics_sharded, grads_averaged = self.train_step_pmap(
+    #             params_sharded, (boards, marbles), policies, values
+    #         )
+    #         #print(f"metrics_sharded['policy_accuracy']: {metrics_sharded['policy_accuracy']}")
+
+            
+    #         # Mettre à jour les paramètres avec les gradients moyennés
+    #         updates, new_opt_state = self.optimizer_update_pmap(
+    #             grads_averaged, opt_state_sharded, params_sharded
+    #         )
+    #         new_params = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
+            
+    #         # Récupérer les paramètres et l'état de l'optimiseur depuis le premier dispositif
+    #         self.params = jax.tree_map(lambda x: x[0], new_params)
+    #         self.opt_state = jax.tree_map(lambda x: x[0], new_opt_state)
+            
+    #         # Agréger les métriques localement pour cette étape
+    #         step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
+    #         #print(f"step_metrics['policy_accuracy']: {step_metrics['policy_accuracy']}")
+            
+    #         # Cumuler les métriques sur les étapes pour ce processus
+    #         if cumulative_metrics is None:
+    #             cumulative_metrics = step_metrics
+    #         else:
+    #             cumulative_metrics = {k: cumulative_metrics[k] + step_metrics[k] for k in step_metrics}
+        
+    #     # Si aucune étape d'entraînement n'a été effectuée
+    #     if cumulative_metrics is None:
+    #         return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
+    #                 'policy_accuracy': 0.0, 'value_sign_match': 0.0}
+                    
+    #     steps_completed = num_steps
+    #     avg_metrics = {k: v / steps_completed for k, v in cumulative_metrics.items()}
+
+    #     if self.is_main_process:
+    #         for metric_name, metric_value in avg_metrics.items():
+    #             self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
+            
+    #         # Enregistrer des informations supplémentaires utiles
+    #         self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
+            
+    #         # Choisir la bonne métrique de taille du buffer
+    #         if using_gcs_buffer:
+    #             buffer_size = self.buffer.total_size
+    #             self.writer.add_scalar("stats/buffer_size_total", buffer_size, self.iteration)
+    #             self.writer.add_scalar("stats/buffer_size_local", self.buffer.local_size, self.iteration)
+    #         else:
+    #             buffer_size = self.buffer.size
+    #             self.writer.add_scalar("stats/buffer_size", buffer_size, self.iteration)
+                
+    #         self.writer.add_scalar("stats/total_games_local", self.total_games, self.iteration)
+        
+    #     # Enregistrer l'historique des métriques
+    #     local_metrics_record = avg_metrics.copy()
+    #     local_metrics_record['iteration'] = self.iteration
+    #     local_metrics_record['learning_rate'] = self.current_lr
+        
+    #     # Enregistrer la bonne métrique de taille du buffer
+    #     if using_gcs_buffer:
+    #         local_metrics_record['buffer_size_total'] = self.buffer.total_size
+    #         local_metrics_record['buffer_size_local'] = self.buffer.local_size
+    #     else:
+    #         local_metrics_record['buffer_size'] = self.buffer.size
+            
+    #     local_metrics_record['total_games_local'] = self.total_games
+    #     self.metrics_history.append(local_metrics_record)
+
+    #     return avg_metrics
+
     def _train_network(self, rng_key, num_steps):
         """
         Entraîne le réseau sur des batchs depuis le buffer.
+        Version optimisée pour environnement multi-host avec maintien des paramètres sur dispositif.
         Compatible avec les deux types de buffer (local et GCS).
         
         Args:
@@ -611,6 +758,11 @@ class AbaloneTrainerSync:
             gcs_index_available = bool(self.buffer.gcs_index) 
             if not gcs_index_available:
                 print("Avertissement: Index GCS non disponible ou vide au début de cette phase d'entraînement. Utilisation du cache local si possible.")
+        
+        # Initialiser les paramètres et l'état de l'optimiseur sur les dispositifs une seule fois
+        # au début de la séquence d'entraînement
+        params_sharded = jax.device_put_replicated(self.params, self.devices)
+        opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
         
         # Cumul des métriques pour ce processus sur les étapes
         cumulative_metrics = None
@@ -656,36 +808,30 @@ class AbaloneTrainerSync:
             policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
             
-            # Répliquer les paramètres et l'état de l'optimiseur sur les dispositifs locaux pour pmap
-            params_sharded = jax.device_put_replicated(self.params, self.devices)
-            opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
-            
-            # Exécuter l'étape d'entraînement parallèle sur les dispositifs locaux
+            # Exécuter l'étape d'entraînement parallèle avec les paramètres déjà sur dispositif
             metrics_sharded, grads_averaged = self.train_step_pmap(
                 params_sharded, (boards, marbles), policies, values
             )
-            #print(f"metrics_sharded['policy_accuracy']: {metrics_sharded['policy_accuracy']}")
-
             
-            # Mettre à jour les paramètres avec les gradients moyennés
-            updates, new_opt_state = self.optimizer_update_pmap(
+            # Mettre à jour directement les versions shardées
+            updates, opt_state_sharded = self.optimizer_update_pmap(
                 grads_averaged, opt_state_sharded, params_sharded
             )
-            new_params = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
-            
-            # Récupérer les paramètres et l'état de l'optimiseur depuis le premier dispositif
-            self.params = jax.tree_map(lambda x: x[0], new_params)
-            self.opt_state = jax.tree_map(lambda x: x[0], new_opt_state)
+            params_sharded = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
             
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
-            #print(f"step_metrics['policy_accuracy']: {step_metrics['policy_accuracy']}")
             
             # Cumuler les métriques sur les étapes pour ce processus
             if cumulative_metrics is None:
                 cumulative_metrics = step_metrics
             else:
                 cumulative_metrics = {k: cumulative_metrics[k] + step_metrics[k] for k in step_metrics}
+        
+        # À la fin de toutes les étapes, récupérer les paramètres mis à jour
+        # pour les stocker dans l'état de l'objet
+        self.params = jax.tree_map(lambda x: x[0], params_sharded)
+        self.opt_state = jax.tree_map(lambda x: x[0], opt_state_sharded)
         
         # Si aucune étape d'entraînement n'a été effectuée
         if cumulative_metrics is None:
