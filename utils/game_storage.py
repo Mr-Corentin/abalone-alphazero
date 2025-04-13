@@ -8,6 +8,15 @@ import queue
 from typing import Dict, List, Any, Optional
 from google.cloud import storage
 
+import logging
+
+# Configuration du logger au début de votre script ou dans __init__
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - Process %(process)d - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("alphazero.game_storage")
 
 def convert_game_to_sgf_like(game_data: Dict, env, game_id: Optional[str] = None, 
                            timestamp: Optional[int] = None, model_iteration: Optional[int] = None) -> Dict:
@@ -232,7 +241,7 @@ class GameLogger:
         content_type="application/json"
     )
         
-        print(f"Sauvegardé {len(self.buffer)} parties dans GCS: {batch_id}")
+        logger.info(f"Sauvegardé {len(self.buffer)} parties dans GCS: {batch_id}")
         self.buffer = []
     
     def stop(self):
@@ -321,7 +330,7 @@ class LocalGameLogger:
                 "games": self.buffer
             }, f)
         
-        print(f"Sauvegardé {len(self.buffer)} parties dans {file_path}")
+        logger.info(f"Sauvegardé {len(self.buffer)} parties dans {file_path}")
         self.buffer = []
     
     def stop(self):

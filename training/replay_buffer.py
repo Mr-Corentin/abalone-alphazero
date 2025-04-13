@@ -9,6 +9,17 @@ import tensorflow as tf
 from google.cloud import storage
 from typing import Dict, List, Tuple, Any, Optional
 
+
+import logging
+
+# Configuration du logger au début de votre script ou dans __init__
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - Process %(process)d - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("alphazero.buffer")
+
 class CPUReplayBuffer:
     def __init__(self, capacity, board_size=9, action_space=1734):
         self.capacity = capacity
@@ -390,7 +401,7 @@ class GCSReplayBuffer:
                 pass
             
             except Exception as e:
-                print(f"Erreur dans _writer_loop: {e}")
+                logger.info(f"Erreur dans _writer_loop: {e}")
     
     def _write_tfrecord(self, file_path: str, data: Dict[str, np.ndarray]):
         """Écrit les données en format TFRecord sur GCS"""
@@ -474,7 +485,7 @@ class GCSReplayBuffer:
             self._estimate_total_size()
             
         except Exception as e:
-            print(f"Erreur lors de la mise à jour de l'index GCS: {e}")
+            logger.info(f"Erreur lors de la mise à jour de l'index GCS: {e}")
     
     def _estimate_total_size(self):
         """Estime la taille totale du buffer sur GCS"""
@@ -509,12 +520,12 @@ class GCSReplayBuffer:
                     blob = self.bucket.blob(file_path)
                     blob.delete()
                 except Exception as e:
-                    print(f"Erreur lors de la suppression de {file_path}: {e}")
+                    logger.info(f"Erreur lors de la suppression de {file_path}: {e}")
             
             # Supprimer de l'index
             del self.gcs_index[iter_to_remove]
             
-        print(f"Nettoyage: suppression de {to_remove} anciennes itérations.")
+        logger.info(f"Nettoyage: suppression de {to_remove} anciennes itérations.")
     
     def _parse_tfrecord(self, example):
         """Parse un exemple TFRecord en dictionnaire numpy"""
@@ -562,7 +573,7 @@ class GCSReplayBuffer:
             if self.local_size == 0:
                 raise ValueError("Buffer vide, impossible d'échantillonner")
             
-            #print("Avertissement: Aucune donnée disponible sur GCS, utilisation du cache local.")
+            #logger.info("Avertissement: Aucune donnée disponible sur GCS, utilisation du cache local.")
             if rng_key is None:
                 local_indices = np.random.randint(0, self.local_size, size=batch_size)
             else:
@@ -668,7 +679,7 @@ class GCSReplayBuffer:
                     if len(all_examples) >= n_samples:
                         break
                 except Exception as e:
-                    print(f"Erreur lors du chargement des exemples de {file_path}: {e}")
+                    logger.info(f"Erreur lors du chargement des exemples de {file_path}: {e}")
             
             # Si nous avons assez d'exemples, arrêter l'échantillonnage
             if len(all_examples) >= n_samples:
@@ -779,7 +790,7 @@ class GCSReplayBuffer:
             
             self.write_queue.task_done()
         
-        print(f"GCSReplayBuffer fermé. Données locales sauvegardées.")
+        logger.info(f"GCSReplayBuffer fermé. Données locales sauvegardées.")
     
     def __del__(self):
         """Destructeur pour assurer la fermeture propre"""

@@ -8,6 +8,15 @@ from functools import partial
 from typing import List, Dict, Any, Tuple
 from environment.env import AbaloneEnv
 
+import logging
+
+# Configuration du logger au début de votre script ou dans __init__
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - Process %(process)d - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("alphazero.evaluator")
 
 def generate_evaluation_checkpoints(total_iterations: int, num_checkpoints: int = 10) -> List[int]:
     """
@@ -85,7 +94,7 @@ def download_checkpoint(gcs_path, local_path):
         subprocess.run(f"gsutil cp {gcs_path} {local_path}", shell=True, check=True)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Erreur lors du téléchargement du checkpoint {gcs_path}: {e}")
+        logger.info(f"Erreur lors du téléchargement du checkpoint {gcs_path}: {e}")
         return False
 
 def load_checkpoint_params(checkpoint_path):
@@ -95,7 +104,7 @@ def load_checkpoint_params(checkpoint_path):
             checkpoint = pickle.load(f)
         return checkpoint['params']
     except Exception as e:
-        print(f"Erreur lors du chargement du checkpoint {checkpoint_path}: {e}")
+        logger.info(f"Erreur lors du chargement du checkpoint {checkpoint_path}: {e}")
         return None
 
 class ModelsEvaluator:
@@ -241,7 +250,7 @@ class ModelsEvaluator:
         sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
         
         # Jouer des parties d'évaluation (actuel en tant que noir, référence en tant que blanc)
-        print("Parties d'évaluation (modèle actuel en tant que Noir)...")
+        logger.info("Parties d'évaluation (modèle actuel en tant que Noir)...")
         results_current_black = self.play_evaluation_games(
             sharded_rngs, 
             current_params_replicated,
@@ -250,7 +259,7 @@ class ModelsEvaluator:
         )
         
         # Inverser les rôles pour l'équité
-        print("Parties d'évaluation (modèle actuel en tant que Blanc)...")
+        logger.info("Parties d'évaluation (modèle actuel en tant que Blanc)...")
         new_rng_key = jax.random.fold_in(rng_key, 1000)
         sharded_rngs = jax.random.split(new_rng_key, self.num_devices)
         sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)

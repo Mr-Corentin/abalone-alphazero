@@ -20,6 +20,15 @@ from environment.env import AbaloneEnv
 from training.trainer import AbaloneTrainerSync
 from training.config import DEFAULT_CONFIG, CPU_CONFIG, get_config
 
+import logging
+
+# Configuration du logger au début de votre script ou dans __init__
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - Process %(process)d - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("alphazero.main")
 
 def parse_args():
     """Parse command line arguments"""
@@ -131,13 +140,13 @@ def get_merged_config(args):
 
 def display_config_summary(config):
     """Display a summary of the configuration"""
-    print("\n=== Configuration ===")
-    print(f"Model: {config['model']['num_filters']} filters, {config['model']['num_blocks']} blocks")
-    print(f"Buffer: {config['buffer']['size']} positions")
-    print(f"Training: {config['training']['num_iterations']} iterations, {config['training']['games_per_iteration']} games/iter")
-    print(f"Batch: {config['training']['batch_size']}, {config['training']['training_steps_per_iteration']} steps/iter")
-    print(f"MCTS: {config['mcts']['num_simulations']} simulations per action")
-    print(f"Checkpoints: {config['checkpoint']['path']}")
+    logger.info("\n=== Configuration ===")
+    logger.info(f"Model: {config['model']['num_filters']} filters, {config['model']['num_blocks']} blocks")
+    logger.info(f"Buffer: {config['buffer']['size']} positions")
+    logger.info(f"Training: {config['training']['num_iterations']} iterations, {config['training']['games_per_iteration']} games/iter")
+    logger.info(f"Batch: {config['training']['batch_size']}, {config['training']['training_steps_per_iteration']} steps/iter")
+    logger.info(f"MCTS: {config['mcts']['num_simulations']} simulations per action")
+    logger.info(f"Checkpoints: {config['checkpoint']['path']}")
 
 
 def display_hardware_info():
@@ -147,23 +156,23 @@ def display_hardware_info():
     process_index = jax.process_index()
     process_count = jax.process_count()
 
-    print(f"\n=== Hardware Configuration ===")
-    print(f"Process {process_index+1}/{process_count} - Local devices: {local_device_count}")
-    print(f"Total devices across all processes: {global_device_count}")
+    logger.info(f"\n=== Hardware Configuration ===")
+    logger.info(f"Process {process_index+1}/{process_count} - Local devices: {local_device_count}")
+    logger.info(f"Total devices across all processes: {global_device_count}")
 
     # Correction: Accéder au premier device local pour déterminer la plateforme
     local_devices = jax.local_devices()
     if not local_devices:
-         print("Platform: No local devices found!")
+         logger.info("Platform: No local devices found!")
          return # Quitter si aucun device local n'est trouvé
 
     first_device = local_devices[0]
     if first_device.platform == 'tpu':
-        print(f"Platform: TPU ({first_device.device_kind})") # Utiliser device_kind pour la version
+        logger.info(f"Platform: TPU ({first_device.device_kind})") # Utiliser device_kind pour la version
     elif first_device.platform == 'gpu':
-        print(f"Platform: GPU ({first_device.device_kind})") # Utiliser device_kind pour la version
+        logger.info(f"Platform: GPU ({first_device.device_kind})") # Utiliser device_kind pour la version
     else:
-        print(f"Platform: {first_device.platform}")
+        logger.info(f"Platform: {first_device.platform}")
 
 
 def create_trainer(config, args): 
@@ -221,15 +230,15 @@ def main():
     if args.mode == 'train':
         trainer = create_trainer(config, args)
         
-        print("\n=== Starting training ===")
+        logger.info("\n=== Starting training ===")
         
         eval_frequency = config['checkpoint']['eval_frequency']
         if args.no_eval:
             eval_frequency = 0
-            print("Evaluation disabled")
+            logger.info("Evaluation disabled")
         else:
             eval_games = config.get('evaluation', {}).get('num_games', 5)
-            print(f"Evaluation: Every {eval_frequency} iterations, {eval_games} games per algorithm")
+            logger.info(f"Evaluation: Every {eval_frequency} iterations, {eval_games} games per algorithm")
         
         trainer.train(
             num_iterations=config['training']['num_iterations'],
@@ -241,11 +250,11 @@ def main():
     
     elif args.mode == 'eval':
         # To implement: model evaluation
-        print("Evaluation mode not implemented. Use the Evaluator class directly.")
+        logger.info("Evaluation mode not implemented. Use the Evaluator class directly.")
     
     elif args.mode == 'play':
         # To implement: game interface
-        print("Play mode not implemented.")
+        logger.info("Play mode not implemented.")
 
 
 if __name__ == "__main__":
