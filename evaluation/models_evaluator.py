@@ -129,7 +129,9 @@ class ModelsEvaluator:
         """Crée une fonction pour jouer des parties entre deux versions du modèle."""
         from mcts.agent import get_best_move
         
-        @partial(jax.pmap, axis_name='devices')
+        # @partial(jax.pmap, axis_name='devices')
+        # def play_evaluation_games(rng_keys, black_params, white_params, games_per_device):
+        @partial(jax.pmap, axis_name='devices', static_broadcasted_argnums=(3))
         def play_evaluation_games(rng_keys, black_params, white_params, games_per_device):
             """
             Joue des parties d'évaluation entre deux versions du modèle.
