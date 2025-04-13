@@ -4,7 +4,7 @@ from functools import partial
 import time
 
 # Importations locales
-from environment.env import AbaloneEnv, AbaloneEnvNonCanonical, AbaloneState, AbaloneStateNonCanonical
+from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel
 from mcts.core import AbaloneMCTSRecurrentFn
 from mcts.search import run_search_batch
@@ -60,38 +60,32 @@ from mcts.search import run_search_batch
 
 #     return best_action
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
-def get_best_move(state,
+def get_best_move(state: AbaloneState,
                  params,
                  network: AbaloneModel,
-                 env,
+                 env: AbaloneEnv,
                  num_simulations: int = 600,
-                 rng_key=None):  
+                 rng_key=None):
     """
     Obtient le meilleur coup à jouer dans un état donné selon MCTS+réseau.
     """
+    # Utiliser la clé RNG fournie ou en créer une par défaut
     if rng_key is None:
-        rng_key = jax.random.PRNGKey(0) 
+        rng_key = jax.random.PRNGKey(0)
 
+    # Créer le recurrent_fn pour MCTS
     recurrent_fn = AbaloneMCTSRecurrentFn(env, network)
-    
-    # Vérifier le type d'état et adapter
-    if hasattr(state, 'current_player'):
-        player = state.current_player
-        # Convertir le plateau en représentation canonique
-        canonical_board = env.get_canonical_state(state.board, player)
-    else:
-        player = state.actual_player
-        canonical_board = state.board
-    
-    # Créer le batch state avec le plateau canonisé
+
+    # Transformer l'état en batch de taille 1
     batch_state = AbaloneState(
-        board=canonical_board[None, ...],
-        actual_player=jnp.array([player]),
+        board=state.board[None, ...],
+        actual_player=jnp.array([state.actual_player]),
         black_out=jnp.array([state.black_out]),
         white_out=jnp.array([state.white_out]),
         moves_count=jnp.array([state.moves_count])
     )
 
+    # Exécuter la recherche MCTS
     policy_output = run_search_batch(
         batch_state,
         recurrent_fn,
@@ -102,6 +96,7 @@ def get_best_move(state,
         num_simulations=num_simulations
     )
 
+    # Récupérer l'action avec le score le plus élevé
     best_action = policy_output.action[0]
 
     return best_action

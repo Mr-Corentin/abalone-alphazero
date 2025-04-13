@@ -6,6 +6,8 @@ import pickle
 import math
 from functools import partial
 from typing import List, Dict, Any, Tuple
+from environment.env import AbaloneEnv
+
 
 def generate_evaluation_checkpoints(total_iterations: int, num_checkpoints: int = 10) -> List[int]:
     """
@@ -115,8 +117,7 @@ class ModelsEvaluator:
         self.games_per_model = games_per_model
         
         # Créer un environnement non-canonique pour l'évaluation
-        from environment.env import AbaloneEnvNonCanonical
-        self.env = AbaloneEnvNonCanonical(radius=radius)
+        self.env = AbaloneEnv(radius=radius)
         
         # Stocker les dispositifs locaux pour les opérations TPU
         self.devices = jax.local_devices()
