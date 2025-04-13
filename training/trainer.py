@@ -147,7 +147,7 @@ class AbaloneTrainerSync:
         
         # Initialize parameters and optimization state
         #rng = jax.random.PRNGKey(42)
-        rng = jax.random.PRNGKey(42 + self.process_id * 1000)
+        rng = jax.random.PRNGKey(42)
 
         sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
