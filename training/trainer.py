@@ -98,7 +98,6 @@ class AbaloneTrainerSync:
             self.device_type = 'gpu'
         else:
             self.device_type = 'cpu'
-        
         logger.info(f"Process {self.process_id+1}/{self.num_processes}: "
               f"Using {self.num_devices} local {self.device_type.upper()} cores from {self.num_global_devices} total")
             
@@ -129,18 +128,20 @@ class AbaloneTrainerSync:
             ]
         else:
             self.lr_schedule = lr_schedule
+        if self.is_main_process:
+            logger.info(f"Optimizer: SGD+momentum")
+            logger.info(f"Initial learning rate: {self.initial_lr}, Momentum: {self.momentum}")
+            logger.info(f"Learning rate schedule: {self.lr_schedule}")
             
-        logger.info(f"Optimizer: SGD+momentum")
-        logger.info(f"Initial learning rate: {self.initial_lr}, Momentum: {self.momentum}")
-        logger.info(f"Learning rate schedule: {self.lr_schedule}")
-        
         # Display sampling configuration
-        if self.recency_bias:
-            logger.info(f"Using recency bias with temperature {self.recency_temperature}")
-        else:
-            logger.info("Using uniform sampling")
+        if self.is_main_process:
+            if self.recency_bias:
+                logger.info(f"Using recency bias with temperature {self.recency_temperature}")
+            else:
+                logger.info("Using uniform sampling")
         if use_gcs_buffer and gcs_bucket:
-            logger.info(f"Utilisation d'un buffer global sur GCS: {gcs_bucket}/{gcs_buffer_dir}")
+            if self.is_main_process:
+                logger.info(f"Utilisation d'un buffer global sur GCS: {gcs_bucket}/{gcs_buffer_dir}")
             from training.replay_buffer import GCSReplayBuffer
             self.buffer = GCSReplayBuffer(
                 bucket_name=gcs_bucket,
@@ -150,7 +151,8 @@ class AbaloneTrainerSync:
                 recency_temperature=recency_temperature
             )
         else:
-            logger.info(f"Utilisation d'un buffer local de taille {buffer_size}")
+            if self.is_main_process:
+                logger.info(f"Utilisation d'un buffer local de taille {buffer_size}")
             self.buffer = CPUReplayBuffer(buffer_size)
         
         # Initialize SGD optimizer
@@ -184,20 +186,23 @@ class AbaloneTrainerSync:
         if is_gcs:
             bucket_name = self.log_dir.split('/', 3)[2]  # Extrait le nom du bucket
             log_path = '/'.join(self.log_dir.split('/')[3:])  # Chemin dans le bucket
-            logger.info(f"TensorBoard logs: {self.log_dir}")
-            logger.info(f"Pour visualiser les logs:")
-            logger.info(f"  1. tensorboard --logdir=gs://{bucket_name}/{log_path}")
-            logger.info(f"  2. ou avec proxy: python -m tensorboard.main --logdir={self.log_dir} --port=6006")
+            if self.is_main_process:
+                logger.info(f"TensorBoard logs: {self.log_dir}")
+                logger.info(f"Pour visualiser les logs:")
+                logger.info(f"  1. tensorboard --logdir=gs://{bucket_name}/{log_path}")
+                logger.info(f"  2. ou avec proxy: python -m tensorboard.main --logdir={self.log_dir} --port=6006")
         else:
             # Obtenir le chemin absolu pour les logs locaux
             abs_log_dir = os.path.abspath(self.log_dir)
-            logger.info(f"TensorBoard logs: {abs_log_dir}")
-            logger.info(f"Pour visualiser les logs: tensorboard --logdir={abs_log_dir}")
+            if self.is_main_process:
+                logger.info(f"TensorBoard logs: {abs_log_dir}")
+                logger.info(f"Pour visualiser les logs: tensorboard --logdir={abs_log_dir}")
                 
         # Initialize game logger
         if self.save_games:
             if gcs_bucket:
-                logger.info(f"Storing games in GCS: {gcs_bucket}")
+                if self.is_main_process:
+                    logger.info(f"Storing games in GCS: {gcs_bucket}")
                 self.game_logger = GameLogger(
                     bucket_name=gcs_bucket,
                     process_id=self.process_id,
@@ -206,7 +211,8 @@ class AbaloneTrainerSync:
                 )
             else:
                 games_dir = os.path.join(self.log_dir, "games")
-                logger.info(f"Local game storage: {games_dir}")
+                if self.is_main_process:
+                    logger.info(f"Local game storage: {games_dir}")
                 self.game_logger = LocalGameLogger(
                     output_dir=games_dir,
                     buffer_size=games_buffer_size,
@@ -227,11 +233,12 @@ class AbaloneTrainerSync:
         self.eval_enabled = enable
         self.eval_frequency = frequency
         self.eval_games = num_games
-        
-        logger.info(f"Evaluation {'enabled' if enable else 'disabled'}")
+        if self.is_main_process:
+            logger.info(f"Evaluation {'enabled' if enable else 'disabled'}")
         if enable:
-            logger.info(f"  Frequency: Every {frequency} iterations")
-            logger.info(f"  Games per algorithm: {num_games}")
+            if self.is_main_process:
+                logger.info(f"  Frequency: Every {frequency} iterations")
+                logger.info(f"  Games per algorithm: {num_games}")
         
     def _update_learning_rate(self, iteration_percentage):
         """
@@ -251,7 +258,8 @@ class AbaloneTrainerSync:
                 new_lr = lr
         
         if new_lr != self.current_lr:
-            logger.info(f"Learning rate updated: {self.current_lr} -> {new_lr}")
+            if self.is_main_process:
+                logger.info(f"Learning rate updated: {self.current_lr} -> {new_lr}")
             self.current_lr = new_lr
             
             # Create new optimizer with gradient clipping
@@ -333,8 +341,8 @@ class AbaloneTrainerSync:
                 # Mettre à jour le taux d'apprentissage selon le planning
                 iteration_percentage = iteration / num_iterations
                 self._update_learning_rate(iteration_percentage)
-                
-                logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
+                if self.is_main_process:
+                    logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
                 
                 # 1. Phase de génération
                 rng_key, gen_key = jax.random.split(rng_key)
@@ -344,7 +352,8 @@ class AbaloneTrainerSync:
                 games_data = self._generate_games(gen_key, games_per_iteration)
                 
                 t_gen = time.time() - t_start
-                logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
+                if self.is_main_process:
+                    logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
                 
                 # 2. Mise à jour du buffer
                 t_start = time.time()
@@ -356,12 +365,14 @@ class AbaloneTrainerSync:
                 # Afficher les infos du buffer appropriées
                 if hasattr(self.buffer, 'gcs_index'):
                     # Buffer GCS
-                    logger.info(f"Buffer mis à jour: +{positions_added} positions")
-                    logger.info(f"  - Cache local: {self.buffer.local_size} positions")
-                    logger.info(f"  - Total estimé: {self.buffer.total_size} positions")
+                    if self.is_main_process:
+                        logger.info(f"Buffer mis à jour: +{positions_added} positions")
+                        logger.info(f"  - Cache local: {self.buffer.local_size} positions")
+                        logger.info(f"  - Total estimé: {self.buffer.total_size} positions")
                 else:
                     # Buffer local
-                    logger.info(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
+                    if self.is_main_process:
+                        logger.info(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
                 
                 # 3. Phase d'entraînement
                 rng_key, train_key = jax.random.split(rng_key)
@@ -370,21 +381,22 @@ class AbaloneTrainerSync:
                 metrics = self._train_network(train_key, training_steps_per_iteration)
                 
                 t_train = time.time() - t_start
-                logger.info(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
+                if self.is_main_process:
+                    logger.info(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
                 
-                # Afficher les métriques
-                logger.info(f"  Perte totale: {metrics['total_loss']:.4f}")
-                logger.info(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
-                logger.info(f"  Précision politique: {metrics['policy_accuracy']}")
-                
+                    logger.info(f"  Perte totale: {metrics['total_loss']:.4f}")
+                    logger.info(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
+                    logger.info(f"  Précision politique: {metrics['policy_accuracy']}")
+                    
     
                 if eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
                     eval_start = time.time()
-                    logger.info("\nExécution de l'évaluation contre modèles précédents...")
-                    # Passer le nombre total d'itérations prévues
+                    if self.is_main_process:
+                        logger.info("\nExécution de l'évaluation contre modèles précédents...")
                     self.evaluate_against_previous_models(num_iterations)
                     eval_time = time.time() - eval_start
-                    logger.info(f"Évaluation terminée en {eval_time:.2f}s")
+                    if self.is_main_process:
+                        logger.info(f"Évaluation terminée en {eval_time:.2f}s")
             
                 # 5. Sauvegarde périodique
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0 and self.is_main_process:
@@ -403,15 +415,17 @@ class AbaloneTrainerSync:
                 
             # Fermer proprement le buffer GCS si présent
             if hasattr(self.buffer, 'close'):
-                logger.info("Fermeture du buffer GCS...")
+                if self.is_main_process:
+                    logger.info("Fermeture du buffer GCS...")
                 self.buffer.close()
             
             # Statistiques globales
             total_time = time.time() - start_time_global
-            logger.info(f"\n=== Entraînement terminé ===")
-            logger.info(f"Parties générées: {self.total_games}")
-            logger.info(f"Positions totales: {self.total_positions}")
-            logger.info(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
+            if self.is_main_process:
+                logger.info(f"\n=== Entraînement terminé ===")
+                logger.info(f"Parties générées: {self.total_games}")
+                logger.info(f"Positions totales: {self.total_positions}")
+                logger.info(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
 
     def _generate_games(self, rng_key, num_games):
         """
@@ -473,10 +487,11 @@ class AbaloneTrainerSync:
         global_total_games = local_total_games * self.num_processes
         
         if self.is_main_process or self.num_processes == 1:
-            logger.info(f"  Preparation: {t_prep:.3f}s")
-            logger.info(f"  Generation: {t_gen:.3f}s (local: {local_total_games/t_gen:.1f} games/s, "
-                f"estimated global: {global_total_games/t_gen:.1f} games/s)")
-            logger.info(f"  Retrieval: {t_fetch:.3f}s ({t_fetch/local_total_games*1000:.1f} ms/game)")
+            if self.is_main_process:
+                logger.info(f"  Preparation: {t_prep:.3f}s")
+                logger.info(f"  Generation: {t_gen:.3f}s (local: {local_total_games/t_gen:.1f} games/s, "
+                    f"estimated global: {global_total_games/t_gen:.1f} games/s)")
+                logger.info(f"  Retrieval: {t_fetch:.3f}s ({t_fetch/local_total_games*1000:.1f} ms/game)")
         
         # Record games for analysis if enabled
         if self.save_games and hasattr(self, 'game_logger'):
@@ -498,7 +513,8 @@ class AbaloneTrainerSync:
             
             t_convert = time.time() - t_convert_start
             if self.is_main_process or self.num_processes == 1:
-                logger.info(f"  Conversion for storage: {t_convert:.3f}s")
+                if self.is_main_process:
+                    logger.info(f"  Conversion for storage: {t_convert:.3f}s")
         
         return games_data
     
@@ -606,7 +622,8 @@ class AbaloneTrainerSync:
         # Vérifier si le buffer est vide
         if (hasattr(self.buffer, 'local_size') and self.buffer.local_size == 0) or \
         (hasattr(self.buffer, 'size') and self.buffer.size == 0):
-            logger.info("Buffer vide, impossible d'entraîner le réseau.")
+            if self.is_main_process:
+                logger.info("Buffer vide, impossible d'entraîner le réseau.")
             # Retourner des métriques nulles
             return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
                     'policy_accuracy': 0.0, 'value_sign_match': 0.0}
@@ -617,7 +634,8 @@ class AbaloneTrainerSync:
         if using_gcs_buffer:
             gcs_index_available = bool(self.buffer.gcs_index) 
             if not gcs_index_available:
-                logger.info("Avertissement: Index GCS non disponible ou vide au début de cette phase d'entraînement. Utilisation du cache local si possible.")
+                if self.is_main_process:
+                    logger.info("Avertissement: Index GCS non disponible ou vide au début de cette phase d'entraînement. Utilisation du cache local si possible.")
         
         # Initialiser les paramètres et l'état de l'optimiseur sur les dispositifs une seule fois
         # au début de la séquence d'entraînement
@@ -634,17 +652,16 @@ class AbaloneTrainerSync:
                 try:
                     batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
                 except ValueError as e:
-                    logger.info(f"Erreur lors de l'échantillonnage: {e}")
-                    # Si GCS pas encore disponible, attendre et sauter cette étape
+                    if self.is_main_process:
+                        logger.info(f"Erreur lors de l'échantillonnage: {e}")
                     if step == 0:
-                        logger.info("Attente de données sur GCS pour l'entraînement...")
+                        if self.is_main_process:
+                            logger.info("Attente de données sur GCS pour l'entraînement...")
                         time.sleep(10)
                         continue
                     else:
-                        # Arrêter l'entraînement si on a déjà fait quelques étapes
                         break
             else:
-                # Pour le buffer local classique
                 if self.recency_bias:
                     batch_data = self.buffer.sample_with_recency_bias(
                         total_batch_size,
@@ -661,19 +678,16 @@ class AbaloneTrainerSync:
             policies = jnp.array(batch_data['policy'])
             values = jnp.array(batch_data['outcome'])
             
-            # Reshape des données en chunks pour chaque dispositif local
-            # Shape devient: (num_local_devices, batch_size_per_device, ...)
+
             boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
             marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
             policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
             
-            # Exécuter l'étape d'entraînement parallèle avec les paramètres déjà sur dispositif
             metrics_sharded, grads_averaged = self.train_step_pmap(
                 params_sharded, (boards, marbles), policies, values
             )
             
-            # Mettre à jour directement les versions shardées
             updates, opt_state_sharded = self.optimizer_update_pmap(
                 grads_averaged, opt_state_sharded, params_sharded
             )
@@ -682,7 +696,6 @@ class AbaloneTrainerSync:
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
             
-            # Cumuler les métriques sur les étapes pour ce processus
             if cumulative_metrics is None:
                 cumulative_metrics = step_metrics
             else:
@@ -775,8 +788,9 @@ class AbaloneTrainerSync:
             # Then send to GCS
             gcs_path = f"{self.checkpoint_path}_{prefix}.pkl"
             subprocess.run(f"gsutil cp {local_path} {gcs_path}", shell=True)
+            if self.is_main_process:
             
-            logger.info(f"Checkpoint saved: {gcs_path}")
+                logger.info(f"Checkpoint saved: {gcs_path}")
             
             # Delete local file
             os.remove(local_path)
@@ -785,8 +799,9 @@ class AbaloneTrainerSync:
             filename = f"{self.checkpoint_path}_{prefix}.pkl"
             with open(filename, 'wb') as f:
                 pickle.dump(checkpoint, f)
+            if self.is_main_process:
             
-            logger.info(f"Checkpoint saved: {filename}")
+                logger.info(f"Checkpoint saved: {filename}")
         
     def load_checkpoint(self, checkpoint_path):
         """
@@ -823,82 +838,9 @@ class AbaloneTrainerSync:
         self.metrics_history = checkpoint['metrics']
         self.total_games = checkpoint['total_games']
         self.total_positions = checkpoint['total_positions']
-        
-        logger.info(f"Checkpoint loaded: {checkpoint_path}")
-        logger.info(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
-
-    def initialize_existing_buffer(self, gcs_bucket, gcs_buffer_dir='buffer', 
-                            recency_bias=None, recency_temperature=None,
-                            max_local_size=None):
-        """
-        Initialise un buffer GCS existant pour poursuivre un entraînement.
-        
-        Args:
-            gcs_bucket: Nom du bucket GCS contenant le buffer
-            gcs_buffer_dir: Dossier dans le bucket pour le buffer
-            recency_bias: Activer/désactiver le biais de récence (None pour conserver la valeur actuelle)
-            recency_temperature: Température pour le biais de récence
-            max_local_size: Taille maximale du cache local
-            
-        Returns:
-            bool: True si l'initialisation a réussi
-        """
-        try:
-            from training.replay_buffer import GCSReplayBuffer
-            
-            # Conserver les paramètres actuels si non spécifiés
-            if recency_bias is None:
-                recency_bias = self.recency_bias
-            
-            if recency_temperature is None:
-                recency_temperature = self.recency_temperature
-                
-            if max_local_size is None:
-                # Par défaut, utiliser 10% de la taille du buffer spécifiée initialement
-                if hasattr(self.buffer, 'max_local_size'):
-                    max_local_size = self.buffer.max_local_size
-                else:
-                    max_local_size = 100000  # Valeur par défaut
-            
-            # Fermer le buffer existant si c'est un GCSReplayBuffer
-            if hasattr(self.buffer, 'close'):
-                logger.info("Fermeture du buffer existant...")
-                self.buffer.close()
-            
-            logger.info(f"Initialisation du buffer GCS existant: {gcs_bucket}/{gcs_buffer_dir}")
-            
-            # Créer le nouveau buffer
-            self.buffer = GCSReplayBuffer(
-                bucket_name=gcs_bucket,
-                buffer_dir=gcs_buffer_dir,
-                max_local_size=max_local_size,
-                recency_enabled=recency_bias,
-                recency_temperature=recency_temperature
-            )
-            
-            # Forcer la mise à jour de l'index
-            self.buffer._update_gcs_index()
-            
-            # Attendre un peu que l'indexation se termine
-            time.sleep(2)
-            
-            # Vérifier si des données sont disponibles
-            if self.buffer.gcs_index:
-                logger.info(f"Buffer GCS initialisé avec succès")
-                logger.info(f"  - Itérations disponibles: {len(self.buffer.gcs_index)}")
-                logger.info(f"  - Nombre estimé d'exemples: {self.buffer.total_size}")
-                return True
-            else:
-                logger.info("Avertissement: Aucune donnée trouvée dans le buffer GCS.")
-                logger.info("Le buffer est prêt mais vide.")
-                return True
-        
-        except Exception as e:
-            logger.info(f"Erreur lors de l'initialisation du buffer GCS: {e}")
-            # Revenir au buffer original en cas d'erreur
-            if not hasattr(self.buffer, 'gcs_index'):
-                logger.info("Conservation du buffer local original.")
-            return False
+        if self.is_main_process:
+            logger.info(f"Checkpoint loaded: {checkpoint_path}")
+            logger.info(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
 
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
         """
@@ -935,15 +877,16 @@ class AbaloneTrainerSync:
                     available_refs.append(ref)
         
         if not available_refs:
-            logger.info("Aucun modèle précédent disponible pour l'évaluation")
+            if self.is_main_process:
+                logger.info("Aucun modèle précédent disponible pour l'évaluation")
             return {}
         
         # Configurer l'évaluation distribuée
         games_per_model = 8  # Multiple de 4 pour équilibrer entre les processus
         local_games_per_model = games_per_model // self.num_processes
-        
-        logger.info(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
-        logger.info(f"Itérations sélectionnées: {available_refs}")
+        if self.is_main_process:
+            logger.info(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
+            logger.info(f"Itérations sélectionnées: {available_refs}")
         logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
         
         # Initialiser l'évaluateur
@@ -958,41 +901,37 @@ class AbaloneTrainerSync:
         local_results = {}
         
         for ref_iter in available_refs:
-            logger.info(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
+            if self.is_main_process:
+                logger.info(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
             
-            # Construire le chemin du checkpoint
             ref_path = self._get_checkpoint_path(ref_iter)
             
-            # Télécharger le checkpoint s'il est sur GCS
             local_path = f"/tmp/ref_model_{ref_iter}.pkl"
             if ref_path.startswith("gs://"):
                 if not download_checkpoint(ref_path, local_path):
-                    logger.info(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
+                    if self.is_main_process:
+                        logger.info(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
                     continue
             else:
                 local_path = ref_path
             
-            # Charger les paramètres du modèle de référence
             ref_params = load_checkpoint_params(local_path)
             if ref_params is None:
-                logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
+                if self.is_main_process:
+                    logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
                 continue
             
-            # Évaluer le modèle actuel contre le modèle de référence, mais seulement avec la part locale des parties
             eval_results = evaluator.evaluate_model_pair(
                 current_params, 
                 ref_params,
                 games_to_play=local_games_per_model
             )
             
-            # Stocker les résultats locaux
             local_results[ref_iter] = eval_results
         
-        # Agréger les résultats de tous les processus
         all_results = self._aggregate_evaluation_results(local_results, available_refs)
         
-        # Le reste du code pour l'affichage et l'enregistrement des résultats
-        # ne s'exécute que sur le processus principal
+
         if self.is_main_process:
             for ref_iter, ref_results in all_results.items():
                 win_rate = ref_results['win_rate']
@@ -1003,7 +942,6 @@ class AbaloneTrainerSync:
                 self.writer.add_scalar(f"eval_vs_prev/win_rate_iter_{ref_iter}", win_rate, self.iteration)
                 self.writer.add_scalar(f"eval_vs_prev/games_iter_{ref_iter}", ref_results['total_games'], self.iteration)
             
-            # Enregistrer les tendances de performance globales
             if all_results:
                 # Calculer le taux de victoire moyen sur tous les modèles de référence
                 avg_win_rate = sum(res['win_rate'] for res in all_results.values()) / len(all_results)
@@ -1017,8 +955,8 @@ class AbaloneTrainerSync:
                     # Stocker les taux de victoire individuels
                     for ref_iter, ref_results in all_results.items():
                         latest_metrics[f'win_rate_vs_iter_{ref_iter}'] = ref_results['win_rate']
-        
-        logger.info(f"\n=== Évaluation terminée ===")
+        if self.is_main_process:
+            logger.info(f"\n=== Évaluation terminée ===")
         return all_results
 
     def _aggregate_evaluation_results(self, local_results, model_iterations):
