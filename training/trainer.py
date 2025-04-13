@@ -282,13 +282,17 @@ class AbaloneTrainerSync:
             devices=self.devices
         )
         
-        # Parameter update function with optimizer
         self.optimizer_update_pmap = jax.pmap(
             lambda g, o, p: self.optimizer.update(g, o, p),
             axis_name='devices',
-            devices=self.devices  # Uniquement les dispositifs locaux
+            devices=self.devices  
     )
-      
+        self.sum_across_devices = jax.pmap(
+            lambda x: jax.lax.psum(x, axis_name='devices'),
+            axis_name='devices',
+            devices=self.devices
+        )
+            
     def train(self, num_iterations=100, games_per_iteration=64, 
             training_steps_per_iteration=100, eval_frequency=10, 
             save_frequency=10):
@@ -1300,19 +1304,13 @@ class AbaloneTrainerSync:
         # Convertir en un seul grand tableau pour faciliter la communication collective
         all_models_data = jnp.stack([aggregated_data[ref] for ref in model_iterations])
         
-        # Utiliser psum pour agréger les résultats de tous les processus
-        # Nécessite un contexte pmap - une façon de le faire est de créer une fonction pmapée spécifique
-        
-        @jax.pmap(axis_name='devices')
-        def sum_across_devices(x):
-            return jax.lax.psum(x, axis_name='devices')
         
         # Répliquer les données sur tous les dispositifs locaux
         replicated_data = jnp.repeat(all_models_data[None, :, :], self.num_devices, axis=0)
         devices_data = jax.device_put_sharded(list(replicated_data), self.devices)
         
         # Exécuter la somme collective
-        summed_data = sum_across_devices(devices_data)
+        summed_data = self.sum_across_devices(devices_data)
         
         # Récupérer les résultats agrégés (prendre juste le premier dispositif)
         global_results = jax.device_get(summed_data)[0]
