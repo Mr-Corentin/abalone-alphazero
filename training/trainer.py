@@ -976,7 +976,7 @@ class AbaloneTrainerSync:
         evaluator = ModelsEvaluator(
             network=self.network,
             num_simulations=max(20, self.num_simulations // 2),  # Réduire le nombre de simulations pour l'évaluation
-            games_per_model=10  # 10 parties par modèle (5 comme noir, 5 comme blanc)
+            games_per_model=4  # 10 parties par modèle (5 comme noir, 5 comme blanc)
         )
         
         # Obtenir les paramètres du modèle actuel
