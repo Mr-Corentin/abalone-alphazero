@@ -124,59 +124,69 @@ class ModelsEvaluator:
         
         # Créer la fonction d'évaluation
         self.play_evaluation_games = self._create_evaluation_function()
-    
+
     def _create_evaluation_function(self):
         """Crée une fonction pour jouer des parties entre deux versions du modèle."""
         from mcts.agent import get_best_move
         
-        # @partial(jax.pmap, axis_name='devices')
-        # def play_evaluation_games(rng_keys, black_params, white_params, games_per_device):
         @partial(jax.pmap, axis_name='devices', static_broadcasted_argnums=(3))
         def play_evaluation_games(rng_keys, black_params, white_params, games_per_device):
             """
             Joue des parties d'évaluation entre deux versions du modèle.
-            
-            Args:
-                rng_keys: Clés aléatoires pour chaque dispositif
-                black_params: Paramètres pour le joueur noir
-                white_params: Paramètres pour le joueur blanc
-                games_per_device: Nombre de parties à jouer par dispositif
-                
-            Returns:
-                Dictionnaire avec les résultats des parties
             """
             def play_single_game(rng_key):
-                """Joue une seule partie entre les modèles noir et blanc."""
-                # Initialiser l'état du jeu
-                state = self.env.reset(rng_key)
-                move_count = 0
-                max_moves = 300  # Éviter les parties infinies
+                # Initialiser l'état
+                init_state = self.env.reset(rng_key)
                 
-                while not self.env.is_terminal(state) and move_count < max_moves:
-                    # Déterminer quel modèle utiliser en fonction du joueur actuel
-                    if state.actual_player == 1:  # Tour du noir
-                        action = get_best_move(state, black_params, self.network, self.env, self.num_simulations, rng_key)
-                    else:  # Tour du blanc
-                        action = get_best_move(state, white_params, self.network, self.env, self.num_simulations, rng_key)
+                # Créer la fonction de condition pour while_loop
+                def cond_fn(carry):
+                    state, move_count, current_rng = carry
+                    not_terminal = jnp.logical_not(self.env.is_terminal(state))
+                    under_max = move_count < 300  # max_moves
+                    return jnp.logical_and(not_terminal, under_max)
+                
+                # Créer le corps de la boucle
+                def body_fn(carry):
+                    state, move_count, current_rng = carry
                     
-                    # Appliquer l'action choisie
-                    state = self.env.step(state, action)
+                    # Générer une nouvelle clé
+                    current_rng, action_key = jax.random.split(current_rng)
                     
-                    # Mettre à jour le compteur de coups et la clé RNG
-                    move_count += 1
-                    rng_key = jax.random.fold_in(rng_key, move_count)
+                    # Sélectionner l'action en fonction du joueur actuel
+                    is_black = state.current_player == 1
+                    
+                    action = jax.lax.cond(
+                        is_black,
+                        lambda: get_best_move(state, black_params, self.network, self.env, 
+                                            self.num_simulations, action_key),
+                        lambda: get_best_move(state, white_params, self.network, self.env, 
+                                            self.num_simulations, action_key)
+                    )
+                    
+                    # Appliquer l'action
+                    next_state = self.env.step(state, action)
+                    
+                    return next_state, move_count + 1, current_rng
                 
-                # Déterminer le résultat
-                # 1: Noir gagne
-                # -1: Blanc gagne
-                # 0: Match nul
-                if self.env.is_terminal(state):
-                    outcome = self.env.get_winner(state)
-                else:
-                    # Match nul si nombre max de coups atteint
-                    outcome = 0
+                # Exécuter la boucle JAX
+                final_state, final_moves, _ = jax.lax.while_loop(
+                    cond_fn,
+                    body_fn,
+                    (init_state, 0, rng_key)
+                )
                 
-                return outcome, move_count
+                # Déterminer le résultat final
+                outcome = jax.lax.cond(
+                    final_state.black_out >= 6,
+                    lambda: jnp.array(-1, dtype=jnp.int8),  # Black lost (white won)
+                    lambda: jax.lax.cond(
+                        final_state.white_out >= 6,
+                        lambda: jnp.array(1, dtype=jnp.int8),  # Black won
+                        lambda: jnp.array(0, dtype=jnp.int8)   # Draw
+                    )
+                )
+                
+                return outcome, final_moves
             
             # Générer un lot de parties
             keys = jax.random.split(rng_keys, games_per_device + 1)
@@ -185,7 +195,7 @@ class ModelsEvaluator:
             outcomes = jnp.zeros(games_per_device, dtype=jnp.int8)
             move_counts = jnp.zeros(games_per_device, dtype=jnp.int16)
             
-            # Boucle pour chaque partie
+            # Exécuter les parties (de manière séquentielle mais compilée)
             for i in range(games_per_device):
                 outcome, moves = play_single_game(keys[i])
                 outcomes = outcomes.at[i].set(outcome)
@@ -198,6 +208,9 @@ class ModelsEvaluator:
             }
         
         return play_evaluation_games
+
+    
+
     
     def evaluate_model_pair(self, current_params, reference_params):
         """

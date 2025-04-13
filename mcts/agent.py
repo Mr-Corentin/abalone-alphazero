@@ -10,32 +10,71 @@ from mcts.core import AbaloneMCTSRecurrentFn
 from mcts.search import run_search_batch
 
 
+# @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
+# def get_best_move(state: AbaloneState,
+#                  params,
+#                  network: AbaloneModel,
+#                  env: AbaloneEnv,
+#                  num_simulations: int = 600):
+#     """
+#     Obtient le meilleur coup à jouer dans un état donné selon MCTS+réseau.
+    
+#     Args:
+#         state: État actuel du jeu
+#         params: Paramètres du réseau
+#         network: Modèle réseau
+#         env: Environnement du jeu
+#         num_simulations: Nombre de simulations MCTS
+        
+#     Returns:
+#         Index du meilleur coup à jouer
+#     """
+#     # Créer une clé RNG
+#     rng_key = jax.random.PRNGKey(int(time.time() * 1000) % (2**32))
+
+#     # Créer le recurrent_fn pour MCTS
+#     recurrent_fn = AbaloneMCTSRecurrentFn(env, network)
+
+#     # Transformer l'état en batch de taille 1
+#     batch_state = AbaloneState(
+#         board=state.board[None, ...],
+#         actual_player=jnp.array([state.actual_player]),
+#         black_out=jnp.array([state.black_out]),
+#         white_out=jnp.array([state.white_out]),
+#         moves_count=jnp.array([state.moves_count])
+#     )
+
+#     # Exécuter la recherche MCTS
+#     policy_output = run_search_batch(
+#         batch_state,
+#         recurrent_fn,
+#         network,
+#         params,
+#         rng_key,
+#         env,
+#         num_simulations=num_simulations
+#     )
+
+#     # Récupérer l'action avec le score le plus élevé
+#     best_action = policy_output.action[0]
+
+#     return best_action
+
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
 def get_best_move(state: AbaloneState,
                  params,
                  network: AbaloneModel,
                  env: AbaloneEnv,
-                 num_simulations: int = 600):
+                 num_simulations: int = 600,
+                 rng_key=None):  
     """
     Obtient le meilleur coup à jouer dans un état donné selon MCTS+réseau.
-    
-    Args:
-        state: État actuel du jeu
-        params: Paramètres du réseau
-        network: Modèle réseau
-        env: Environnement du jeu
-        num_simulations: Nombre de simulations MCTS
-        
-    Returns:
-        Index du meilleur coup à jouer
     """
-    # Créer une clé RNG
-    rng_key = jax.random.PRNGKey(int(time.time() * 1000) % (2**32))
+    if rng_key is None:
+        rng_key = jax.random.PRNGKey(0) 
 
-    # Créer le recurrent_fn pour MCTS
     recurrent_fn = AbaloneMCTSRecurrentFn(env, network)
 
-    # Transformer l'état en batch de taille 1
     batch_state = AbaloneState(
         board=state.board[None, ...],
         actual_player=jnp.array([state.actual_player]),
@@ -44,7 +83,6 @@ def get_best_move(state: AbaloneState,
         moves_count=jnp.array([state.moves_count])
     )
 
-    # Exécuter la recherche MCTS
     policy_output = run_search_batch(
         batch_state,
         recurrent_fn,
@@ -55,7 +93,6 @@ def get_best_move(state: AbaloneState,
         num_simulations=num_simulations
     )
 
-    # Récupérer l'action avec le score le plus élevé
     best_action = policy_output.action[0]
 
     return best_action
