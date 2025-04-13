@@ -947,8 +947,8 @@ class AbaloneTrainerSync:
         )
         
         # Ne faire l'évaluation que sur le processus principal
-        if not self.is_main_process:
-            return {}
+        # if not self.is_main_process:
+        #     return {}
         
         current_iter = self.iteration
         results = {}
