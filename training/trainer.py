@@ -1039,43 +1039,119 @@ class AbaloneTrainerSync:
             if not hasattr(self.buffer, 'gcs_index'):
                 print("Conservation du buffer local original.")
             return False
-        
-    # def _evaluate(self):
-    #     """
-    #     Évalue le modèle actuel contre des algorithmes classiques.
-    #     Exécuté uniquement sur le processus principal.
-    #     """
+
     
-    #     evaluator = Evaluator(self.params, self.network, self.env)
+    # def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
+    #     """
+    #     Évalue le modèle actuel contre des versions précédentes sur TPU.
+    #     Exécuté uniquement sur le processus principal.
         
-    #     algorithms = [
-    #         ("alphabeta_pruning", 3)  
-    #     ]
-        
-    #     results = evaluator.evaluate_against_classical(
-    #         algorithms=algorithms,
-    #         num_games_per_algo=self.eval_games,
-    #         verbose=True
+    #     Args:
+    #         total_iterations: Nombre total d'itérations prévues pour l'entraînement
+    #         num_reference_models: Nombre approximatif de modèles de référence à utiliser
+            
+    #     Returns:
+    #         Dictionary contenant les résultats d'évaluation
+    #     """
+    #     from evaluation.models_evaluator import (
+    #         generate_evaluation_checkpoints, 
+    #         check_checkpoint_exists,
+    #         download_checkpoint,
+    #         load_checkpoint_params,
+    #         ModelsEvaluator
     #     )
         
-        # for algo_name, data in results.items():
-        #     win_rate = data["win_rate"]
-        #     self.writer.add_scalar(f"evaluation/win_rate_{algo_name}", win_rate, self.iteration)
-        #     self.writer.add_scalar(f"evaluation/wins_{algo_name}", data["wins"], self.iteration)
-        #     self.writer.add_scalar(f"evaluation/losses_{algo_name}", data["losses"], self.iteration)
-        #     self.writer.add_scalar(f"evaluation/draws_{algo_name}", data["draws"], self.iteration)
+    #     current_iter = self.iteration
+    #     results = {}
         
-        # print("\n=== Résultats d'évaluation ===")
-        # for algo_name, data in results.items():
-        #     win_rate = data["win_rate"]
-        #     print(f"vs {algo_name}: {win_rate:.1%} ({data['wins']}/{data['wins']+data['losses']+data['draws']})")
+    #     # Générer les itérations de référence
+    #     target_references = generate_evaluation_checkpoints(total_iterations, num_reference_models)
         
-        # return results
-    
+    #     # Filtrer pour ne garder que celles qui sont disponibles et antérieures à l'itération actuelle
+    #     available_refs = []
+    #     for ref in target_references:
+    #         if ref < current_iter:
+    #             # Vérifier si le checkpoint existe
+    #             ref_path = self._get_checkpoint_path(ref)
+    #             if check_checkpoint_exists(ref_path):
+    #                 available_refs.append(ref)
+        
+    #     if not available_refs:
+    #         print("Aucun modèle précédent disponible pour l'évaluation")
+    #         return {}
+        
+    #     print(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
+    #     print(f"Itérations sélectionnées: {available_refs}")
+        
+    #     # Initialiser l'évaluateur
+    #     evaluator = ModelsEvaluator(
+    #         network=self.network,
+    #         num_simulations=max(20, self.num_simulations // 2),  # Réduire le nombre de simulations pour l'évaluation
+    #         games_per_model=4  # 10 parties par modèle (5 comme noir, 5 comme blanc)
+    #     )
+        
+    #     # Obtenir les paramètres du modèle actuel
+    #     current_params = self.params
+        
+    #     # Évaluer contre chaque modèle de référence
+    #     for ref_iter in available_refs:
+    #         print(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
+            
+    #         # Construire le chemin du checkpoint
+    #         ref_path = self._get_checkpoint_path(ref_iter)
+            
+    #         # Télécharger le checkpoint s'il est sur GCS
+    #         local_path = f"/tmp/ref_model_{ref_iter}.pkl"
+    #         if ref_path.startswith("gs://"):
+    #             if not download_checkpoint(ref_path, local_path):
+    #                 print(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
+    #                 continue
+    #         else:
+    #             local_path = ref_path
+            
+    #         # Charger les paramètres du modèle de référence
+    #         ref_params = load_checkpoint_params(local_path)
+    #         if ref_params is None:
+    #             print(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
+    #             continue
+            
+    #         # Évaluer le modèle actuel contre le modèle de référence
+    #         eval_results = evaluator.evaluate_model_pair(current_params, ref_params)
+            
+    #         # Stocker les résultats
+    #         results[ref_iter] = eval_results
+            
+    #         # Afficher les résultats
+    #         win_rate = eval_results['win_rate']
+    #         print(f"Résultats vs iter {ref_iter}: {win_rate:.1%} taux de victoire")
+    #         print(f"  Victoires: {eval_results['current_wins']}, Défaites: {eval_results['reference_wins']}, Nuls: {eval_results['draws']}")
+            
+    #         # Enregistrer dans TensorBoard
+    #         self.writer.add_scalar(f"eval_vs_prev/win_rate_iter_{ref_iter}", win_rate, self.iteration)
+    #         self.writer.add_scalar(f"eval_vs_prev/games_iter_{ref_iter}", eval_results['total_games'], self.iteration)
+        
+    #     # Enregistrer les tendances de performance globales
+    #     if results:
+    #         # Calculer le taux de victoire moyen sur tous les modèles de référence
+    #         avg_win_rate = sum(res['win_rate'] for res in results.values()) / len(results)
+    #         self.writer.add_scalar("eval_vs_prev/avg_win_rate", avg_win_rate, self.iteration)
+            
+    #         # Ajouter un résumé à l'historique des métriques
+    #         if self.metrics_history and self.iteration > 0:
+    #             latest_metrics = self.metrics_history[-1]
+    #             latest_metrics['avg_win_rate_vs_prev'] = avg_win_rate
+                
+    #             # Stocker les taux de victoire individuels
+    #             for ref_iter, ref_results in results.items():
+    #                 latest_metrics[f'win_rate_vs_iter_{ref_iter}'] = ref_results['win_rate']
+        
+    #     print(f"\n=== Évaluation terminée ===")
+    #     return results
+
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
         """
-        Évalue le modèle actuel contre des versions précédentes sur TPU.
-        Exécuté uniquement sur le processus principal.
+        Évalue le modèle actuel contre des versions précédentes sur TPU de manière distribuée.
+        Chaque processus évalue une fraction des parties pour chaque modèle.
         
         Args:
             total_iterations: Nombre total d'itérations prévues pour l'entraînement
@@ -1092,12 +1168,7 @@ class AbaloneTrainerSync:
             ModelsEvaluator
         )
         
-        # Ne faire l'évaluation que sur le processus principal
-        # if not self.is_main_process:
-        #     return {}
-        
         current_iter = self.iteration
-        results = {}
         
         # Générer les itérations de référence
         target_references = generate_evaluation_checkpoints(total_iterations, num_reference_models)
@@ -1115,20 +1186,25 @@ class AbaloneTrainerSync:
             print("Aucun modèle précédent disponible pour l'évaluation")
             return {}
         
+        # Configurer l'évaluation distribuée
+        games_per_model = 8  # Multiple de 4 pour équilibrer entre les processus
+        local_games_per_model = games_per_model // self.num_processes
+        
         print(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
         print(f"Itérations sélectionnées: {available_refs}")
+        print(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
         
         # Initialiser l'évaluateur
         evaluator = ModelsEvaluator(
             network=self.network,
-            num_simulations=max(20, self.num_simulations // 2),  # Réduire le nombre de simulations pour l'évaluation
-            games_per_model=4  # 10 parties par modèle (5 comme noir, 5 comme blanc)
+            num_simulations=max(20, self.num_simulations // 2),  # Réduire le nombre de simulations
+            games_per_model=games_per_model  # Paramètre global, sera écrasé dans evaluate_model_pair
         )
         
-        # Obtenir les paramètres du modèle actuel
         current_params = self.params
         
-        # Évaluer contre chaque modèle de référence
+        local_results = {}
+        
         for ref_iter in available_refs:
             print(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
             
@@ -1150,38 +1226,111 @@ class AbaloneTrainerSync:
                 print(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
                 continue
             
-            # Évaluer le modèle actuel contre le modèle de référence
-            eval_results = evaluator.evaluate_model_pair(current_params, ref_params)
+            # Évaluer le modèle actuel contre le modèle de référence, mais seulement avec la part locale des parties
+            eval_results = evaluator.evaluate_model_pair(
+                current_params, 
+                ref_params,
+                games_to_play=local_games_per_model
+            )
             
-            # Stocker les résultats
-            results[ref_iter] = eval_results
-            
-            # Afficher les résultats
-            win_rate = eval_results['win_rate']
-            print(f"Résultats vs iter {ref_iter}: {win_rate:.1%} taux de victoire")
-            print(f"  Victoires: {eval_results['current_wins']}, Défaites: {eval_results['reference_wins']}, Nuls: {eval_results['draws']}")
-            
-            # Enregistrer dans TensorBoard
-            self.writer.add_scalar(f"eval_vs_prev/win_rate_iter_{ref_iter}", win_rate, self.iteration)
-            self.writer.add_scalar(f"eval_vs_prev/games_iter_{ref_iter}", eval_results['total_games'], self.iteration)
+            # Stocker les résultats locaux
+            local_results[ref_iter] = eval_results
         
-        # Enregistrer les tendances de performance globales
-        if results:
-            # Calculer le taux de victoire moyen sur tous les modèles de référence
-            avg_win_rate = sum(res['win_rate'] for res in results.values()) / len(results)
-            self.writer.add_scalar("eval_vs_prev/avg_win_rate", avg_win_rate, self.iteration)
-            
-            # Ajouter un résumé à l'historique des métriques
-            if self.metrics_history and self.iteration > 0:
-                latest_metrics = self.metrics_history[-1]
-                latest_metrics['avg_win_rate_vs_prev'] = avg_win_rate
+        # Agréger les résultats de tous les processus
+        all_results = self._aggregate_evaluation_results(local_results, available_refs)
+        
+        # Le reste du code pour l'affichage et l'enregistrement des résultats
+        # ne s'exécute que sur le processus principal
+        if self.is_main_process:
+            for ref_iter, ref_results in all_results.items():
+                win_rate = ref_results['win_rate']
+                print(f"Résultats vs iter {ref_iter}: {win_rate:.1%} taux de victoire")
+                print(f"  Victoires: {ref_results['current_wins']}, Défaites: {ref_results['reference_wins']}, Nuls: {ref_results['draws']}")
                 
-                # Stocker les taux de victoire individuels
-                for ref_iter, ref_results in results.items():
-                    latest_metrics[f'win_rate_vs_iter_{ref_iter}'] = ref_results['win_rate']
+                # Enregistrer dans TensorBoard
+                self.writer.add_scalar(f"eval_vs_prev/win_rate_iter_{ref_iter}", win_rate, self.iteration)
+                self.writer.add_scalar(f"eval_vs_prev/games_iter_{ref_iter}", ref_results['total_games'], self.iteration)
+            
+            # Enregistrer les tendances de performance globales
+            if all_results:
+                # Calculer le taux de victoire moyen sur tous les modèles de référence
+                avg_win_rate = sum(res['win_rate'] for res in all_results.values()) / len(all_results)
+                self.writer.add_scalar("eval_vs_prev/avg_win_rate", avg_win_rate, self.iteration)
+                
+                # Ajouter un résumé à l'historique des métriques
+                if self.metrics_history and self.iteration > 0:
+                    latest_metrics = self.metrics_history[-1]
+                    latest_metrics['avg_win_rate_vs_prev'] = avg_win_rate
+                    
+                    # Stocker les taux de victoire individuels
+                    for ref_iter, ref_results in all_results.items():
+                        latest_metrics[f'win_rate_vs_iter_{ref_iter}'] = ref_results['win_rate']
         
         print(f"\n=== Évaluation terminée ===")
-        return results
+        return all_results
+
+    def _aggregate_evaluation_results(self, local_results, model_iterations):
+        """
+        Agrège les résultats d'évaluation de tous les processus.
+        
+        Args:
+            local_results: Résultats locaux de ce processus
+            model_iterations: Liste des itérations de modèle évaluées
+            
+        Returns:
+            Résultats agrégés de tous les processus
+        """
+        # Créer des tableaux pour chaque métrique et chaque modèle
+        metrics = ['total_games', 'current_wins', 'reference_wins', 'draws']
+        aggregated_data = {}
+        
+        for ref_iter in model_iterations:
+            # Initialiser avec les résultats locaux ou des zéros
+            if ref_iter in local_results:
+                ref_data = local_results[ref_iter]
+                aggregated_data[ref_iter] = jnp.array([
+                    ref_data['total_games'],
+                    ref_data['current_wins'],
+                    ref_data['reference_wins'],
+                    ref_data['draws']
+                ])
+            else:
+                aggregated_data[ref_iter] = jnp.zeros(4, dtype=jnp.int32)
+        
+        # Convertir en un seul grand tableau pour faciliter la communication collective
+        all_models_data = jnp.stack([aggregated_data[ref] for ref in model_iterations])
+        
+        # Utiliser psum pour agréger les résultats de tous les processus
+        # Nécessite un contexte pmap - une façon de le faire est de créer une fonction pmapée spécifique
+        
+        @jax.pmap(axis_name='devices')
+        def sum_across_devices(x):
+            return jax.lax.psum(x, axis_name='devices')
+        
+        # Répliquer les données sur tous les dispositifs locaux
+        replicated_data = jnp.repeat(all_models_data[None, :, :], self.num_devices, axis=0)
+        devices_data = jax.device_put_sharded(list(replicated_data), self.devices)
+        
+        # Exécuter la somme collective
+        summed_data = sum_across_devices(devices_data)
+        
+        # Récupérer les résultats agrégés (prendre juste le premier dispositif)
+        global_results = jax.device_get(summed_data)[0]
+        
+        # Reconstruire le format de résultat original
+        final_results = {}
+        for i, ref_iter in enumerate(model_iterations):
+            total_games = int(global_results[i][0])
+            if total_games > 0:  # Si ce modèle a été évalué
+                final_results[ref_iter] = {
+                    'total_games': total_games,
+                    'current_wins': int(global_results[i][1]),
+                    'reference_wins': int(global_results[i][2]),
+                    'draws': int(global_results[i][3]),
+                    'win_rate': float(global_results[i][1] / total_games)
+                }
+        
+        return final_results
 
     def _get_checkpoint_path(self, iteration):
         """Obtient le chemin vers un checkpoint pour l'itération donnée."""

@@ -213,23 +213,27 @@ class ModelsEvaluator:
     
 
     
-    def evaluate_model_pair(self, current_params, reference_params):
+    def evaluate_model_pair(self, current_params, reference_params, games_to_play=None):
         """
         Évalue le modèle actuel contre un modèle de référence.
         
         Args:
             current_params: Paramètres du modèle actuel
             reference_params: Paramètres du modèle de référence
-            
+            games_to_play: Nombre de parties à jouer (si None, utilise self.games_per_model)
+                
         Returns:
             Dictionnaire avec les résultats d'évaluation
         """
+        # Utiliser le nombre spécifié ou la valeur par défaut
+        num_games = games_to_play if games_to_play is not None else self.games_per_model
+        
         # Préparer les paramètres pour distribution aux dispositifs
         current_params_replicated = jax.device_put_replicated(current_params, self.devices)
         reference_params_replicated = jax.device_put_replicated(reference_params, self.devices)
         
         # Nombre de parties par dispositif
-        games_per_device = math.ceil(self.games_per_model / self.num_devices)
+        games_per_device = math.ceil(num_games / self.num_devices)
         
         # Générer des clés aléatoires pour chaque dispositif
         rng_key = jax.random.PRNGKey(42)
