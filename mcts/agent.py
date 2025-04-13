@@ -4,7 +4,7 @@ from functools import partial
 import time
 
 # Importations locales
-from environment.env import AbaloneEnv, AbaloneState
+from environment.env import AbaloneEnv, AbaloneEnvNonCanonical, AbaloneState, AbaloneStateNonCanonical
 from model.neural_net import AbaloneModel
 from mcts.core import AbaloneMCTSRecurrentFn
 from mcts.search import run_search_batch
@@ -59,12 +59,11 @@ from mcts.search import run_search_batch
 #     best_action = policy_output.action[0]
 
 #     return best_action
-
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
-def get_best_move(state: AbaloneState,
+def get_best_move(state,
                  params,
                  network: AbaloneModel,
-                 env: AbaloneEnv,
+                 env,
                  num_simulations: int = 600,
                  rng_key=None):  
     """
@@ -74,10 +73,20 @@ def get_best_move(state: AbaloneState,
         rng_key = jax.random.PRNGKey(0) 
 
     recurrent_fn = AbaloneMCTSRecurrentFn(env, network)
-
+    
+    # Vérifier le type d'état et adapter
+    if hasattr(state, 'current_player'):
+        player = state.current_player
+        # Convertir le plateau en représentation canonique
+        canonical_board = env.get_canonical_state(state.board, player)
+    else:
+        player = state.actual_player
+        canonical_board = state.board
+    
+    # Créer le batch state avec le plateau canonisé
     batch_state = AbaloneState(
-        board=state.board[None, ...],
-        actual_player=jnp.array([state.actual_player]),
+        board=canonical_board[None, ...],
+        actual_player=jnp.array([player]),
         black_out=jnp.array([state.black_out]),
         white_out=jnp.array([state.white_out]),
         moves_count=jnp.array([state.moves_count])
@@ -96,7 +105,6 @@ def get_best_move(state: AbaloneState,
     best_action = policy_output.action[0]
 
     return best_action
-
 
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
 def get_move_probabilities(state: AbaloneState,
