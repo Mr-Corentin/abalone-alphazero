@@ -763,8 +763,6 @@ class GCSReplayBuffer:
     
     def close(self):
         """Ferme proprement le buffer et assure que toutes les données sont écrites"""
-        if hasattr(self, '_already_closed') and self._already_closed:
-            return
         
         if self.local_size > 0:
             self._queue_writes()
@@ -794,7 +792,7 @@ class GCSReplayBuffer:
             self.write_queue.task_done()
         
         logger.info(f"GCSReplayBuffer fermé. Données locales sauvegardées.")
-        self._already_closed = True
+        #self._already_closed = True
     
     def __del__(self):
         """Destructeur pour assurer la fermeture propre"""
