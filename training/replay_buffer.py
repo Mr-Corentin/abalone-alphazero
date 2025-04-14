@@ -176,7 +176,6 @@ class CPUReplayBuffer:
         return batch
     
 
-
 class GCSReplayBuffer:
     """
     Buffer d'expérience utilisant Google Cloud Storage comme stockage principal.
@@ -233,7 +232,8 @@ class GCSReplayBuffer:
             'game_id': np.zeros(max_local_size, dtype=np.int32),
             'move_num': np.zeros(max_local_size, dtype=np.int16),
             'iteration': np.zeros(max_local_size, dtype=np.int32),
-            'model_version': np.zeros(max_local_size, dtype=np.int32)
+            'model_version': np.zeros(max_local_size, dtype=np.int32),
+            'synced': np.zeros(max_local_size, dtype=bool)  # Nouveau champ pour suivre la synchronisation
         }
         
         # Métadonnées sur le buffer
@@ -243,6 +243,9 @@ class GCSReplayBuffer:
         self.total_size = 0  # Taille totale en comptant GCS
         self.last_flush_time = time.time()
         self.pending_writes = []
+        
+        # Compteur des données synchronisées pour des statistiques
+        self.synced_count = 0
         
         # Initialiser le client GCS
         self.client = storage.Client()
@@ -295,6 +298,7 @@ class GCSReplayBuffer:
         self.local_buffer['move_num'][idx] = move_num
         self.local_buffer['iteration'][idx] = iteration
         self.local_buffer['model_version'][idx] = model_version
+        self.local_buffer['synced'][idx] = False  # Nouvelle position, pas encore synchronisée
         
         # Mettre à jour les compteurs
         self.position = (self.position + 1) % self.max_local_size
@@ -302,9 +306,20 @@ class GCSReplayBuffer:
         self.total_size += 1
         
         # Vérifier si on doit écrire sur GCS
-        if (len(self.pending_writes) >= self.flush_size or 
-            time.time() - self.last_flush_time >= self.flush_interval):
+        if (len(self.pending_writes) == 0 and  # Pas d'écritures en attente
+            (self._count_unsynced() >= self.flush_size or  # Assez de données non synchronisées
+             time.time() - self.last_flush_time >= self.flush_interval)):  # Intervalle de temps atteint
             self._queue_writes()
+    
+    def _count_unsynced(self):
+        """Compte le nombre d'éléments non synchronisés dans le buffer local"""
+        if self.local_size < self.max_local_size:
+            # Buffer pas encore plein
+            return np.sum(~self.local_buffer['synced'][:self.local_size])
+        else:
+            # Buffer cyclique plein, compter les deux parties
+            return (np.sum(~self.local_buffer['synced'][self.position:]) +
+                    np.sum(~self.local_buffer['synced'][:self.position]))
     
     def add_batch(self, batch):
         """Ajoute un batch de transitions"""
@@ -335,23 +350,68 @@ class GCSReplayBuffer:
             )
     
     def _queue_writes(self):
-        """Prépare les données du buffer local pour l'écriture sur GCS"""
+        """Prépare les données non synchronisées du buffer local pour l'écriture sur GCS"""
         if self.local_size == 0:
             return
         
-        # Créer une copie des données locales à écrire
-        data_to_write = {}
-        for key in self.local_buffer:
-            if self.local_size < self.max_local_size:
-                # Buffer pas encore plein, prendre seulement les données valides
-                data_to_write[key] = self.local_buffer[key][:self.local_size].copy()
-            else:
-                # Buffer cyclique plein, réorganiser correctement
-                data_to_write[key] = np.concatenate([
-                    self.local_buffer[key][self.position:],
-                    self.local_buffer[key][:self.position]
-                ])
+        # Créer des masques pour les données non synchronisées
+        if self.local_size < self.max_local_size:
+            # Buffer pas encore plein
+            unsynced_mask = ~self.local_buffer['synced'][:self.local_size]
+        else:
+            # Buffer cyclique plein, concaténer les deux parties
+            mask_part1 = ~self.local_buffer['synced'][self.position:]
+            mask_part2 = ~self.local_buffer['synced'][:self.position]
+            
+            # Vérifier s'il y a des données non synchronisées
+            if not np.any(mask_part1) and not np.any(mask_part2):
+                return  # Toutes les données sont déjà synchronisées
         
+        # Vérifier s'il y a des données non synchronisées
+        if self.local_size < self.max_local_size:
+            if not np.any(unsynced_mask):
+                return  # Toutes les données sont déjà synchronisées
+        
+        # Créer une copie des données non synchronisées à écrire
+        data_to_write = {}
+        
+        if self.local_size < self.max_local_size:
+            # Buffer pas encore plein
+            for key in self.local_buffer:
+                if key != 'synced':  # Ne pas inclure le champ synced
+                    data_to_write[key] = self.local_buffer[key][:self.local_size][unsynced_mask].copy()
+            
+            # Compter combien de positions seront synchronisées
+            num_to_sync = np.sum(unsynced_mask)
+            
+            # Marquer ces positions comme synchronisées
+            self.local_buffer['synced'][:self.local_size][unsynced_mask] = True
+        else:
+            # Buffer cyclique plein
+            indices_part1 = np.where(mask_part1)[0] + self.position
+            indices_part2 = np.where(mask_part2)[0]
+            
+            # Combiner les indices
+            all_unsynced_indices = np.concatenate([indices_part1, indices_part2])
+            
+            if len(all_unsynced_indices) == 0:
+                return  # Pas de données à synchroniser
+            
+            # Extraire les données non synchronisées
+            for key in self.local_buffer:
+                if key != 'synced':  # Ne pas inclure le champ synced
+                    data_to_write[key] = self.local_buffer[key][all_unsynced_indices].copy()
+            
+            # Compter combien de positions seront synchronisées
+            num_to_sync = len(all_unsynced_indices)
+            
+            # Marquer ces positions comme synchronisées
+            self.local_buffer['synced'][all_unsynced_indices] = True
+        
+        # Si aucune donnée à écrire, sortir
+        if not data_to_write or all(len(v) == 0 for v in data_to_write.values()):
+            return
+            
         # Ajouter à la file d'attente pour écriture
         timestamp = int(time.time())
         batch_id = f"{self.host_id}_{timestamp}"
@@ -360,6 +420,12 @@ class GCSReplayBuffer:
         self.write_queue.put((batch_id, iterations, data_to_write))
         self.pending_writes.append(batch_id)
         self.last_flush_time = time.time()
+        
+        # Mettre à jour le compteur de synchronisation
+        self.synced_count += num_to_sync
+        
+        # Log optionnel pour débug
+        # logger.info(f"Synchronisation: {num_to_sync} positions, total sync: {self.synced_count}")
     
     def _writer_loop(self):
         """Boucle principale du thread d'écriture"""
@@ -580,7 +646,8 @@ class GCSReplayBuffer:
             
             result = {}
             for k in self.local_buffer:
-                result[k] = self.local_buffer[k][local_indices]
+                if k != 'synced':  # Ne pas inclure le champ synced dans le résultat
+                    result[k] = self.local_buffer[k][local_indices]
             
             return result
         
@@ -760,7 +827,8 @@ class GCSReplayBuffer:
     def close(self):
         """Ferme proprement le buffer et assure que toutes les données sont écrites"""
         
-        if self.local_size > 0:
+        # Forcer l'écriture des données non synchronisées qui restent
+        if self.local_size > 0 and self._count_unsynced() > 0:
             self._queue_writes()
         
         # Arrêter les threads
@@ -787,8 +855,7 @@ class GCSReplayBuffer:
             
             self.write_queue.task_done()
         
-        logger.info(f"GCSReplayBuffer fermé. Données locales sauvegardées.")
-        #self._already_closed = True
+        logger.info(f"GCSReplayBuffer fermé. Total synchronisé: {self.synced_count} positions")
     
     def __del__(self):
         """Destructeur pour assurer la fermeture propre"""
