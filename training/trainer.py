@@ -731,6 +731,8 @@ class AbaloneTrainerSync:
                 self.writer.add_scalar("stats/buffer_size", buffer_size, self.iteration)
                 
             self.writer.add_scalar("stats/total_games_local", self.total_games, self.iteration)
+            total_games_global = self.total_games * self.num_processes
+            self.writer.add_scalar("stats/total_games_global", total_games_global, self.iteration)
         
         # Enregistrer l'historique des métriques
         local_metrics_record = avg_metrics.copy()

@@ -404,12 +404,13 @@ class GCSReplayBuffer:
                 logger.info(f"Erreur dans _writer_loop: {e}")
     
     def _write_tfrecord(self, file_path: str, data: Dict[str, np.ndarray]):
-        """Écrit les données en format TFRecord sur GCS"""
-        # Créer un fichier TFRecord temporaire
+        """Écrit les données en format TFRecord sur GCS avec métadonnées de comptage"""
         temp_path = f"/tmp/{os.path.basename(file_path)}"
+        
+        example_count = len(data['board'])
+        
         with tf.io.TFRecordWriter(temp_path) as writer:
-            # Écrire chaque exemple
-            for i in range(len(data['board'])):
+            for i in range(example_count):
                 # Créer un exemple TF avec les caractéristiques
                 example = tf.train.Example(features=tf.train.Features(feature={
                     'board': tf.train.Feature(
@@ -433,13 +434,12 @@ class GCSReplayBuffer:
                 }))
                 writer.write(example.SerializeToString())
         
-        # Uploader sur GCS
         blob = self.bucket.blob(file_path)
+        blob.metadata = {'example_count': str(example_count)}
         blob.upload_from_filename(temp_path)
         
-        # Supprimer le fichier temporaire
         os.remove(temp_path)
-    
+        
     def _indexer_loop(self):
         """Boucle de mise à jour périodique de l'index GCS"""
         while self.running:
@@ -450,24 +450,23 @@ class GCSReplayBuffer:
             # Nettoyer les anciennes itérations si nécessaire
             self._cleanup_old_iterations()
     
+    
     def _update_gcs_index(self):
-        """Met à jour l'index des fichiers disponibles sur GCS"""
+        """Met à jour l'index des fichiers disponibles sur GCS et compte précisément les exemples"""
         try:
             # Lister tous les blobs dans le dossier buffer
             prefix = f"{self.buffer_dir}/"
             blobs = list(self.bucket.list_blobs(prefix=prefix))
             
-            # Réinitialiser l'index
             new_index = {}
             
-            # Traiter chaque blob
+            total_examples = 0
+            
             for blob in blobs:
-                # Extraire l'itération du chemin
                 path = blob.name
                 if not path.endswith('.tfrecord'):
                     continue
                 
-                # Format attendu: buffer_dir/iteration_X/batch_id.tfrecord
                 parts = path.split('/')
                 if len(parts) >= 3 and parts[-2].startswith('iteration_'):
                     iteration = int(parts[-2].replace('iteration_', ''))
@@ -476,25 +475,22 @@ class GCSReplayBuffer:
                         new_index[iteration] = []
                     
                     new_index[iteration].append(path)
+                    
+                    if hasattr(blob, 'metadata') and blob.metadata and 'example_count' in blob.metadata:
+                        example_count = int(blob.metadata['example_count'])
+                        total_examples += example_count
+                    else:
+                        total_examples += 1000  
             
-            # Mettre à jour l'index avec les nouvelles données
             self.gcs_index = new_index
             self.last_indexed_time = time.time()
             
-            # Calculer le nombre total d'exemples (approximatif)
-            self._estimate_total_size()
+            self.total_size = total_examples
             
         except Exception as e:
             logger.info(f"Erreur lors de la mise à jour de l'index GCS: {e}")
     
-    def _estimate_total_size(self):
-        """Estime la taille totale du buffer sur GCS"""
-        # Cette estimation est approximative et pourrait être affinée
-        # en lisant les métadonnées des fichiers TFRecord
-        total_files = sum(len(files) for files in self.gcs_index.values())
-        # Supposons une moyenne de 1000 exemples par fichier
-        self.total_size = total_files * 1000 + self.local_size
-    
+
     def _cleanup_old_iterations(self):
         """Supprime les données des itérations les plus anciennes"""
         if len(self.gcs_index) <= self.max_iterations_to_keep:
