@@ -675,6 +675,14 @@ class AbaloneTrainerSync:
             if using_gcs_buffer:
                 try:
                     self.buffer._update_gcs_index()
+                    if self.buffer.gcs_index:
+                        iterations = list(self.buffer.gcs_index.keys())
+                        files_count = sum(len(files) for files in self.buffer.gcs_index.values())
+                        if self.is_main_process:
+                            logger.info(f"Index GCS: {len(iterations)} itérations ({iterations}), {files_count} fichiers")
+                    else:
+                        if self.is_main_process:
+                            logger.warning("Index GCS toujours vide après actualisation!")
                     batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
                 except ValueError as e:
                     if self.is_main_process:

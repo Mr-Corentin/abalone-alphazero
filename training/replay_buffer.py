@@ -1421,10 +1421,8 @@ class GCSReplayBufferSync:
             'model_version': tf.io.FixedLenFeature([], tf.int64)
         }
         
-        # Parser l'exemple
         parsed = tf.io.parse_single_example(example, feature_description)
         
-        # Convertir en numpy avec les bonnes formes
         return {
             'board': tf.io.decode_raw(parsed['board'], tf.int8).numpy().reshape(self.board_size, self.board_size),
             'marbles_out': tf.io.decode_raw(parsed['marbles_out'], tf.int8).numpy().reshape(2),
@@ -1448,12 +1446,27 @@ class GCSReplayBufferSync:
         Returns:
             Dict contenant les données échantillonnées
         """
+        # Log de début pour tracer chaque appel à sample
+        logger.info(f"Demande d'échantillonnage de {batch_size} exemples")
+        
+        # Log détaillé de l'état de l'index au moment de l'échantillonnage
+        if self.gcs_index:
+            iterations = list(self.gcs_index.keys())
+            files_count = sum(len(files) for files in self.gcs_index.values())
+            logger.info(f"État de l'index GCS: {len(iterations)} itérations {iterations}, {files_count} fichiers")
+            # Afficher le contenu détaillé de l'index
+            for iter_num, files in self.gcs_index.items():
+                logger.info(f"  - Itération {iter_num}: {len(files)} fichiers - {[os.path.basename(f) for f in files]}")
+        else:
+            logger.warning("Index GCS vide au moment de l'échantillonnage!")
+        
         has_valid_data = False
         if self.gcs_index:
             # Vérifier au moins une itération avec des fichiers
             for iter_num, iter_files in self.gcs_index.items():
                 if iter_files:  
                     has_valid_data = True
+                    logger.info(f"Itération {iter_num} contient {len(iter_files)} fichiers valides")
                     break
         
         # Journalisation détaillée de l'état de l'index GCS
@@ -1477,12 +1490,15 @@ class GCSReplayBufferSync:
                     logger.warning("L'actualisation n'a pas résolu le problème, l'index reste vide ou invalide")
             except Exception as e:
                 logger.error(f"Erreur lors de la tentative d'actualisation de l'index: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
         
         # Si toujours pas de données valides, utiliser le cache local
         if not has_valid_data:
             if self.local_size == 0:
                 # Journaliser plus d'informations pour le débogage
                 logger.error(f"Buffer vide, impossible d'échantillonner. État du buffer: index={bool(self.gcs_index)}, local_size={self.local_size}, total_size={self.total_size}")
+                logger.error(f"Contenu de l'index: {self.gcs_index}")
                 raise ValueError("Buffer vide, impossible d'échantillonner (aucune donnée locale ni sur GCS)")
             
             # Avertir seulement la première fois pour ne pas spammer les logs
@@ -1502,15 +1518,20 @@ class GCSReplayBufferSync:
                 result[k] = self.local_buffer[k][local_indices]
             
             self.metrics["samples_served"] += batch_size
+            logger.info(f"Échantillonnage réussi depuis le cache local: {batch_size} exemples")
             return result
         
         # Si nous arrivons ici, l'index GCS contient des données valides
+        logger.info(f"Tentative d'échantillonnage depuis GCS avec {len(self.gcs_index)} itérations")
         try:
             result = self._sample_from_gcs(batch_size, rng_key)
             self.metrics["samples_served"] += batch_size
+            logger.info(f"Échantillonnage réussi depuis GCS: {batch_size} exemples")
             return result
         except Exception as e:
             logger.error(f"Erreur lors de l'échantillonnage depuis GCS: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             
             # En cas d'erreur, tenter d'utiliser le cache local en fallback
             if self.local_size > 0:
@@ -1529,9 +1550,11 @@ class GCSReplayBufferSync:
                     result[k] = self.local_buffer[k][local_indices]
                 
                 self.metrics["samples_served"] += batch_size
+                logger.info(f"Échantillonnage de secours réussi depuis le cache local: {batch_size} exemples")
                 return result
             else:
                 # Rethrow l'exception si pas de fallback possible
+                logger.error("Échec de l'échantillonnage et pas de cache local disponible en fallback")
                 raise
     def _sample_from_gcs(self, n_samples, rng_key=None):
         """
