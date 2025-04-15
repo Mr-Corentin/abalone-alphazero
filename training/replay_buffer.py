@@ -744,31 +744,24 @@ class GCSReplayBufferSync:
         # Log de début pour tracer chaque appel à sample
         logger.info(f"Demande d'échantillonnage de {batch_size} exemples")
         
-        has_valid_data = False
         
-        # Journalisation détaillée de l'état de l'index GCS
-        if not has_valid_data:
-            logger.warning(f"Index GCS problématique: contient {len(self.gcs_index)} itérations mais aucune avec des fichiers valides")
+        
+        try:
+            self._update_gcs_index()
             
-            # Tenter une actualisation de l'index
-            try:
-                self._update_gcs_index()
-                
-                # Vérifier si l'actualisation a résolu le problème
-                has_valid_data = False
-                for iter_num, iter_files in self.gcs_index.items():
-                    if iter_files:
-                        has_valid_data = True
-                        break
-                        
-                if not has_valid_data:
-                    logger.warning("L'actualisation n'a pas résolu le problème, l'index reste vide ou invalide")
-            except Exception as e:
-                logger.error(f"Erreur lors de la tentative d'actualisation de l'index: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-        
-        # Si toujours pas de données valides, utiliser le cache local
+            has_valid_data = False
+            for iter_num, iter_files in self.gcs_index.items():
+                if iter_files:
+                    has_valid_data = True
+                    break
+                    
+            if not has_valid_data:
+                logger.warning("L'actualisation n'a pas résolu le problème, l'index reste vide ou invalide")
+        except Exception as e:
+            logger.error(f"Erreur lors de la tentative d'actualisation de l'index: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
         if not has_valid_data:
             if self.local_size == 0:
                 # Journaliser plus d'informations pour le débogage
