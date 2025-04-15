@@ -614,7 +614,6 @@ class AbaloneTrainerSync:
                     
                     positions_added += 1
         
-        # Si buffer GCS synchrone, flush explicitement à la fin de l'itération
         if using_gcs_buffer:
             positions_flushed = self.buffer.flush_to_gcs()
             if self.is_main_process:
@@ -623,7 +622,6 @@ class AbaloneTrainerSync:
                 logger.info(f"  Flush du buffer: {positions_flushed} positions écrites sur GCS")
                 logger.info(f"  État du buffer: {stats['total_size']} positions ({fill_percentage:.1f}% de capacité)")
                 
-                # Si un nettoyage a été effectué, l'indiquer
                 if stats.get("cleanup_operations", 0) > 0:
                     logger.info(f"  Nettoyage effectué: {stats['files_removed']} fichiers supprimés")
         
@@ -647,7 +645,6 @@ class AbaloneTrainerSync:
         (hasattr(self.buffer, 'size') and self.buffer.size == 0):
             if self.is_main_process:
                 logger.info("Buffer vide, impossible d'entraîner le réseau.")
-            # Retourner des métriques nulles
             return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0,
                     'policy_accuracy': 0.0, 'value_sign_match': 0.0}
 
@@ -657,12 +654,7 @@ class AbaloneTrainerSync:
         if using_gcs_buffer:
             self.buffer._update_gcs_index()
             gcs_index_available = bool(self.buffer.gcs_index)
-            if not gcs_index_available:
-                if self.is_main_process:
-                    logger.info("Avertissement: Index GCS non disponible ou vide au début de cette phase d'entraînement. Utilisation du cache local si possible.")
 
-        # Initialiser les paramètres et l'état de l'optimiseur sur les dispositifs une seule fois
-        # au début de la séquence d'entraînement
         params_sharded = jax.device_put_replicated(self.params, self.devices)
         opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
 
@@ -675,14 +667,6 @@ class AbaloneTrainerSync:
             if using_gcs_buffer:
                 try:
                     self.buffer._update_gcs_index()
-                    if self.buffer.gcs_index:
-                        iterations = list(self.buffer.gcs_index.keys())
-                        files_count = sum(len(files) for files in self.buffer.gcs_index.values())
-                        if self.is_main_process:
-                            logger.info(f"Index GCS: {len(iterations)} itérations ({iterations}), {files_count} fichiers")
-                    else:
-                        if self.is_main_process:
-                            logger.warning("Index GCS toujours vide après actualisation!")
                     batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
                 except ValueError as e:
                     if self.is_main_process:
