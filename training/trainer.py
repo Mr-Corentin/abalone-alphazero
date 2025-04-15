@@ -642,8 +642,8 @@ class AbaloneTrainerSync:
         Returns:
             Métriques moyennes sur toutes les étapes (moyenne globale si multi-processus)
         """
-        # Vérifier si le buffer est vide
-        if (hasattr(self.buffer, 'local_size') and self.buffer.local_size == 0) or \
+        if ((hasattr(self.buffer, 'local_size') and self.buffer.local_size == 0) and 
+            (not hasattr(self.buffer, 'total_size') or self.buffer.total_size == 0)) or \
         (hasattr(self.buffer, 'size') and self.buffer.size == 0):
             if self.is_main_process:
                 logger.info("Buffer vide, impossible d'entraîner le réseau.")
