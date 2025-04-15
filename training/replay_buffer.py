@@ -1035,6 +1035,8 @@ class GCSReplayBufferSync:
         if self.local_size == 0:
             return 0  # Rien à écrire
         
+        logger.info(f"Début du flush vers GCS: {self.local_size} positions à écrire")
+        
         # Préparer les données du buffer local
         data_to_write = {}
         for key in self.local_buffer:
@@ -1042,9 +1044,11 @@ class GCSReplayBufferSync:
         
         # Obtenir les itérations uniques
         iterations = np.unique(data_to_write['iteration'])
+        logger.info(f"Données de {len(iterations)} itérations différentes: {iterations}")
         
         # Compteur pour les positions écrites
         total_written = 0
+        files_created = 0
         
         # Générer un ID de batch unique
         timestamp = int(time.time())
@@ -1059,14 +1063,18 @@ class GCSReplayBufferSync:
             
             # Créer un sous-ensemble pour cette itération
             iter_data = {k: v[iter_mask] for k, v in data_to_write.items()}
+            positions_in_iter = iter_data['board'].shape[0]
             
             # Créer le chemin dans le bucket
             iter_path = f"{self.buffer_dir}/iteration_{iteration}"
             file_path = f"{iter_path}/{batch_id}.tfrecord"
             
+            logger.info(f"Écriture de {positions_in_iter} positions pour l'itération {iteration} dans {file_path}")
+            
             # Écrire en format TFRecord
             example_count = self._write_tfrecord(file_path, iter_data)
             total_written += example_count
+            files_created += 1
             
             # Mettre à jour l'index local
             if iteration not in self.gcs_index:
@@ -1089,10 +1097,28 @@ class GCSReplayBufferSync:
         # Mettre à jour la taille totale du buffer
         self._update_total_size()
         
+        # Pause pour permettre à GCS de finaliser les opérations
+        logger.info(f"Attente de 2 secondes pour que GCS finalise les opérations d'écriture...")
+        time.sleep(2)
+        
+        # Forcer l'actualisation de l'index après l'écriture
+        logger.info(f"Mise à jour de l'index GCS après l'écriture...")
+        index_updated = self._update_gcs_index()
+        
+        if index_updated:
+            logger.info(f"Index GCS mis à jour avec succès après le flush")
+        else:
+            logger.warning(f"Échec de la mise à jour de l'index GCS après le flush")
+            
+        # Vérifier des incohérences potentielles
+        if len(self.gcs_index) == 0:
+            logger.warning(f"ANOMALIE: {files_created} fichiers créés mais l'index GCS est vide!")
+        
         # Vérifier si nettoyage nécessaire
         if self.total_size > self.max_buffer_size * self.buffer_cleanup_threshold:
             self._cleanup_buffer()
         
+        logger.info(f"Flush terminé: {total_written} positions écrites dans {files_created} fichiers")
         return total_written
     
     def _write_tfrecord(self, file_path: str, data: Dict[str, np.ndarray]):
@@ -1154,17 +1180,20 @@ class GCSReplayBufferSync:
         try:
             # Lister tous les blobs dans le dossier buffer
             prefix = f"{self.buffer_dir}/"
+            logger.info(f"Tentative de mise à jour de l'index GCS pour {prefix}")
             blobs = list(self.bucket.list_blobs(prefix=prefix))
             logger.info(f"Trouvé {len(blobs)} blobs dans {prefix}")
+            
             if len(blobs) == 0:
                 # Vérifier si le dossier existe
                 check_blob = self.bucket.blob(f"{prefix}.placeholder")
                 if not check_blob.exists():
                     logger.warning(f"Le dossier {prefix} n'existe peut-être pas dans le bucket {self.bucket_name}")
-                    
-                
+                    return False
+            
             new_index = {}
             new_metadata = {}
+            tfrecord_files_found = 0
             
             total_examples = 0
             
@@ -1173,6 +1202,7 @@ class GCSReplayBufferSync:
                 if not path.endswith('.tfrecord'):
                     continue
                 
+                tfrecord_files_found += 1
                 parts = path.split('/')
                 if len(parts) >= 3 and parts[-2].startswith('iteration_'):
                     iteration = int(parts[-2].replace('iteration_', ''))
@@ -1195,9 +1225,11 @@ class GCSReplayBufferSync:
                     # Récupérer le nombre d'exemples depuis les métadonnées
                     if hasattr(blob, 'metadata') and blob.metadata and 'example_count' in blob.metadata:
                         example_count = int(blob.metadata['example_count'])
+                        logger.debug(f"Fichier {path}: {example_count} exemples selon les métadonnées")
                     else:
                         # Si pas de métadonnées, estimer (sera corrigé lors du chargement)
                         example_count = 1000
+                        logger.debug(f"Fichier {path}: pas de métadonnées, estimation de 1000 exemples")
                     
                     total_examples += example_count
                     
@@ -1208,14 +1240,29 @@ class GCSReplayBufferSync:
                         'iteration': iteration
                     }
             
+            # Journaliser des informations supplémentaires sur les fichiers trouvés
+            if tfrecord_files_found > 0:
+                iterations_found = list(new_index.keys())
+                logger.info(f"Fichiers TFRecord trouvés: {tfrecord_files_found}, dans les itérations: {iterations_found}")
+                for iter_num, files in new_index.items():
+                    logger.info(f"  - Itération {iter_num}: {len(files)} fichiers")
+            else:
+                logger.warning("Aucun fichier TFRecord trouvé dans le dossier buffer")
+                
+            # Remplacer l'index et les métadonnées
             self.gcs_index = new_index
             self.gcs_file_metadata = new_metadata
             self.total_size = total_examples
             
             logger.info(f"Index GCS mis à jour: {len(new_metadata)} fichiers, {total_examples} positions")
             
+            return len(new_metadata) > 0  # Renvoie True si des fichiers ont été trouvés
+            
         except Exception as e:
             logger.error(f"Erreur lors de la mise à jour de l'index GCS: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
     
     def _update_total_size(self):
         """Met à jour la taille totale du buffer en comptant les exemples dans les métadonnées"""
