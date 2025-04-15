@@ -1401,13 +1401,46 @@ class GCSReplayBufferSync:
         Returns:
             Dict contenant les données échantillonnées
         """
-        if not self.gcs_index:
+        has_valid_data = False
+        if self.gcs_index:
+            # Vérifier au moins une itération avec des fichiers
+            for iter_num, iter_files in self.gcs_index.items():
+                if iter_files:  
+                    has_valid_data = True
+                    break
+        
+        # Journalisation détaillée de l'état de l'index GCS
+        if not has_valid_data:
+            logger.warning(f"Index GCS problématique: contient {len(self.gcs_index)} itérations mais aucune avec des fichiers valides")
+            
+            # Tenter une actualisation de l'index
+            try:
+                logger.info("Tentative d'actualisation de l'index GCS...")
+                self._update_gcs_index()
+                
+                # Vérifier si l'actualisation a résolu le problème
+                has_valid_data = False
+                for iter_num, iter_files in self.gcs_index.items():
+                    if iter_files:
+                        has_valid_data = True
+                        logger.info(f"Actualisation réussie, données trouvées dans l'itération {iter_num}")
+                        break
+                        
+                if not has_valid_data:
+                    logger.warning("L'actualisation n'a pas résolu le problème, l'index reste vide ou invalide")
+            except Exception as e:
+                logger.error(f"Erreur lors de la tentative d'actualisation de l'index: {e}")
+        
+        # Si toujours pas de données valides, utiliser le cache local
+        if not has_valid_data:
             if self.local_size == 0:
-                raise ValueError("Buffer vide, impossible d'échantillonner")
+                # Journaliser plus d'informations pour le débogage
+                logger.error(f"Buffer vide, impossible d'échantillonner. État du buffer: index={bool(self.gcs_index)}, local_size={self.local_size}, total_size={self.total_size}")
+                raise ValueError("Buffer vide, impossible d'échantillonner (aucune donnée locale ni sur GCS)")
             
             # Avertir seulement la première fois pour ne pas spammer les logs
             if self.metrics["samples_served"] == 0:
-                logger.info("Aucune donnée disponible sur GCS, utilisation du cache local.")
+                logger.info(f"Utilisation du cache local ({self.local_size} positions) en fallback")
             
             if rng_key is None:
                 local_indices = np.random.randint(0, self.local_size, size=batch_size)
@@ -1424,10 +1457,35 @@ class GCSReplayBufferSync:
             self.metrics["samples_served"] += batch_size
             return result
         
-        result = self._sample_from_gcs(batch_size, rng_key)
-        self.metrics["samples_served"] += batch_size
-        return result
-
+        # Si nous arrivons ici, l'index GCS contient des données valides
+        try:
+            result = self._sample_from_gcs(batch_size, rng_key)
+            self.metrics["samples_served"] += batch_size
+            return result
+        except Exception as e:
+            logger.error(f"Erreur lors de l'échantillonnage depuis GCS: {e}")
+            
+            # En cas d'erreur, tenter d'utiliser le cache local en fallback
+            if self.local_size > 0:
+                logger.info(f"Utilisation du cache local en fallback après erreur d'échantillonnage GCS")
+                
+                if rng_key is None:
+                    local_indices = np.random.randint(0, self.local_size, size=batch_size)
+                else:
+                    local_indices = jax.random.randint(
+                        rng_key, shape=(batch_size,), minval=0, maxval=self.local_size
+                    ).astype(np.int32)
+                    local_indices = np.array(local_indices)
+                
+                result = {}
+                for k in self.local_buffer:
+                    result[k] = self.local_buffer[k][local_indices]
+                
+                self.metrics["samples_served"] += batch_size
+                return result
+            else:
+                # Rethrow l'exception si pas de fallback possible
+                raise
     def _sample_from_gcs(self, n_samples, rng_key=None):
         """
         Échantillonne des exemples depuis GCS avec biais de récence.
