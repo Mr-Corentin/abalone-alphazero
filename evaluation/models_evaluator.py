@@ -152,7 +152,7 @@ class ModelsEvaluator:
                 def cond_fn(carry):
                     state, move_count, current_rng = carry
                     not_terminal = jnp.logical_not(self.env.is_terminal(state))
-                    under_max = move_count < 300  # max_moves
+                    under_max = move_count < 200  # max_moves
                     return jnp.logical_and(not_terminal, under_max)
                 
                 # Créer le corps de la boucle

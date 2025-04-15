@@ -59,7 +59,7 @@ def run_search_batch(states: AbaloneState,
     lightweight_output = type(policy_output)(
         action=policy_output.action,
         action_weights=policy_output.action_weights,
-        search_tree=None  # ou un placeholder minimal
+        search_tree=None  
     )
 
     return lightweight_output
@@ -81,7 +81,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
     Returns:
         Données des parties générées
     """
-    max_moves = 300
+    max_moves = 200
 
     # Reset initial pour le batch
     init_states = env.reset_batch(rng_key, batch_size)
@@ -204,15 +204,11 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
         'black_outs': final_black_outs,        # Billes noires sorties à chaque mouvement
         'white_outs': final_white_outs,        # Billes blanches sorties à chaque mouvement
         'is_terminal': final_terminal_states,  # Indicateur si l'état est terminal
-        # Ces trois derniers champs permettent de calculer le résultat final des parties
         'final_black_out': final_states.black_out,  # Billes noires sorties à la fin
         'final_white_out': final_states.white_out,  # Billes blanches sorties à la fin
         'final_player': final_states.actual_player  # Dernier joueur actif
     }
-    essential_data = jax.tree_util.tree_map(
-        jax.lax.stop_gradient, 
-        essential_data
-    )
+
 
     return essential_data
 
@@ -296,7 +292,7 @@ def create_optimized_game_generator(num_simulations=500):
         init_states = env.reset_batch(rng_key, batch_size_per_device)
 
         # Pré-allouer les tableaux de données
-        max_moves = 300  # Limiter le nombre maximum de coups
+        max_moves = 200  # Limiter le nombre maximum de coups
         game_data = {
             'boards_2d': jnp.zeros((batch_size_per_device, max_moves + 1, 9, 9), dtype=jnp.int8),
             'policies': jnp.zeros((batch_size_per_device, max_moves + 1, 1734), dtype=jnp.float32),

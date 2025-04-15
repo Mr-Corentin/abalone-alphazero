@@ -50,7 +50,7 @@ class AbaloneTrainerSync:
             gcs_bucket=None,
             save_games=True,
             games_buffer_size=64,
-            games_flush_interval=300,
+            games_flush_interval=200,
             use_gcs_buffer=False, 
             gcs_buffer_dir='buffer',
             eval_games=5): 
