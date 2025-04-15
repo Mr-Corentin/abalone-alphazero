@@ -674,6 +674,7 @@ class AbaloneTrainerSync:
 
             if using_gcs_buffer:
                 try:
+                    self.buffer._update_gcs_index()
                     batch_data = self.buffer.sample(total_batch_size, rng_key=rng_key)
                 except ValueError as e:
                     if self.is_main_process:

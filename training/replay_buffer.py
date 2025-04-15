@@ -1155,7 +1155,14 @@ class GCSReplayBufferSync:
             # Lister tous les blobs dans le dossier buffer
             prefix = f"{self.buffer_dir}/"
             blobs = list(self.bucket.list_blobs(prefix=prefix))
-            
+            logger.info(f"Trouvé {len(blobs)} blobs dans {prefix}")
+            if len(blobs) == 0:
+                # Vérifier si le dossier existe
+                check_blob = self.bucket.blob(f"{prefix}.placeholder")
+                if not check_blob.exists():
+                    logger.warning(f"Le dossier {prefix} n'existe peut-être pas dans le bucket {self.bucket_name}")
+                    
+                
             new_index = {}
             new_metadata = {}
             
