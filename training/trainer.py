@@ -655,6 +655,7 @@ class AbaloneTrainerSync:
         using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
         gcs_index_available = False
         if using_gcs_buffer:
+            self.buffer._update_gcs_index()
             gcs_index_available = bool(self.buffer.gcs_index)
             if not gcs_index_available:
                 if self.is_main_process:
