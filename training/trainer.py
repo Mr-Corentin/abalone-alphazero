@@ -417,17 +417,35 @@ class AbaloneTrainerSync:
 
             if self.is_main_process:
                 self._save_checkpoint(is_final=True)
+                
                 if self.metrics_history:
                     final_metrics = self.metrics_history[-1]
-                    for metric_name, metric_value in final_metrics.items():
-                        if isinstance(metric_value, (int, float)) and metric_name != 'iteration':
-                            if metric_name.startswith('win_rate_vs_iter_') or metric_name == 'avg_win_rate_vs_prev':
-                                self.writer.add_scalar(f"eval_vs_prev/{metric_name}", metric_value, self.iteration)
-                            elif metric_name in ['buffer_size', 'buffer_size_total', 'buffer_size_local', 'total_games_local']:
-                                self.writer.add_scalar(f"stats/{metric_name}", metric_value, self.iteration)
-                            else:
-                                self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
-                
+                    
+                    # Métriques d'entraînement
+                    training_metrics = {k: v for k, v in final_metrics.items() 
+                                    if k in ['total_loss', 'policy_loss', 'value_loss', 
+                                            'policy_accuracy', 'value_sign_match']}
+                    self._log_metrics_to_tensorboard(training_metrics, "training")
+                    
+                    # Taux d'apprentissage
+                    self._log_metrics_to_tensorboard({"learning_rate": self.current_lr}, "training")
+                    
+                    # Statistiques du buffer et des parties
+                    buffer_stats = {}
+                    if hasattr(self.buffer, 'gcs_index'):
+                        buffer_stats["buffer_size_total"] = self.buffer.total_size
+                        buffer_stats["buffer_size_local"] = self.buffer.local_size
+                    else:
+                        buffer_stats["buffer_size"] = self.buffer.size
+                    
+                    buffer_stats["total_games_local"] = self.total_games
+                    buffer_stats["total_games_global"] = self.total_games * self.num_processes
+                    self._log_metrics_to_tensorboard(buffer_stats, "stats")
+                    
+                    eval_metrics = {k: v for k, v in final_metrics.items() 
+                                if k.startswith('win_rate_vs_iter_') or k == 'avg_win_rate_vs_prev'}
+                    if eval_metrics:
+                        self._log_metrics_to_tensorboard(eval_metrics, "eval_vs_prev")
 
         finally:
             self.writer.close()
@@ -504,6 +522,20 @@ class AbaloneTrainerSync:
             self.game_logger.log_games_batch(converted_games)
 
         return games_data
+    def _log_metrics_to_tensorboard(self, metrics_dict, prefix="training"):
+        """
+        Centralise l'écriture des métriques dans TensorBoard
+        
+        Args:
+            metrics_dict: Dictionnaire de métriques à enregistrer
+            prefix: Préfixe pour organiser les métriques (ex: "training", "eval", "stats")
+        """
+        if not self.is_main_process:
+            return
+            
+        for name, value in metrics_dict.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(f"{prefix}/{name}", value, self.iteration)
 
     def _update_buffer(self, games_data):
         """
@@ -615,10 +647,9 @@ class AbaloneTrainerSync:
         Returns:
             Métriques moyennes sur toutes les étapes
         """
-        # Vérifier si le buffer est vide
         buffer_empty = ((hasattr(self.buffer, 'local_size') and self.buffer.local_size == 0) and 
                         (not hasattr(self.buffer, 'total_size') or self.buffer.total_size == 0)) or \
-                       (hasattr(self.buffer, 'size') and self.buffer.size == 0)
+                    (hasattr(self.buffer, 'size') and self.buffer.size == 0)
         
         if buffer_empty:
             if self.verbose:
@@ -710,23 +741,21 @@ class AbaloneTrainerSync:
 
         # Enregistrer dans TensorBoard si processus principal
         if self.is_main_process:
-            for metric_name, metric_value in avg_metrics.items():
-                self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
+            # Utiliser la fonction centralisée au lieu des appels directs
+            self._log_metrics_to_tensorboard(avg_metrics, "training")
+            self._log_metrics_to_tensorboard({"learning_rate": self.current_lr}, "training")
             
-            self.writer.add_scalar("training/learning_rate", self.current_lr, self.iteration)
-            
-            # Enregistrer la bonne métrique de taille du buffer
+            # Statistiques du buffer et des parties
+            buffer_stats = {}
             if using_gcs_buffer:
-                buffer_size = self.buffer.total_size
-                self.writer.add_scalar("stats/buffer_size_total", buffer_size, self.iteration)
-                self.writer.add_scalar("stats/buffer_size_local", self.buffer.local_size, self.iteration)
+                buffer_stats["buffer_size_total"] = self.buffer.total_size
+                buffer_stats["buffer_size_local"] = self.buffer.local_size
             else:
-                buffer_size = self.buffer.size
-                self.writer.add_scalar("stats/buffer_size", buffer_size, self.iteration)
+                buffer_stats["buffer_size"] = self.buffer.size
             
-            self.writer.add_scalar("stats/total_games_local", self.total_games, self.iteration)
-            total_games_global = self.total_games * self.num_processes
-            self.writer.add_scalar("stats/total_games_global", total_games_global, self.iteration)
+            buffer_stats["total_games_local"] = self.total_games
+            buffer_stats["total_games_global"] = self.total_games * self.num_processes
+            self._log_metrics_to_tensorboard(buffer_stats, "stats")
 
         # Enregistrer l'historique des métriques
         local_metrics_record = avg_metrics.copy()
@@ -744,7 +773,6 @@ class AbaloneTrainerSync:
         self.metrics_history.append(local_metrics_record)
 
         return avg_metrics
-
     def _save_checkpoint(self, is_final=False):
         """
         Sauvegarde un point de contrôle du modèle
@@ -840,6 +868,7 @@ class AbaloneTrainerSync:
             logger.info(f"Checkpoint loaded: {checkpoint_path}")
             logger.info(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
 
+            
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
         """
         Évalue le modèle actuel contre des versions précédentes.
@@ -878,8 +907,7 @@ class AbaloneTrainerSync:
                 logger.info("Aucun modèle précédent disponible pour l'évaluation")
             return {}
 
-        # Configurer l'évaluation distribuée
-        games_per_model = 8  # Multiple de 4 pour équilibrer entre les processus
+        games_per_model = 16 
         local_games_per_model = games_per_model // self.num_processes
         
         if self.verbose:
@@ -890,7 +918,7 @@ class AbaloneTrainerSync:
         # Initialiser l'évaluateur
         evaluator = ModelsEvaluator(
             network=self.network,
-            num_simulations=max(20, self.num_simulations // 2),  # Réduire le nombre de simulations
+            num_simulations=500,  # Réduire le nombre de simulations
             games_per_model=games_per_model
         )
 
@@ -936,14 +964,16 @@ class AbaloneTrainerSync:
                 logger.info(f"Résultats vs iter {ref_iter}: {win_rate:.1%} taux de victoire")
                 logger.info(f"  Victoires: {ref_results['current_wins']}, Défaites: {ref_results['reference_wins']}, Nuls: {ref_results['draws']}")
 
-                # Enregistrer dans TensorBoard
-                self.writer.add_scalar(f"eval_vs_prev/win_rate_iter_{ref_iter}", win_rate, self.iteration)
-                self.writer.add_scalar(f"eval_vs_prev/games_iter_{ref_iter}", ref_results['total_games'], self.iteration)
+                # Utiliser la fonction centralisée
+                self._log_metrics_to_tensorboard({
+                    f"win_rate_iter_{ref_iter}": win_rate,
+                    f"games_iter_{ref_iter}": ref_results['total_games']
+                }, "eval_vs_prev")
 
             if all_results:
                 # Calculer le taux de victoire moyen sur tous les modèles de référence
                 avg_win_rate = sum(res['win_rate'] for res in all_results.values()) / len(all_results)
-                self.writer.add_scalar("eval_vs_prev/avg_win_rate", avg_win_rate, self.iteration)
+                self._log_metrics_to_tensorboard({"avg_win_rate": avg_win_rate}, "eval_vs_prev")
 
                 # Ajouter un résumé à l'historique des métriques
                 if self.metrics_history and self.iteration > 0:
