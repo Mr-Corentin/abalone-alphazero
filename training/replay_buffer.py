@@ -331,10 +331,9 @@ class GCSReplayBufferSync:
     def flush_to_gcs(self):
         """Écrit synchroniquement le contenu du buffer local sur GCS."""
         if self.local_size == 0:
-            return 0  # Rien à écrire
+            return 0  
         
-        if self.verbose:
-            logger.info(f"Début du flush vers GCS: {self.local_size} positions à écrire")
+        logger.info(f"Début du flush vers GCS: {self.local_size} positions à écrire")
         # else:
             
         #     logger.info(f"Flush vers GCS: {self.local_size} positions")
@@ -352,7 +351,6 @@ class GCSReplayBufferSync:
         timestamp = int(time.time())
         batch_id = f"{self.host_id}_{timestamp}"
         
-        # Obtenir les itérations uniques
         iterations = np.unique(data_to_write['iteration'])
         
         # Écrire les données pour chaque itération
@@ -370,8 +368,8 @@ class GCSReplayBufferSync:
             iter_path = f"{self.buffer_dir}/iteration_{iteration}"
             file_path = f"{iter_path}/{batch_id}.tfrecord"
             
-            if self.verbose:
-                logger.info(f"Écriture de {positions_in_iter} positions pour l'itération {iteration}")
+            
+            logger.info(f"Écriture de {positions_in_iter} positions pour l'itération {iteration}")
             
             # Écrire en format TFRecord
             example_count = self._write_tfrecord(file_path, iter_data)
@@ -973,6 +971,8 @@ class GCSReplayBufferSync:
         if self.local_size > 0:
             positions_flushed = self.flush_to_gcs()
             logger.info(f"Flush final: {positions_flushed} positions écrites sur GCS")
+        else :
+            logger.info(f"Local empty")
         
         logger.info(f"Buffer GCS fermé. Total: {self.total_size} positions")
     

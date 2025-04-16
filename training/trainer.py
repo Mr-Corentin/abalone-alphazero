@@ -412,11 +412,12 @@ class AbaloneTrainerSync:
 
                 # 5. Sauvegarde périodique
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0 and self.is_main_process:
+                    logger.info("\nSave")
                     self._save_checkpoint()
 
 
             if self.is_main_process:
-                self._save_checkpoint(is_final=True)
+                #self._save_checkpoint(is_final=True)
                 
                 if self.metrics_history:
                     final_metrics = self.metrics_history[-1]
