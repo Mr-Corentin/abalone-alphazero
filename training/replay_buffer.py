@@ -172,7 +172,6 @@ class CPUReplayBuffer:
     
 
 logger = logging.getLogger("alphazero.buffer")
-
 class GCSReplayBufferSync:
     """
     Buffer d'expérience synchrone utilisant Google Cloud Storage comme stockage principal.
@@ -184,13 +183,14 @@ class GCSReplayBufferSync:
                 bucket_name: str,
                 buffer_dir: str = 'buffer',
                 max_local_size: int = 10000,
-                max_buffer_size: int = 20_000_000,  # Nouveau: taille maximale du buffer (positions)
-                buffer_cleanup_threshold: float = 0.95,  # Nouveau: seuil de nettoyage (% de remplissage)
+                max_buffer_size: int = 20_000_000,
+                buffer_cleanup_threshold: float = 0.95,
                 board_size: int = 9,
                 action_space: int = 1734,
                 recency_enabled: bool = True,
                 recency_temperature: float = 0.8,
-                cleanup_temperature: float = 2.0):  # Nouveau: température pour l'échantillonnage de nettoyage
+                cleanup_temperature: float = 2.0,
+                log_level: str = 'INFO'):
         """
         Initialise le buffer d'expérience synchrone basé sur GCS.
         
@@ -205,6 +205,7 @@ class GCSReplayBufferSync:
             recency_enabled: Activer l'échantillonnage avec biais de récence
             recency_temperature: Température pour le biais de récence pour l'échantillonnage
             cleanup_temperature: Température pour l'échantillonnage lors du nettoyage
+            log_level: Niveau de logging ('INFO', 'DEBUG', 'WARNING')
         """
         self.bucket_name = bucket_name
         self.buffer_dir = buffer_dir
@@ -217,11 +218,15 @@ class GCSReplayBufferSync:
         self.recency_temperature = recency_temperature
         self.cleanup_temperature = cleanup_temperature
         
+        # Configurer le niveau de log
+        self.verbose = log_level == 'DEBUG'
+        self.log_level = log_level
+        
         # Identifiant de processus et d'hôte pour éviter les conflits
         self.process_id = jax.process_index()
         self.host_id = f"{os.uname().nodename}_{self.process_id}"
         
-        # Cache local de données pour la première itération ou secours
+        # Cache local de données
         self.local_buffer = {
             'board': np.zeros((max_local_size, board_size, board_size), dtype=np.int8),
             'marbles_out': np.zeros((max_local_size, 2), dtype=np.int8),
@@ -246,7 +251,9 @@ class GCSReplayBufferSync:
         
         # Index des données disponibles sur GCS
         self.gcs_index = {}
-        self.gcs_file_metadata = {}  # Nouveau: stocke les métadonnées des fichiers (ex: taille, timestamp)
+        self.gcs_file_metadata = {}
+        self.last_index_update = 0
+        self.index_update_interval = 30  # Secondes avant de forcer une mise à jour de l'index
         
         # Initialiser l'index à partir de GCS
         self._update_gcs_index()
@@ -260,12 +267,12 @@ class GCSReplayBufferSync:
         }
         
         logger.info(f"GCSReplayBufferSync initialisé - Max buffer size: {self.max_buffer_size} positions")
-        
+    
     def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
             iteration=0, model_version=0):
         """Ajoute une transition individuelle au buffer"""
         # Convertir en numpy si nécessaire
-        if hasattr(board, 'device'):  # Détecte si c'est un tableau JAX
+        if hasattr(board, 'device'):
             board = np.array(board)
         if hasattr(marbles_out, 'device'):
             marbles_out = np.array(marbles_out)
@@ -322,24 +329,19 @@ class GCSReplayBufferSync:
             )
     
     def flush_to_gcs(self):
-        """
-        Écrit synchroniquement le contenu du buffer local sur GCS.
-        Cette méthode est typiquement appelée à la fin d'une itération
-        pour s'assurer que toutes les données sont stockées.
-        """
+        """Écrit synchroniquement le contenu du buffer local sur GCS."""
         if self.local_size == 0:
             return 0  # Rien à écrire
         
-        logger.info(f"Début du flush vers GCS: {self.local_size} positions à écrire")
+        if self.verbose:
+            logger.info(f"Début du flush vers GCS: {self.local_size} positions à écrire")
+        else:
+            logger.info(f"Flush vers GCS: {self.local_size} positions")
         
         # Préparer les données du buffer local
         data_to_write = {}
         for key in self.local_buffer:
             data_to_write[key] = self.local_buffer[key][:self.local_size].copy()
-        
-        # Obtenir les itérations uniques
-        iterations = np.unique(data_to_write['iteration'])
-        logger.info(f"Données de {len(iterations)} itérations différentes: {iterations}")
         
         # Compteur pour les positions écrites
         total_written = 0
@@ -348,6 +350,9 @@ class GCSReplayBufferSync:
         # Générer un ID de batch unique
         timestamp = int(time.time())
         batch_id = f"{self.host_id}_{timestamp}"
+        
+        # Obtenir les itérations uniques
+        iterations = np.unique(data_to_write['iteration'])
         
         # Écrire les données pour chaque itération
         for iteration in iterations:
@@ -364,7 +369,8 @@ class GCSReplayBufferSync:
             iter_path = f"{self.buffer_dir}/iteration_{iteration}"
             file_path = f"{iter_path}/{batch_id}.tfrecord"
             
-            logger.info(f"Écriture de {positions_in_iter} positions pour l'itération {iteration} dans {file_path}")
+            if self.verbose:
+                logger.info(f"Écriture de {positions_in_iter} positions pour l'itération {iteration}")
             
             # Écrire en format TFRecord
             example_count = self._write_tfrecord(file_path, iter_data)
@@ -392,28 +398,16 @@ class GCSReplayBufferSync:
         # Mettre à jour la taille totale du buffer
         self._update_total_size()
         
-        # Pause pour permettre à GCS de finaliser les opérations
-        logger.info(f"Attente de 2 secondes pour que GCS finalise les opérations d'écriture...")
-        time.sleep(2)
-        
-        # Forcer l'actualisation de l'index après l'écriture
-        logger.info(f"Mise à jour de l'index GCS après l'écriture...")
-        index_updated = self._update_gcs_index()
-        
-        if index_updated:
-            logger.info(f"Index GCS mis à jour avec succès après le flush")
-        else:
-            logger.warning(f"Échec de la mise à jour de l'index GCS après le flush")
+        # Mettre à jour l'index après l'écriture
+        self._update_gcs_index(force=False)  # Mise à jour légère
             
-        # Vérifier des incohérences potentielles
-        if len(self.gcs_index) == 0:
-            logger.warning(f"ANOMALIE: {files_created} fichiers créés mais l'index GCS est vide!")
-        
         # Vérifier si nettoyage nécessaire
         if self.total_size > self.max_buffer_size * self.buffer_cleanup_threshold:
             self._cleanup_buffer()
         
-        logger.info(f"Flush terminé: {total_written} positions écrites dans {files_created} fichiers")
+        if self.verbose:
+            logger.info(f"Flush terminé: {total_written} positions dans {files_created} fichiers")
+            
         return total_written
     
     def _write_tfrecord(self, file_path: str, data: Dict[str, np.ndarray]):
@@ -458,7 +452,6 @@ class GCSReplayBufferSync:
                 placeholder.upload_from_string("")
         except Exception as e:
             logger.warning(f"Impossible de vérifier/créer le dossier {iter_dir}: {e}")
-            # Continuer quand même, car l'écriture du fichier pourrait fonctionner
         
         # Télécharger le fichier
         blob = self.bucket.blob(file_path)
@@ -470,26 +463,40 @@ class GCSReplayBufferSync:
         
         return example_count
     
-    def _update_gcs_index(self):
-        """Met à jour l'index des fichiers disponibles sur GCS et compte précisément les exemples"""
+    def _update_gcs_index(self, force=False):
+        """
+        Met à jour l'index des fichiers disponibles sur GCS.
+        
+        Args:
+            force: Si True, force une mise à jour complète même si récemment mise à jour
+        
+        Returns:
+            bool: True si l'index a été mis à jour avec succès
+        """
+        current_time = time.time()
+        
+        # Vérifier si une mise à jour est nécessaire
+        if not force and (current_time - self.last_index_update) < self.index_update_interval:
+            return True  # Pas besoin de mise à jour
+        
         try:
             # Lister tous les blobs dans le dossier buffer
             prefix = f"{self.buffer_dir}/"
-            logger.info(f"Tentative de mise à jour de l'index GCS pour {prefix}")
-            blobs = list(self.bucket.list_blobs(prefix=prefix))
-            logger.info(f"Trouvé {len(blobs)} blobs dans {prefix}")
+            if self.verbose:
+                logger.info(f"Mise à jour de l'index GCS pour {prefix}")
             
-            if len(blobs) == 0:
+            blobs = list(self.bucket.list_blobs(prefix=prefix))
+            
+            if not blobs:
                 # Vérifier si le dossier existe
                 check_blob = self.bucket.blob(f"{prefix}.placeholder")
-                if not check_blob.exists():
-                    logger.warning(f"Le dossier {prefix} n'existe peut-être pas dans le bucket {self.bucket_name}")
-                    return False
+                if not check_blob.exists() and self.verbose:
+                    logger.warning(f"Le dossier {prefix} n'existe peut-être pas")
+                return False
             
             new_index = {}
             new_metadata = {}
             tfrecord_files_found = 0
-            
             total_examples = 0
             
             for blob in blobs:
@@ -507,7 +514,6 @@ class GCSReplayBufferSync:
                     
                     new_index[iteration].append(path)
                     
-                    # Extraire les informations de timestamp du nom de fichier
                     try:
                         # Format attendu: {host_id}_{timestamp}.tfrecord
                         file_basename = os.path.basename(path)
@@ -520,43 +526,38 @@ class GCSReplayBufferSync:
                     # Récupérer le nombre d'exemples depuis les métadonnées
                     if hasattr(blob, 'metadata') and blob.metadata and 'example_count' in blob.metadata:
                         example_count = int(blob.metadata['example_count'])
-                        logger.debug(f"Fichier {path}: {example_count} exemples selon les métadonnées")
                     else:
                         # Si pas de métadonnées, estimer (sera corrigé lors du chargement)
                         example_count = 1000
-                        logger.debug(f"Fichier {path}: pas de métadonnées, estimation de 1000 exemples")
                     
                     total_examples += example_count
                     
-                    # Stocker les métadonnées
                     new_metadata[path] = {
                         'size': example_count,
                         'timestamp': timestamp,
                         'iteration': iteration
                     }
             
-            # Journaliser des informations supplémentaires sur les fichiers trouvés
+            # Mettre à jour l'index uniquement s'il contient des données
             if tfrecord_files_found > 0:
-                iterations_found = list(new_index.keys())
-                logger.info(f"Fichiers TFRecord trouvés: {tfrecord_files_found}, dans les itérations: {iterations_found}")
-                for iter_num, files in new_index.items():
-                    logger.info(f"  - Itération {iter_num}: {len(files)} fichiers")
-            else:
-                logger.warning("Aucun fichier TFRecord trouvé dans le dossier buffer")
+                # Remplacer l'index et les métadonnées
+                self.gcs_index = new_index
+                self.gcs_file_metadata = new_metadata
+                self.total_size = total_examples + self.local_size
+                self.last_index_update = current_time
                 
-            # Remplacer l'index et les métadonnées
-            self.gcs_index = new_index
-            self.gcs_file_metadata = new_metadata
-            self.total_size = total_examples
+                if self.verbose:
+                    iterations_found = list(new_index.keys())
+                    logger.info(f"Index GCS: {tfrecord_files_found} fichiers, {len(iterations_found)} itérations, {total_examples} positions")
+                
+                return True
+            elif self.verbose:
+                logger.warning("Aucun fichier TFRecord trouvé dans le dossier buffer")
             
-            logger.info(f"Index GCS mis à jour: {len(new_metadata)} fichiers, {total_examples} positions")
-            
-            return len(new_metadata) > 0  # Renvoie True si des fichiers ont été trouvés
+            return False
             
         except Exception as e:
             logger.error(f"Erreur lors de la mise à jour de l'index GCS: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
             return False
     
     def _update_total_size(self):
@@ -591,7 +592,7 @@ class GCSReplayBufferSync:
             return
         
         self.metrics["cleanup_operations"] += 1
-        logger.info(f"Nettoyage du buffer: {self.total_size} positions, besoin de supprimer {overflow} positions")
+        logger.info(f"Nettoyage du buffer: besoin de supprimer {overflow}/{self.total_size} positions")
         
         # Collecter tous les fichiers avec leurs métadonnées
         all_files = []
@@ -699,7 +700,7 @@ class GCSReplayBufferSync:
         # Mettre à jour la taille totale
         self._update_total_size()
         
-        logger.info(f"Nettoyage terminé: {removed_count} fichiers supprimés, nouvelle taille: {self.total_size} positions")
+        logger.info(f"Nettoyage terminé: {removed_count} fichiers supprimés, nouvelle taille: {self.total_size}")
     
     def _parse_tfrecord(self, example):
         """Parse un exemple TFRecord en dictionnaire numpy"""
@@ -741,36 +742,19 @@ class GCSReplayBufferSync:
         Returns:
             Dict contenant les données échantillonnées
         """
-        # Log de début pour tracer chaque appel à sample
-        logger.info(f"Demande d'échantillonnage de {batch_size} exemples")
-        
-        
-        
-        try:
+        # Vérifier si l'index a besoin d'être mis à jour
+        current_time = time.time()
+        if current_time - self.last_index_update > self.index_update_interval:
             self._update_gcs_index()
-            
-            has_valid_data = False
-            for iter_num, iter_files in self.gcs_index.items():
-                if iter_files:
-                    has_valid_data = True
-                    break
-                    
-            if not has_valid_data:
-                logger.warning("L'actualisation n'a pas résolu le problème, l'index reste vide ou invalide")
-        except Exception as e:
-            logger.error(f"Erreur lors de la tentative d'actualisation de l'index: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-    
+        
+        has_valid_data = bool(self.gcs_index)
+        
+        # Si pas de données GCS ou elles sont inaccessibles, utiliser le buffer local
         if not has_valid_data:
             if self.local_size == 0:
-                # Journaliser plus d'informations pour le débogage
-                logger.error(f"Buffer vide, impossible d'échantillonner. État du buffer: index={bool(self.gcs_index)}, local_size={self.local_size}, total_size={self.total_size}")
-                raise ValueError("Buffer vide, impossible d'échantillonner (aucune donnée locale ni sur GCS)")
+                raise ValueError("Buffer vide (aucune donnée locale ni sur GCS)")
             
-            if self.metrics["samples_served"] == 0:
-                logger.info(f"Utilisation du cache local ({self.local_size} positions) en fallback")
-            
+            # Échantillonnage depuis le buffer local
             if rng_key is None:
                 local_indices = np.random.randint(0, self.local_size, size=batch_size)
             else:
@@ -784,29 +768,36 @@ class GCSReplayBufferSync:
                 result[k] = self.local_buffer[k][local_indices]
             
             self.metrics["samples_served"] += batch_size
-            logger.info(f"Échantillonnage réussi depuis le cache local: {batch_size} exemples")
             return result
         
+        # Échantillonnage depuis GCS
         try:
             result = self._sample_from_gcs(batch_size, rng_key)
             self.metrics["samples_served"] += batch_size
             return result
         except Exception as e:
-            logger.error(f"Erreur lors de l'échantillonnage depuis GCS: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.warning(f"Erreur lors de l'échantillonnage depuis GCS, fallback sur le buffer local: {e}")
+            
+            # Fallback sur le buffer local si disponible
+            if self.local_size > 0:
+                if rng_key is None:
+                    local_indices = np.random.randint(0, self.local_size, size=batch_size)
+                else:
+                    local_indices = jax.random.randint(
+                        rng_key, shape=(batch_size,), minval=0, maxval=self.local_size
+                    ).astype(np.int32)
+                    local_indices = np.array(local_indices)
+                
+                result = {}
+                for k in self.local_buffer:
+                    result[k] = self.local_buffer[k][local_indices]
+                
+                return result
+            else:
+                raise ValueError("Échec de l'échantillonnage GCS et buffer local vide")
             
     def _sample_from_gcs(self, n_samples, rng_key=None):
-        """
-        Échantillonne des exemples depuis GCS avec biais de récence.
-        
-        Args:
-            n_samples: Nombre d'exemples à échantillonner
-            rng_key: Clé JAX pour la génération de nombres aléatoires
-            
-        Returns:
-            Dict contenant les données échantillonnées
-        """
+        """Échantillonne des exemples depuis GCS avec biais de récence."""
         # Construire une distribution pour l'échantillonnage des itérations
         iterations = sorted(list(self.gcs_index.keys()))
         if not iterations:
@@ -832,7 +823,7 @@ class GCSReplayBufferSync:
         if rng_key is None:
             selected_iters = np.random.choice(
                 iterations, 
-                size=min(5, len(iterations)), 
+                size=min(3, len(iterations)), 
                 p=probs, 
                 replace=True
             )
@@ -841,7 +832,7 @@ class GCSReplayBufferSync:
             selected_iters = jax.random.choice(
                 subkey, 
                 np.array(iterations), 
-                shape=(min(5, len(iterations)),),
+                shape=(min(3, len(iterations)),),
                 p=np.array(probs),
                 replace=True
             )
@@ -857,7 +848,7 @@ class GCSReplayBufferSync:
                 continue
             
             # Sélectionner aléatoirement quelques fichiers pour diversité
-            num_files_to_sample = min(3, len(files))
+            num_files_to_sample = min(2, len(files))
             if rng_key is None:
                 file_indices = np.random.choice(len(files), size=num_files_to_sample, replace=False)
             else:
@@ -891,7 +882,12 @@ class GCSReplayBufferSync:
             if len(all_examples) >= n_samples:
                 break
         
+        # Gérer le cas où nous n'avons pas assez d'exemples
+        if not all_examples:
+            raise ValueError("Aucun exemple n'a pu être chargé depuis GCS")
+            
         if len(all_examples) < n_samples:
+            # Dupliquer des exemples existants pour atteindre la taille demandée
             if all_examples:  
                 indices_to_duplicate = np.random.choice(
                     len(all_examples), size=n_samples-len(all_examples), replace=True)
@@ -899,18 +895,35 @@ class GCSReplayBufferSync:
                 for idx in indices_to_duplicate:
                     all_examples.append(all_examples[idx])
         elif len(all_examples) > n_samples:
+            # Tronquer si trop d'exemples
             all_examples = all_examples[:n_samples]
         
         # Consolider les exemples en un seul dict
-        if not all_examples:
-            raise ValueError("Aucun exemple n'a pu être chargé depuis GCS")
-        
         result = {}
         for k in all_examples[0].keys():
             result[k] = np.array([ex[k] for ex in all_examples])
         
         return result
 
+    def _load_examples_from_gcs(self, file_path, max_examples):
+        """Charge des exemples depuis un fichier TFRecord sur GCS"""
+        blob = self.bucket.blob(file_path)
+        temp_path = f"/tmp/{os.path.basename(file_path)}"
+        blob.download_to_filename(temp_path)
+        
+        raw_dataset = tf.data.TFRecordDataset(temp_path)
+        
+        examples = []
+        for i, raw_example in enumerate(raw_dataset):
+            if i >= max_examples:
+                break
+            example = self._parse_tfrecord(raw_example)
+            examples.append(example)
+        
+        os.remove(temp_path)
+        
+        return examples
+    
     def sample_with_recency_bias(self, batch_size, temperature=None, rng_key=None):
         """
         Échantillonne avec biais de récence depuis GCS.
@@ -934,30 +947,6 @@ class GCSReplayBufferSync:
         
         return result
     
-    def _load_examples_from_gcs(self, file_path, max_examples):
-        """Charge des exemples depuis un fichier TFRecord sur GCS"""
-        blob = self.bucket.blob(file_path)
-        temp_path = f"/tmp/{os.path.basename(file_path)}"
-        blob.download_to_filename(temp_path)
-        
-        raw_dataset = tf.data.TFRecordDataset(temp_path)
-        
-        examples = []
-        for i, raw_example in enumerate(raw_dataset):
-            if i >= max_examples:
-                break
-            example = self._parse_tfrecord(raw_example)
-            examples.append(example)
-        
-        os.remove(temp_path)
-        
-
-        if file_path in self.gcs_file_metadata:
-
-            pass
-        
-        return examples
-    
     def start_new_game(self):
         """Incrémente l'ID de partie pour commencer une nouvelle partie"""
         self.current_game_id += 1
@@ -980,12 +969,11 @@ class GCSReplayBufferSync:
     
     def close(self):
         """Ferme proprement le buffer et assure que toutes les données sont écrites"""
-        
         if self.local_size > 0:
             positions_flushed = self.flush_to_gcs()
             logger.info(f"Flush final: {positions_flushed} positions écrites sur GCS")
         
-        logger.info(f"GCSReplayBufferSync fermé. Total dans le buffer: {self.total_size} positions")
+        logger.info(f"Buffer GCS fermé. Total: {self.total_size} positions")
     
     def __del__(self):
         """Destructeur pour assurer la fermeture propre"""
