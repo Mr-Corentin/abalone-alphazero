@@ -414,17 +414,19 @@ class AbaloneTrainerSync:
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0 and self.is_main_process:
                     self._save_checkpoint()
 
-            # Sauvegarde finale
-            # Enregistrer les métriques finales dans TensorBoard
-            
-            # Sauvegarde finale existante
+
             if self.is_main_process:
                 self._save_checkpoint(is_final=True)
                 if self.metrics_history:
                     final_metrics = self.metrics_history[-1]
                     for metric_name, metric_value in final_metrics.items():
                         if isinstance(metric_value, (int, float)) and metric_name != 'iteration':
-                            self.writer.add_scalar(f"final/{metric_name}", metric_value, self.iteration)
+                            if metric_name.startswith('win_rate_vs_iter_') or metric_name == 'avg_win_rate_vs_prev':
+                                self.writer.add_scalar(f"eval_vs_prev/{metric_name}", metric_value, self.iteration)
+                            elif metric_name in ['buffer_size', 'buffer_size_total', 'buffer_size_local', 'total_games_local']:
+                                self.writer.add_scalar(f"stats/{metric_name}", metric_value, self.iteration)
+                            else:
+                                self.writer.add_scalar(f"training/{metric_name}", metric_value, self.iteration)
                 
 
         finally:
