@@ -415,24 +415,29 @@ class AbaloneTrainerSync:
                     self._save_checkpoint()
 
             # Sauvegarde finale
+            # Enregistrer les métriques finales dans TensorBoard
+            
+            # Sauvegarde finale existante
             if self.is_main_process:
                 self._save_checkpoint(is_final=True)
+                if self.metrics_history:
+                    final_metrics = self.metrics_history[-1]
+                    for metric_name, metric_value in final_metrics.items():
+                        if isinstance(metric_value, (int, float)) and metric_name != 'iteration':
+                            self.writer.add_scalar(f"final/{metric_name}", metric_value, self.iteration)
+                
 
         finally:
-            # Libération des ressources
             self.writer.close()
 
-            # Fermeture du GameLogger
             if self.save_games and hasattr(self, 'game_logger'):
                 self.game_logger.stop()
 
-            # Fermeture du buffer GCS
             if hasattr(self.buffer, 'close'):
-                if self.verbose:
+                if self.verbose and self.is_main_process:
                     logger.info("Fermeture du buffer GCS...")
                 self.buffer.close()
 
-            # Statistiques globales
             total_time = time.time() - start_time_global
             if self.verbose:
                 logger.info(f"\n=== Entraînement terminé ===")

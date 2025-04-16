@@ -335,8 +335,9 @@ class GCSReplayBufferSync:
         
         if self.verbose:
             logger.info(f"Début du flush vers GCS: {self.local_size} positions à écrire")
-        else:
-            logger.info(f"Flush vers GCS: {self.local_size} positions")
+        # else:
+            
+        #     logger.info(f"Flush vers GCS: {self.local_size} positions")
         
         # Préparer les données du buffer local
         data_to_write = {}

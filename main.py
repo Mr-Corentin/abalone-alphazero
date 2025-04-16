@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-"""
-Main script to launch AlphaZero training for Abalone
-"""
 import jax
-jax.distributed.initialize()  # Auto-détection de l'environnement TPU
-
+jax.distributed.initialize() 
 
 import os
 import sys
 import json
 import argparse
 import time
-#import jax
 import datetime
 import warnings
 warnings.filterwarnings("ignore")
@@ -22,13 +16,26 @@ from training.config import DEFAULT_CONFIG, CPU_CONFIG, get_config
 
 import logging
 
-# Configuration du logger au début de votre script ou dans __init__
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - Process %(process)d - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger("alphazero.main")
+
+IS_MAIN_PROCESS = jax.process_index() == 0
+
+def main_process_log(message, level=logging.INFO):
+    """Journalise uniquement si c'est le processus principal"""
+    if IS_MAIN_PROCESS:
+        if level == logging.INFO:
+            logger.info(message)
+        elif level == logging.WARNING:
+            logger.warning(message)
+        elif level == logging.ERROR:
+            logger.error(message)
+        elif level == logging.DEBUG:
+            logger.debug(message)
 
 def parse_args():
     """Parse command line arguments"""
@@ -65,6 +72,8 @@ def parse_args():
                    help='Use a global buffer on Google Cloud Storage')
     parser.add_argument('--gcs-buffer-dir', type=str, default='buffer',
                     help='Directory in the GCS bucket for the buffer')
+    parser.add_argument('--verbose', action='store_true',
+                   help='Enable verbose output')
     
     # Model options
     parser.add_argument('--num-filters', type=int, default=None,
@@ -128,25 +137,25 @@ def get_merged_config(args):
             if 'log_dir' not in config:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
                 args.log_dir = f"{bucket_path}/logs/abalone_az_{timestamp}"
+    
     if args.use_gcs_buffer:
         config['buffer']['use_gcs'] = True
         
     if args.gcs_buffer_dir:
         config['buffer']['gcs_dir'] = args.gcs_buffer_dir
-
     
     return config
 
 
 def display_config_summary(config):
     """Display a summary of the configuration"""
-    logger.info("\n=== Configuration ===")
-    logger.info(f"Model: {config['model']['num_filters']} filters, {config['model']['num_blocks']} blocks")
-    logger.info(f"Buffer: {config['buffer']['size']} positions")
-    logger.info(f"Training: {config['training']['num_iterations']} iterations, {config['training']['games_per_iteration']} games/iter")
-    logger.info(f"Batch: {config['training']['batch_size']}, {config['training']['training_steps_per_iteration']} steps/iter")
-    logger.info(f"MCTS: {config['mcts']['num_simulations']} simulations per action")
-    logger.info(f"Checkpoints: {config['checkpoint']['path']}")
+    main_process_log("\n=== Configuration ===")
+    main_process_log(f"Model: {config['model']['num_filters']} filters, {config['model']['num_blocks']} blocks")
+    main_process_log(f"Buffer: {config['buffer']['size']} positions")
+    main_process_log(f"Training: {config['training']['num_iterations']} iterations, {config['training']['games_per_iteration']} games/iter")
+    main_process_log(f"Batch: {config['training']['batch_size']}, {config['training']['training_steps_per_iteration']} steps/iter")
+    main_process_log(f"MCTS: {config['mcts']['num_simulations']} simulations per action")
+    main_process_log(f"Checkpoints: {config['checkpoint']['path']}")
 
 
 def display_hardware_info():
@@ -156,23 +165,31 @@ def display_hardware_info():
     process_index = jax.process_index()
     process_count = jax.process_count()
 
-    logger.info(f"\n=== Hardware Configuration ===")
+    # Information matérielle - affichée pour tous les processus
     logger.info(f"Process {process_index+1}/{process_count} - Local devices: {local_device_count}")
-    logger.info(f"Total devices across all processes: {global_device_count}")
+    
+    # Information globale - affichée uniquement par le processus principal
+    if IS_MAIN_PROCESS:
+        main_process_log(f"\n=== Hardware Configuration ===")
+        main_process_log(f"Total devices across all processes: {global_device_count}")
 
-    # Correction: Accéder au premier device local pour déterminer la plateforme
+    # Détails sur le type de matériel - affichés par chaque processus
     local_devices = jax.local_devices()
     if not local_devices:
-         logger.info("Platform: No local devices found!")
-         return # Quitter si aucun device local n'est trouvé
+        logger.error("Platform: No local devices found!")
+        return
 
     first_device = local_devices[0]
+    platform_msg = f"Process {process_index+1}/{process_count} - "
+    
     if first_device.platform == 'tpu':
-        logger.info(f"Platform: TPU ({first_device.device_kind})") # Utiliser device_kind pour la version
+        platform_msg += f"Platform: TPU ({first_device.device_kind})"
     elif first_device.platform == 'gpu':
-        logger.info(f"Platform: GPU ({first_device.device_kind})") # Utiliser device_kind pour la version
+        platform_msg += f"Platform: GPU ({first_device.device_kind})"
     else:
-        logger.info(f"Platform: {first_device.platform}")
+        platform_msg += f"Platform: {first_device.platform}"
+    
+    logger.info(platform_msg)
 
 
 def create_trainer(config, args): 
@@ -208,7 +225,8 @@ def create_trainer(config, args):
         save_games=True,
         eval_games=eval_games,
         use_gcs_buffer=args.use_gcs_buffer,
-        gcs_buffer_dir=args.gcs_buffer_dir)
+        gcs_buffer_dir=args.gcs_buffer_dir,
+        verbose=args.verbose)
 
     # Load checkpoint if specified
     if args.checkpoint:
@@ -225,20 +243,26 @@ def main():
     display_hardware_info()
     display_config_summary(config)
 
-
-
     if args.mode == 'train':
         trainer = create_trainer(config, args)
         
-        logger.info("\n=== Starting training ===")
+        main_process_log("\n=== Starting training ===")
         
         eval_frequency = config['checkpoint']['eval_frequency']
         if args.no_eval:
             eval_frequency = 0
-            logger.info("Evaluation disabled")
+            main_process_log("Evaluation disabled")
         else:
             eval_games = config.get('evaluation', {}).get('num_games', 5)
-            logger.info(f"Evaluation: Every {eval_frequency} iterations, {eval_games} games per algorithm")
+            main_process_log(f"Evaluation: Every {eval_frequency} iterations, {eval_games} games per algorithm")
+        
+        # Activer l'évaluation si elle n'est pas désactivée
+        if not args.no_eval:
+            trainer.set_evaluation_options(
+                enable=True,
+                frequency=eval_frequency,
+                num_games=eval_games
+            )
         
         trainer.train(
             num_iterations=config['training']['num_iterations'],
@@ -250,11 +274,11 @@ def main():
     
     elif args.mode == 'eval':
         # To implement: model evaluation
-        logger.info("Evaluation mode not implemented. Use the Evaluator class directly.")
+        main_process_log("Evaluation mode not implemented. Use the Evaluator class directly.")
     
     elif args.mode == 'play':
         # To implement: game interface
-        logger.info("Play mode not implemented.")
+        main_process_log("Play mode not implemented.")
 
 
 if __name__ == "__main__":

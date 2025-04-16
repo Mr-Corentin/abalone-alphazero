@@ -241,7 +241,7 @@ class GameLogger:
         content_type="application/json"
     )
         
-        logger.info(f"Sauvegardé {len(self.buffer)} parties dans GCS: {batch_id}")
+        #logger.info(f"Sauvegardé {len(self.buffer)} parties dans GCS: {batch_id}")
         self.buffer = []
     
     def stop(self):
