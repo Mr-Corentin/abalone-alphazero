@@ -367,14 +367,17 @@ class AbaloneTrainerSync:
                 t_start = time.time()
                 games_data = self._generate_games(gen_key, games_per_iteration)
                 t_gen = time.time() - t_start
+
                 
                 if self.verbose:
                     logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
 
                 # 2. Mise à jour du buffer
+                jax.experimental.multihost_utils.sync_global_devices("post_generation")
                 t_start = time.time()
                 positions_added = self._update_buffer(games_data)
                 t_buffer = time.time() - t_start
+                jax.experimental.multihost_utils.sync_global_devices("post_buffer_update")
                 self.total_positions += positions_added
 
                 # Afficher les infos du buffer
@@ -393,6 +396,7 @@ class AbaloneTrainerSync:
                 t_start = time.time()
                 metrics = self._train_network(train_key, training_steps_per_iteration)
                 t_train = time.time() - t_start
+                jax.experimental.multihost_utils.sync_global_devices("post_training")
                 
                 if self.verbose:
                     logger.info(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
@@ -412,8 +416,8 @@ class AbaloneTrainerSync:
 
                 # 5. Sauvegarde périodique
                 if save_frequency > 0 and (iteration + 1) % save_frequency == 0 and self.is_main_process:
-                    logger.info("\nSave")
-                    #self._save_checkpoint()
+                    logger.info("\nÉvaluation contre modèles précédents...")
+                    self._save_checkpoint()
 
 
             if self.is_main_process:
@@ -449,6 +453,7 @@ class AbaloneTrainerSync:
                         self._log_metrics_to_tensorboard(eval_metrics, "eval_vs_prev")
 
         finally:
+            jax.experimental.multihost_utils.sync_global_devices("pre_close_resources")
             self.writer.close()
 
             if self.save_games and hasattr(self, 'game_logger'):
@@ -502,6 +507,7 @@ class AbaloneTrainerSync:
 
         # Récupérer les données sur CPU
         games_data = jax.device_get(games_data_pmap)
+        
 
         # Mettre à jour le compteur avec les jeux locaux
         self.total_games += local_total_games
