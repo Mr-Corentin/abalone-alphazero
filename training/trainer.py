@@ -377,7 +377,7 @@ class AbaloneTrainerSync:
                 t_start = time.time()
                 positions_added = self._update_buffer(games_data)
                 t_buffer = time.time() - t_start
-                jax.experimental.multihost_utils.sync_global_devices("post_buffer_update")
+                #jax.experimental.multihost_utils.sync_global_devices("post_buffer_update")
                 self.total_positions += positions_added
 
                 # Afficher les infos du buffer
@@ -396,7 +396,7 @@ class AbaloneTrainerSync:
                 t_start = time.time()
                 metrics = self._train_network(train_key, training_steps_per_iteration)
                 t_train = time.time() - t_start
-                jax.experimental.multihost_utils.sync_global_devices("post_training")
+                #jax.experimental.multihost_utils.sync_global_devices("post_training")
                 
                 if self.verbose:
                     logger.info(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
