@@ -722,7 +722,7 @@ class AbaloneTrainerSync:
             updates, opt_state_sharded = self.optimizer_update_pmap(
                 grads_averaged, opt_state_sharded, params_sharded
             )
-            params_sharded = jax.tree_map(lambda p, u: p + u, params_sharded, updates)
+            params_sharded = jax.tree.map(lambda p, u: p + u, params_sharded, updates)
 
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
@@ -735,8 +735,8 @@ class AbaloneTrainerSync:
             steps_completed += 1
 
         # Récupérer les paramètres mis à jour
-        self.params = jax.tree_map(lambda x: x[0], params_sharded)
-        self.opt_state = jax.tree_map(lambda x: x[0], opt_state_sharded)
+        self.params = jax.tree.map(lambda x: x[0], params_sharded)
+        self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
 
         # Si aucune étape d'entraînement n'a été effectuée
         if cumulative_metrics is None or steps_completed == 0:
