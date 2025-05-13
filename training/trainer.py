@@ -193,7 +193,6 @@ class AbaloneTrainerSync:
         
         # Configuration de l'évaluation
         self.eval_enabled = False
-        self.eval_frequency = 10
 
     def _setup_tensorboard(self, log_dir):
         """Configure le logging TensorBoard"""
@@ -238,24 +237,11 @@ class AbaloneTrainerSync:
                 flush_interval=flush_interval
             )
 
-    def set_evaluation_options(self, enable=True, frequency=10, num_games=1):
-        """
-        Configure les options d'évaluation
-
-        Args:
-            enable: Si True, l'évaluation sera effectuée pendant l'entraînement
-            frequency: Fréquence d'évaluation (itérations)
-            num_games: Nombre de parties à jouer contre chaque algorithme
-        """
+    def enable_evaluation(self, enable=True):
+        """Active ou désactive l'évaluation"""
         self.eval_enabled = enable
-        self.eval_frequency = frequency
-        self.eval_games = num_games
-        
         if self.verbose:
             logger.info(f"Évaluation {'activée' if enable else 'désactivée'}")
-            if enable:
-                logger.info(f"  Fréquence: Toutes les {frequency} itérations")
-                logger.info(f"  Parties par algorithme: {num_games}")
 
     def _update_learning_rate(self, iteration_percentage):
         """
@@ -331,17 +317,16 @@ class AbaloneTrainerSync:
         )
 
     def train(self, num_iterations=100, games_per_iteration=64,
-              training_steps_per_iteration=100, eval_frequency=10,
-              save_frequency=10):
+            training_steps_per_iteration=100, save_frequency=10):
         """
         Démarre l'entraînement avec approche synchronisée par étapes.
+        L'évaluation est maintenant déclenchée par les checkpoints de référence.
 
         Args:
             num_iterations: Nombre total d'itérations
             games_per_iteration: Nombre de parties à générer par itération
             training_steps_per_iteration: Nombre d'étapes d'entraînement par itération
-            eval_frequency: Fréquence d'évaluation (en itérations)
-            save_frequency: Fréquence de sauvegarde (en itérations)
+            save_frequency: Fréquence de sauvegarde régulière (en itérations)
         """
         # Initialiser le timer global
         start_time_global = time.time()
@@ -350,6 +335,14 @@ class AbaloneTrainerSync:
         seed_base = 42
         process_specific_seed = seed_base + (self.process_id * 1000)
         rng_key = jax.random.PRNGKey(process_specific_seed)
+
+        # Déterminer les itérations de référence pour tout l'entraînement
+        from evaluation.models_evaluator import generate_evaluation_checkpoints
+        self.reference_iterations = generate_evaluation_checkpoints(num_iterations)
+        
+        if self.verbose:
+            logger.info(f"Itérations de référence planifiées: {self.reference_iterations}")
+            logger.info(f"Évaluation {'activée' if self.eval_enabled else 'désactivée'}")
 
         try:
             for iteration in range(num_iterations):
@@ -368,7 +361,6 @@ class AbaloneTrainerSync:
                 games_data = self._generate_games(gen_key, games_per_iteration)
                 t_gen = time.time() - t_start
 
-                
                 if self.verbose:
                     logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
 
@@ -377,7 +369,6 @@ class AbaloneTrainerSync:
                 t_start = time.time()
                 positions_added = self._update_buffer(games_data)
                 t_buffer = time.time() - t_start
-                #jax.experimental.multihost_utils.sync_global_devices("post_buffer_update")
                 self.total_positions += positions_added
 
                 # Afficher les infos du buffer
@@ -396,7 +387,6 @@ class AbaloneTrainerSync:
                 t_start = time.time()
                 metrics = self._train_network(train_key, training_steps_per_iteration)
                 t_train = time.time() - t_start
-                #jax.experimental.multihost_utils.sync_global_devices("post_training")
                 
                 if self.verbose:
                     logger.info(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
@@ -404,24 +394,35 @@ class AbaloneTrainerSync:
                     logger.info(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
                     logger.info(f"  Précision politique: {metrics['policy_accuracy']}%")
 
-                # 4. Phase d'évaluation
-                if self.eval_enabled and eval_frequency > 0 and (iteration + 1) % eval_frequency == 0:
-                    eval_start = time.time()
+                # 4. Gestion des checkpoints de référence
+                if iteration in self.reference_iterations and self.is_main_process:
                     if self.verbose:
-                        logger.info("\nÉvaluation contre modèles précédents...")
-                    self.evaluate_against_previous_models(num_iterations)
-                    eval_time = time.time() - eval_start
+                        logger.info(f"\nItération {iteration}: Checkpoint de référence détecté")
+                    
+                    # Sauvegarder le modèle de référence
+                    self._save_checkpoint(is_reference=True)
+                    
+                    # Évaluer si activé et pas à l'itération 0
+                    if self.eval_enabled and iteration > 0:
+                        eval_start = time.time()
+                        if self.verbose:
+                            logger.info("Évaluation déclenchée par nouveau modèle de référence...")
+                        self.evaluate_against_previous_models(num_iterations)
+                        eval_time = time.time() - eval_start
+                        if self.verbose:
+                            logger.info(f"Évaluation terminée en {eval_time:.2f}s")
+                
+                # 5. Sauvegarde périodique standard (non-référence)
+                elif save_frequency > 0 and (iteration + 1) % save_frequency == 0 and self.is_main_process:
+                    # Sauvegarde normale (pas un checkpoint de référence)
                     if self.verbose:
-                        logger.info(f"Évaluation terminée en {eval_time:.2f}s")
+                        logger.info("\nSauvegarde périodique du checkpoint...")
+                    self._save_checkpoint(is_reference=False)
 
-                # 5. Sauvegarde périodique
-                if save_frequency > 0 and (iteration + 1) % save_frequency == 0 and self.is_main_process:
-                    logger.info("\nÉvaluation contre modèles précédents...")
-                    self._save_checkpoint()
-
-
+            # Sauvegarde finale si pas déjà fait
             if self.is_main_process:
-                #self._save_checkpoint(is_final=True)
+                final_is_reference = (num_iterations - 1) in self.reference_iterations
+                self._save_checkpoint(is_final=True, is_reference=final_is_reference)
                 
                 if self.metrics_history:
                     final_metrics = self.metrics_history[-1]
@@ -780,17 +781,24 @@ class AbaloneTrainerSync:
         self.metrics_history.append(local_metrics_record)
 
         return avg_metrics
-    def _save_checkpoint(self, is_final=False):
+    
+    def _save_checkpoint(self, is_final=False, is_reference=False):
         """
         Sauvegarde un point de contrôle du modèle
 
         Args:
             is_final: Si True, indique que c'est le point de contrôle final
+            is_reference: Si True, indique que c'est un checkpoint de référence pour l'évaluation
         """
         if not self.is_main_process:
             return
             
-        prefix = "final" if is_final else f"iter{self.iteration}"
+        if is_final:
+            prefix = "final"
+        elif is_reference:
+            prefix = f"ref_iter{self.iteration}"
+        else:
+            prefix = f"iter{self.iteration}"
 
         checkpoint = {
             'params': self.params,
@@ -799,7 +807,8 @@ class AbaloneTrainerSync:
             'current_lr': self.current_lr,
             'metrics': self.metrics_history,
             'total_games': self.total_games,
-            'total_positions': self.total_positions
+            'total_positions': self.total_positions,
+            'is_reference': is_reference
         }
 
         # Créer le répertoire si nécessaire
@@ -822,7 +831,8 @@ class AbaloneTrainerSync:
             subprocess.run(f"gsutil cp {local_path} {gcs_path}", shell=True)
             
             if self.verbose:
-                logger.info(f"Checkpoint saved: {gcs_path}")
+                checkpoint_type = "de référence" if is_reference else "standard"
+                logger.info(f"Checkpoint {checkpoint_type} sauvegardé: {gcs_path}")
 
             # Supprimer le fichier local
             os.remove(local_path)
@@ -833,7 +843,8 @@ class AbaloneTrainerSync:
                 pickle.dump(checkpoint, f)
                 
             if self.verbose:
-                logger.info(f"Checkpoint saved: {filename}")
+                checkpoint_type = "de référence" if is_reference else "standard"
+                logger.info(f"Checkpoint {checkpoint_type} sauvegardé: {filename}")
 
     def load_checkpoint(self, checkpoint_path):
         """
@@ -922,10 +933,9 @@ class AbaloneTrainerSync:
             logger.info(f"Itérations sélectionnées: {available_refs}")
         logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
 
-        # Initialiser l'évaluateur
         evaluator = ModelsEvaluator(
             network=self.network,
-            num_simulations=500,  # Réduire le nombre de simulations
+            num_simulations=500,  
             games_per_model=games_per_model
         )
 

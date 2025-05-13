@@ -248,36 +248,27 @@ def main():
         
         main_process_log("\n=== Starting training ===")
         
-        eval_frequency = config['checkpoint']['eval_frequency']
+        # Configuration de l'évaluation
         if args.no_eval:
-            eval_frequency = 0
             main_process_log("Evaluation disabled")
         else:
             eval_games = config.get('evaluation', {}).get('num_games', 5)
-            main_process_log(f"Evaluation: Every {eval_frequency} iterations, {eval_games} games per algorithm")
-        
-        # Activer l'évaluation si elle n'est pas désactivée
-        if not args.no_eval:
-            trainer.set_evaluation_options(
-                enable=True,
-                frequency=eval_frequency,
-                num_games=eval_games
-            )
+            main_process_log(f"Evaluation: Automatic at reference checkpoints, {eval_games} games per model")
+            
+            # Activer l'évaluation
+            trainer.enable_evaluation(enable=True)
         
         trainer.train(
             num_iterations=config['training']['num_iterations'],
             games_per_iteration=config['training']['games_per_iteration'],
             training_steps_per_iteration=config['training']['training_steps_per_iteration'],
-            eval_frequency=eval_frequency,
             save_frequency=config['checkpoint']['save_frequency']
         )
     
     elif args.mode == 'eval':
-        # To implement: model evaluation
         main_process_log("Evaluation mode not implemented. Use the Evaluator class directly.")
     
     elif args.mode == 'play':
-        # To implement: game interface
         main_process_log("Play mode not implemented.")
 
 
