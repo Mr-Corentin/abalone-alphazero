@@ -395,67 +395,85 @@ class AbaloneTrainerSync:
                     logger.info(f"  Précision politique: {metrics['policy_accuracy']}%")
 
                 # 4. Gestion des checkpoints de référence
-                if iteration in self.reference_iterations and self.is_main_process:
-                    if self.verbose:
-                        logger.info(f"\nItération {iteration}: Checkpoint de référence détecté")
+                if iteration in self.reference_iterations:
+                    # TOUS les processus entrent dans ce bloc
+                    if self.is_main_process:
+                        if self.verbose:
+                            logger.info(f"\nItération {iteration}: Checkpoint de référence détecté")
+                        
+                        # Sauvegarder le modèle de référence (seulement le processus principal)
+                        self._save_checkpoint(is_reference=True)
                     
-                    # Sauvegarder le modèle de référence
-                    self._save_checkpoint(is_reference=True)
+                    # Synchroniser TOUS les processus après la sauvegarde
+                    jax.experimental.multihost_utils.sync_global_devices("post_checkpoint_save")
                     
                     # Évaluer si activé et pas à l'itération 0
                     if self.eval_enabled and iteration > 0:
+                        # TOUS les processus participent à l'évaluation
                         eval_start = time.time()
                         if self.verbose:
                             logger.info("Évaluation déclenchée par nouveau modèle de référence...")
+                        
+                        # Appeler l'évaluation pour TOUS les processus
                         self.evaluate_against_previous_models(num_iterations)
+                        
                         eval_time = time.time() - eval_start
                         if self.verbose:
                             logger.info(f"Évaluation terminée en {eval_time:.2f}s")
                 
                 # 5. Sauvegarde périodique standard (non-référence)
-                elif save_frequency > 0 and (iteration + 1) % save_frequency == 0 and self.is_main_process:
-                    # Sauvegarde normale (pas un checkpoint de référence)
-                    if self.verbose:
-                        logger.info("\nSauvegarde périodique du checkpoint...")
-                    self._save_checkpoint(is_reference=False)
+                elif save_frequency > 0 and (iteration + 1) % save_frequency == 0:
+                    if self.is_main_process:
+                        # Sauvegarde normale (pas un checkpoint de référence)
+                        if self.verbose:
+                            logger.info("\nSauvegarde périodique du checkpoint...")
+                        self._save_checkpoint(is_reference=False)
+                    
+                    # Synchroniser tous les processus après la sauvegarde
+                    jax.experimental.multihost_utils.sync_global_devices("post_regular_checkpoint")
 
-            # Sauvegarde finale si pas déjà fait
+            # Sauvegarde finale
+            final_is_reference = (num_iterations - 1) in self.reference_iterations
             if self.is_main_process:
-                final_is_reference = (num_iterations - 1) in self.reference_iterations
                 self._save_checkpoint(is_final=True, is_reference=final_is_reference)
+            
+            # Synchroniser avant la fin
+            jax.experimental.multihost_utils.sync_global_devices("post_final_save")
                 
-                if self.metrics_history:
-                    final_metrics = self.metrics_history[-1]
-                    
-                    # Métriques d'entraînement
-                    training_metrics = {k: v for k, v in final_metrics.items() 
-                                    if k in ['total_loss', 'policy_loss', 'value_loss', 
-                                            'policy_accuracy', 'value_sign_match']}
-                    self._log_metrics_to_tensorboard(training_metrics, "training")
-                    
-                    # Taux d'apprentissage
-                    self._log_metrics_to_tensorboard({"learning_rate": self.current_lr}, "training")
-                    
-                    # Statistiques du buffer et des parties
-                    buffer_stats = {}
-                    if hasattr(self.buffer, 'gcs_index'):
-                        buffer_stats["buffer_size_total"] = self.buffer.total_size
-                        buffer_stats["buffer_size_local"] = self.buffer.local_size
-                    else:
-                        buffer_stats["buffer_size"] = self.buffer.size
-                    
-                    buffer_stats["total_games_local"] = self.total_games
-                    buffer_stats["total_games_global"] = self.total_games * self.num_processes
-                    self._log_metrics_to_tensorboard(buffer_stats, "stats")
-                    
-                    eval_metrics = {k: v for k, v in final_metrics.items() 
-                                if k.startswith('win_rate_vs_iter_') or k == 'avg_win_rate_vs_prev'}
-                    if eval_metrics:
-                        self._log_metrics_to_tensorboard(eval_metrics, "eval_vs_prev")
+            if self.metrics_history and self.is_main_process:
+                final_metrics = self.metrics_history[-1]
+                
+                # Métriques d'entraînement
+                training_metrics = {k: v for k, v in final_metrics.items() 
+                                if k in ['total_loss', 'policy_loss', 'value_loss', 
+                                        'policy_accuracy', 'value_sign_match']}
+                self._log_metrics_to_tensorboard(training_metrics, "training")
+                
+                # Taux d'apprentissage
+                self._log_metrics_to_tensorboard({"learning_rate": self.current_lr}, "training")
+                
+                # Statistiques du buffer et des parties
+                buffer_stats = {}
+                if hasattr(self.buffer, 'gcs_index'):
+                    buffer_stats["buffer_size_total"] = self.buffer.total_size
+                    buffer_stats["buffer_size_local"] = self.buffer.local_size
+                else:
+                    buffer_stats["buffer_size"] = self.buffer.size
+                
+                buffer_stats["total_games_local"] = self.total_games
+                buffer_stats["total_games_global"] = self.total_games * self.num_processes
+                self._log_metrics_to_tensorboard(buffer_stats, "stats")
+                
+                eval_metrics = {k: v for k, v in final_metrics.items() 
+                            if k.startswith('win_rate_vs_iter_') or k == 'avg_win_rate_vs_prev'}
+                if eval_metrics:
+                    self._log_metrics_to_tensorboard(eval_metrics, "eval_vs_prev")
 
         finally:
             jax.experimental.multihost_utils.sync_global_devices("pre_close_resources")
-            self.writer.close()
+            
+            if self.is_main_process:
+                self.writer.close()
 
             if self.save_games and hasattr(self, 'game_logger'):
                 self.game_logger.stop()
@@ -905,7 +923,7 @@ class AbaloneTrainerSync:
             logger.info(f"Checkpoint loaded: {checkpoint_path}")
             logger.info(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
 
-            
+
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
         """
         Évalue le modèle actuel contre des versions précédentes.
@@ -925,9 +943,6 @@ class AbaloneTrainerSync:
             ModelsEvaluator
         )
 
-        # Synchroniser avant l'évaluation
-        jax.experimental.multihost_utils.sync_global_devices("pre_evaluation")
-
         current_iter = self.iteration
 
         # Générer les itérations de référence
@@ -945,16 +960,26 @@ class AbaloneTrainerSync:
         if not available_refs:
             if self.verbose:
                 logger.info("Aucun modèle précédent disponible pour l'évaluation")
-            # Synchroniser avant de retourner
-            jax.experimental.multihost_utils.sync_global_devices("post_evaluation_early")
+            # PAS de synchronisation ici car on n'a pas encore fait le premier sync
             return {}
 
-        games_per_model = 16 
+        # Synchroniser SEULEMENT si on a des modèles à évaluer
+        jax.experimental.multihost_utils.sync_global_devices("pre_evaluation")
+
+        # Ajuster le nombre de parties en fonction du nombre de modèles disponibles
+        if len(available_refs) == 1:
+            games_per_model = max(16, self.num_processes * 2)  # Au moins 2 parties par processus
+        elif len(available_refs) < 4:
+            games_per_model = 32  # Plus de parties si peu de modèles
+        else:
+            games_per_model = 16  # Nombre standard
+
         local_games_per_model = games_per_model // self.num_processes
         
         if self.verbose:
             logger.info(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
             logger.info(f"Itérations sélectionnées: {available_refs}")
+            logger.info(f"Parties totales par modèle: {games_per_model}")
         logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
 
         evaluator = ModelsEvaluator(
@@ -1047,7 +1072,6 @@ class AbaloneTrainerSync:
         jax.experimental.multihost_utils.sync_global_devices("post_evaluation")
             
         return all_results
-
     def _aggregate_evaluation_results(self, local_results, model_iterations):
         """
         Agrège les résultats d'évaluation de tous les processus.
