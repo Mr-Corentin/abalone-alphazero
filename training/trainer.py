@@ -782,14 +782,9 @@ class AbaloneTrainerSync:
 
         return avg_metrics
     
-    def _save_checkpoint(self, is_final=False, is_reference=False):
-        """
-        Sauvegarde un point de contrôle du modèle
 
-        Args:
-            is_final: Si True, indique que c'est le point de contrôle final
-            is_reference: Si True, indique que c'est un checkpoint de référence pour l'évaluation
-        """
+    def _save_checkpoint(self, is_final=False, is_reference=False):
+        """Sauvegarde un point de contrôle du modèle"""
         if not self.is_main_process:
             return
             
@@ -826,8 +821,21 @@ class AbaloneTrainerSync:
             with open(local_path, 'wb') as f:
                 pickle.dump(checkpoint, f)
 
-            # Puis envoyer vers GCS
-            gcs_path = f"{self.checkpoint_path}_{prefix}.pkl"
+            # Créer le chemin final avec timestamp
+            if hasattr(self, 'training_timestamp'):
+                timestamp = self.training_timestamp
+            else:
+                # Créer un timestamp une seule fois pour toute la session
+                self.training_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+                timestamp = self.training_timestamp
+                
+            # Extraire le chemin de base
+            base_path = self.checkpoint_path
+            if '_' in base_path and base_path.count('_') > 1:
+                parts = base_path.split('_')
+                base_path = '_'.join(parts[:-1]) if parts[-1].replace('-', '').isdigit() else base_path
+                
+            gcs_path = f"{base_path}_{timestamp}_{prefix}.pkl"
             subprocess.run(f"gsutil cp {local_path} {gcs_path}", shell=True)
             
             if self.verbose:
@@ -837,8 +845,19 @@ class AbaloneTrainerSync:
             # Supprimer le fichier local
             os.remove(local_path)
         else:
-            # Sauvegarder localement
-            filename = f"{self.checkpoint_path}_{prefix}.pkl"
+            # Sauvegarder localement avec le même pattern
+            if hasattr(self, 'training_timestamp'):
+                timestamp = self.training_timestamp
+            else:
+                self.training_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+                timestamp = self.training_timestamp
+                
+            base_path = self.checkpoint_path
+            if '_' in base_path and base_path.count('_') > 1:
+                parts = base_path.split('_')
+                base_path = '_'.join(parts[:-1]) if parts[-1].replace('-', '').isdigit() else base_path
+                
+            filename = f"{base_path}_{timestamp}_{prefix}.pkl"
             with open(filename, 'wb') as f:
                 pickle.dump(checkpoint, f)
                 
@@ -1060,21 +1079,14 @@ class AbaloneTrainerSync:
 
         return final_results
 
-
-
+        
     def _get_checkpoint_path(self, iteration):
         """Obtient le chemin vers un checkpoint pour l'itération donnée."""
         prefix = f"ref_iter{iteration}"
         
-        if self.checkpoint_path.startswith("gs://"):
-            base_path = self.checkpoint_path
-            if '_' in base_path:
-                base_path = base_path.rsplit('_', 1)[0]
-            
-
-            return f"{base_path}_*_{prefix}.pkl"
-        else:
-            base_path = self.checkpoint_path
-            if '_' in base_path:
-                base_path = base_path.rsplit('_', 1)[0]
-            return f"{base_path}_*_{prefix}.pkl"
+        base_path = self.checkpoint_path
+        if '_' in base_path and base_path.count('_') > 1:
+            parts = base_path.split('_')
+            base_path = '_'.join(parts[:-1]) if parts[-1].replace('-', '').isdigit() else base_path
+        
+        return f"{base_path}_*_{prefix}.pkl"

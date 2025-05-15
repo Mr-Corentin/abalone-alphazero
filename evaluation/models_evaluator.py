@@ -88,13 +88,34 @@ def check_checkpoint_exists(checkpoint_path):
     except Exception:
         return False
 
-def download_checkpoint(gcs_path, local_path):
-    """Télécharge un checkpoint depuis GCS."""
+    
+def download_checkpoint(gcs_pattern, local_path):
+    """Télécharge un checkpoint depuis GCS en gérant les wildcards"""
     try:
-        subprocess.run(f"gsutil cp {gcs_path} {local_path}", shell=True, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.info(f"Erreur lors du téléchargement du checkpoint {gcs_path}: {e}")
+        import subprocess
+        list_cmd = f"gsutil ls {gcs_pattern}"
+        result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"Impossible de lister les fichiers: {result.stderr}")
+            return False
+            
+        files = result.stdout.strip().split('\n')
+        files = [f.strip() for f in files if f.strip()]
+        
+        if not files:
+            logger.error(f"Aucun fichier trouvé pour {gcs_pattern}")
+            return False
+            
+        actual_gcs_path = files[0]
+        
+        cmd = f"gsutil cp {actual_gcs_path} {local_path}"
+        result = subprocess.run(cmd, shell=True)
+        
+        return result.returncode == 0
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement: {e}")
         return False
 
 def load_checkpoint_params(checkpoint_path):
