@@ -924,6 +924,7 @@ class AbaloneTrainerSync:
             logger.info(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
 
 
+    
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
         """
         Évalue le modèle actuel contre des versions précédentes.
@@ -1040,38 +1041,49 @@ class AbaloneTrainerSync:
         jax.experimental.multihost_utils.sync_global_devices("post_aggregation")
 
         # Afficher et enregistrer les résultats
-        if self.verbose:
+        if self.verbose and all_results:
+            # 1. Calculer le win rate global
+            total_wins = sum(res['current_wins'] for res in all_results.values())
+            total_games = sum(res['total_games'] for res in all_results.values())
+            global_win_rate = total_wins / total_games if total_games > 0 else 0
+            
+            # 2. Métriques détaillées par modèle de référence
             for ref_iter, ref_results in all_results.items():
                 win_rate = ref_results['win_rate']
                 logger.info(f"Résultats vs iter {ref_iter}: {win_rate:.1%} taux de victoire")
                 logger.info(f"  Victoires: {ref_results['current_wins']}, Défaites: {ref_results['reference_wins']}, Nuls: {ref_results['draws']}")
 
-                # Utiliser la fonction centralisée
+                # Stocker dans TensorBoard pour une meilleure organisation
                 self._log_metrics_to_tensorboard({
-                    f"win_rate_iter_{ref_iter}": win_rate,
-                    f"games_iter_{ref_iter}": ref_results['total_games']
-                }, "eval_vs_prev")
-
-            if all_results:
-                # Calculer le taux de victoire moyen sur tous les modèles de référence
-                avg_win_rate = sum(res['win_rate'] for res in all_results.values()) / len(all_results)
-                self._log_metrics_to_tensorboard({"avg_win_rate": avg_win_rate}, "eval_vs_prev")
-
-                # Ajouter un résumé à l'historique des métriques
-                if self.metrics_history and self.iteration > 0:
-                    latest_metrics = self.metrics_history[-1]
-                    latest_metrics['avg_win_rate_vs_prev'] = avg_win_rate
-
-                    # Stocker les taux de victoire individuels
-                    for ref_iter, ref_results in all_results.items():
-                        latest_metrics[f'win_rate_vs_iter_{ref_iter}'] = ref_results['win_rate']
-                        
+                    f"model_comparison/iter{current_iter}_vs_iter{ref_iter}": win_rate,
+                }, "eval_results")
+            
+            # 3. Enregistrer le win rate global
+            self._log_metrics_to_tensorboard({
+                f"global_performance/iter{current_iter}": global_win_rate,
+                f"global_performance/wins": total_wins,
+                f"global_performance/games": total_games,
+            }, "eval_results")
+            
+            # 4. Logging de résumé
+            logger.info(f"Win rate global: {global_win_rate:.1%} ({total_wins}/{total_games} victoires)")
+            
+            # 5. Mise à jour de l'historique des métriques pour la sauvegarde
+            if self.metrics_history and current_iter > 0:
+                latest_metrics = self.metrics_history[-1]
+                latest_metrics['global_win_rate'] = global_win_rate
+                
+                # Stocker les taux de victoire individuels avec un format plus clair
+                for ref_iter, ref_results in all_results.items():
+                    latest_metrics[f'win_rate_vs_iter{ref_iter}'] = ref_results['win_rate']
+                    
             logger.info(f"\n=== Évaluation terminée ===")
         
         # Synchroniser à la fin de l'évaluation
         jax.experimental.multihost_utils.sync_global_devices("post_evaluation")
             
         return all_results
+
     def _aggregate_evaluation_results(self, local_results, model_iterations):
         """
         Agrège les résultats d'évaluation de tous les processus.
