@@ -925,6 +925,9 @@ class AbaloneTrainerSync:
             ModelsEvaluator
         )
 
+        # Synchroniser avant l'évaluation
+        jax.experimental.multihost_utils.sync_global_devices("pre_evaluation")
+
         current_iter = self.iteration
 
         # Générer les itérations de référence
@@ -942,6 +945,8 @@ class AbaloneTrainerSync:
         if not available_refs:
             if self.verbose:
                 logger.info("Aucun modèle précédent disponible pour l'évaluation")
+            # Synchroniser avant de retourner
+            jax.experimental.multihost_utils.sync_global_devices("post_evaluation_early")
             return {}
 
         games_per_model = 16 
@@ -962,6 +967,9 @@ class AbaloneTrainerSync:
         local_results = {}
 
         for ref_iter in available_refs:
+            # Synchroniser avant chaque évaluation de modèle
+            jax.experimental.multihost_utils.sync_global_devices(f"pre_eval_iter_{ref_iter}")
+            
             if self.verbose:
                 logger.info(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
 
@@ -972,6 +980,8 @@ class AbaloneTrainerSync:
                 if not download_checkpoint(ref_path, local_path):
                     if self.verbose:
                         logger.info(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
+                    # Synchroniser même en cas d'échec
+                    jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}_failed")
                     continue
             else:
                 local_path = ref_path
@@ -980,6 +990,8 @@ class AbaloneTrainerSync:
             if ref_params is None:
                 if self.verbose:
                     logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
+                # Synchroniser même en cas d'échec
+                jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}_failed_load")
                 continue
 
             eval_results = evaluator.evaluate_model_pair(
@@ -989,9 +1001,18 @@ class AbaloneTrainerSync:
             )
 
             local_results[ref_iter] = eval_results
+            
+            # Synchroniser après chaque évaluation
+            jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}")
 
+        # Synchroniser avant l'agrégation
+        jax.experimental.multihost_utils.sync_global_devices("pre_aggregation")
+        
         # Agréger les résultats de tous les processus
         all_results = self._aggregate_evaluation_results(local_results, available_refs)
+
+        # Synchroniser après l'agrégation
+        jax.experimental.multihost_utils.sync_global_devices("post_aggregation")
 
         # Afficher et enregistrer les résultats
         if self.verbose:
@@ -1021,6 +1042,9 @@ class AbaloneTrainerSync:
                         latest_metrics[f'win_rate_vs_iter_{ref_iter}'] = ref_results['win_rate']
                         
             logger.info(f"\n=== Évaluation terminée ===")
+        
+        # Synchroniser à la fin de l'évaluation
+        jax.experimental.multihost_utils.sync_global_devices("post_evaluation")
             
         return all_results
 
