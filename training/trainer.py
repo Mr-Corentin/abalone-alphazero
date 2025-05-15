@@ -1067,6 +1067,14 @@ class AbaloneTrainerSync:
         prefix = f"ref_iter{iteration}"
         
         if self.checkpoint_path.startswith("gs://"):
-            return f"{self.checkpoint_path}_{prefix}.pkl"
+            base_path = self.checkpoint_path
+            if '_' in base_path:
+                base_path = base_path.rsplit('_', 1)[0]
+            
+
+            return f"{base_path}_*_{prefix}.pkl"
         else:
-            return f"{self.checkpoint_path}_{prefix}.pkl"
+            base_path = self.checkpoint_path
+            if '_' in base_path:
+                base_path = base_path.rsplit('_', 1)[0]
+            return f"{base_path}_*_{prefix}.pkl"
