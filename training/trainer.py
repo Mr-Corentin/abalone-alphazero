@@ -1060,10 +1060,12 @@ class AbaloneTrainerSync:
 
         return final_results
 
+
+
     def _get_checkpoint_path(self, iteration):
         """Obtient le chemin vers un checkpoint pour l'itération donnée."""
-        prefix = f"iter{iteration}"
-
+        prefix = f"ref_iter{iteration}"
+        
         if self.checkpoint_path.startswith("gs://"):
             return f"{self.checkpoint_path}_{prefix}.pkl"
         else:
