@@ -1687,9 +1687,9 @@ class GCSReplayBufferSync:
             "local_cache_size": self.local_size,
             "combined_current_size": gcs_persisted_size + self.local_size, # GCS + current local cache
             "max_buffer_size_config": self.max_buffer_size,
-            "fill_percentage_gcs": 100 * gcs_persisted_size / self.max_buffer_size if self.max_buffer_size > 0 else 0,
-            "gcs_iterations_count": len(self.gcs_index),
-            "gcs_files_count": sum(len(files) for files in self.gcs_index.values()),
+            "fill_percentage": 100 * gcs_persisted_size / self.max_buffer_size if self.max_buffer_size > 0 else 0,
+            "iterations": len(self.gcs_index),
+            "files": sum(len(files) for files in self.gcs_index.values()),
         }
         stats.update(self.metrics)
         return stats
