@@ -573,6 +573,7 @@ class AbaloneTrainerSync:
         Returns:
             int: Nombre de positions ajoutées au buffer
         """
+        logger.info(f"Début entrée update buffer")
         positions_added = 0
         
         # Identifier si nous utilisons un buffer GCS
