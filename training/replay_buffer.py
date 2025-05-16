@@ -993,21 +993,13 @@ class CPUReplayBuffer:
 # import tensorflow as tf # Requis pour TFRecordWriter et parsing
 # from google.cloud import storage # Requis pour l'interaction GCS
 # import jax # Requis pour jax.process_index()
-import math # Requis pour math.exp dans _cleanup_buffer
-
-# Configuration du logger (peut aussi être fait globalement dans votre application)
-#logger = logging.getLogger("alphazero.buffer")
-# Si vous n'avez pas de configuration globale, vous pouvez en ajouter une simple ici pour les tests :
-# if not logger.hasHandlers():
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - PID %(process)d - %(levelname)s - %(message)s')
+import math 
 logger = logging.getLogger("alphazero.buffer")
+# Assurez-vous que votre logger principal est configuré au niveau INFO
+# exemple: logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - PID %(process)d - %(levelname)s - %(message)s')
+
+
 class GCSReplayBufferSync:
-    """
-    Buffer d'expérience synchrone utilisant Google Cloud Storage comme stockage principal.
-    - Permet le partage des expériences entre plusieurs nœuds TPU
-    - Maintient une taille fixe avec échantillonnage basé sur la récence
-    - Version synchrone pour simplicité et fiabilité
-    """
     def __init__(self,
                  bucket_name: str,
                  buffer_dir: str = 'buffer',
@@ -1019,10 +1011,8 @@ class GCSReplayBufferSync:
                  recency_enabled: bool = True,
                  recency_temperature: float = 0.8,
                  cleanup_temperature: float = 2.0,
-                 log_level: str = 'INFO'): # log_level est pour info, pas pour configurer le logger ici
-        """
-        Initialise le buffer d'expérience synchrone basé sur GCS.
-        """
+                 log_level: str = 'INFO'): # Argument pour info, ne configure pas le logger ici
+
         self.bucket_name = bucket_name
         self.buffer_dir = buffer_dir
         self.max_local_size = max_local_size
@@ -1051,7 +1041,7 @@ class GCSReplayBufferSync:
         
         self.local_size = 0
         self.position = 0
-        self.current_game_id = 0 # Utilisé si game_id n'est pas fourni à add()
+        self.current_game_id = 0
         self.total_size = 0 
         
         self.client = storage.Client()
@@ -1060,30 +1050,22 @@ class GCSReplayBufferSync:
         self.gcs_index = {}
         self.gcs_file_metadata = {}
         self.last_index_update = 0
-        self.index_update_interval = 30 
+        self.index_update_interval = 60  # Augmenté pour réduire la fréquence des list_blobs
         
         logger.info(f"[P:{self.process_id}] GCSReplayBufferSync initializing...")
         t_init_idx_start = time.time()
-        self._update_gcs_index(force=True) # Force update at init
-        logger.info(f"[P:{self.process_id}] GCSReplayBufferSync: Initial _update_gcs_index took {time.time() - t_init_idx_start:.4f}s")
+        self._update_gcs_index(force=True)
+        logger.info(f"[P:{self.process_id}] GCSReplayBufferSync: Initial _update_gcs_index took {time.time() - t_init_idx_start:.2f}s. GCS Total: {self.total_size}")
         
-        self.metrics = {
-            "samples_served": 0,
-            "files_added": 0,
-            "files_removed": 0,
-            "cleanup_operations": 0
-        }
-        
-        logger.info(f"[P:{self.process_id}] GCSReplayBufferSync initialized. Max buffer: {self.max_buffer_size}, Max local: {self.max_local_size}, Total GCS (est.): {self.total_size}")
+        self.metrics = {"samples_served": 0, "files_added": 0, "files_removed": 0, "cleanup_operations": 0}
+        logger.info(f"[P:{self.process_id}] GCSReplayBufferSync initialized. Max GCS: {self.max_buffer_size}, Max local cache: {self.max_local_size}")
 
-    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
-            iteration=0, model_version=0):
+    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, iteration=0, model_version=0):
+        # Pas de logs ici, opération locale et rapide
         if hasattr(board, 'device'): board = np.array(board)
         if hasattr(marbles_out, 'device'): marbles_out = np.array(marbles_out)
         if hasattr(policy, 'device'): policy = np.array(policy)
-        
         _game_id = game_id if game_id is not None else self.current_game_id
-        
         idx = self.position
         self.local_buffer['board'][idx] = board
         self.local_buffer['marbles_out'][idx] = marbles_out
@@ -1094,160 +1076,102 @@ class GCSReplayBufferSync:
         self.local_buffer['move_num'][idx] = move_num
         self.local_buffer['iteration'][idx] = iteration
         self.local_buffer['model_version'][idx] = model_version
-        
         self.position = (self.position + 1) % self.max_local_size
         self.local_size = min(self.local_size + 1, self.max_local_size)
-        # self.total_size increment was here, but it's more accurately updated after GCS operations
 
     def add_batch(self, batch):
+        # Pas de logs ici non plus
         batch_size_val = batch['board'].shape[0]
-        has_game_id = 'game_id' in batch
-        has_move_num = 'move_num' in batch
-        has_iteration = 'iteration' in batch
-        has_model_version = 'model_version' in batch
-        
+        # ... (logique de add_batch comme avant) ...
+        has_game_id = 'game_id' in batch; has_move_num = 'move_num' in batch; has_iteration = 'iteration' in batch; has_model_version = 'model_version' in batch
         for i in range(batch_size_val):
             game_id = batch['game_id'][i] if has_game_id else None
             move_num = batch['move_num'][i] if has_move_num else 0
-            iteration_val = batch['iteration'][i] if has_iteration else 0 # Renamed to avoid conflict
+            iteration_val = batch['iteration'][i] if has_iteration else 0
             model_version = batch['model_version'][i] if has_model_version else 0
-            
-            self.add(
-                batch['board'][i], batch['marbles_out'][i], batch['policy'][i],
-                batch['outcome'][i], batch['player'][i], game_id=game_id,
-                move_num=move_num, iteration=iteration_val, model_version=model_version
-            )
+            self.add(batch['board'][i], batch['marbles_out'][i], batch['policy'][i], batch['outcome'][i], batch['player'][i], game_id=game_id, move_num=move_num, iteration=iteration_val, model_version=model_version)
 
     def flush_to_gcs(self):
         t_flush_start = time.time()
-        if self.local_size == 0:
-            logger.info(f"[P:{self.process_id}] flush_to_gcs: No local data to flush.")
-            return 0
+        if self.local_size == 0: return 0
 
-        logger.info(f"[P:{self.process_id}] flush_to_gcs: Starting flush for {self.local_size} local positions.")
+        logger.info(f"[P:{self.process_id}] flush_to_gcs: START for {self.local_size} local positions.")
         
-        data_to_write = {}
-        for key in self.local_buffer:
-            data_to_write[key] = self.local_buffer[key][:self.local_size].copy()
-        
-        current_local_size_flushing = self.local_size # Store for accurate accounting
+        data_to_write = {k: self.local_buffer[k][:self.local_size].copy() for k in self.local_buffer}
+        current_local_size_flushing = self.local_size
         total_written_this_flush = 0
         files_created_this_flush = 0
-        
         flush_timestamp = int(time.time())
         batch_id_suffix = f"{self.host_id}_{flush_timestamp}"
-        
         unique_iterations_in_local = np.unique(data_to_write['iteration'])
         
         t_write_loop_start = time.time()
         for iteration_val in unique_iterations_in_local:
             iter_mask = data_to_write['iteration'] == iteration_val
-            if not np.any(iter_mask):
-                continue
-            
+            if not np.any(iter_mask): continue
             iter_data = {k: v[iter_mask] for k, v in data_to_write.items()}
-            positions_in_iter_file = iter_data['board'].shape[0]
+            file_path_on_gcs = f"{self.buffer_dir}/iteration_{iteration_val}/{batch_id_suffix}.tfrecord"
             
-            iter_path_on_gcs = f"{self.buffer_dir}/iteration_{iteration_val}"
-            file_path_on_gcs = f"{iter_path_on_gcs}/{batch_id_suffix}.tfrecord"
-            
-            logger.info(f"[P:{self.process_id}] flush_to_gcs: Writing {positions_in_iter_file} positions for iteration {iteration_val} to {file_path_on_gcs}")
-            t_tfrecord_write_start = time.time()
+            # Log _write_tfrecord une fois par appel, il a ses propres logs internes pour le temps d'upload
             example_count = self._write_tfrecord(file_path_on_gcs, iter_data)
-            t_tfrecord_write_end = time.time()
-            logger.info(f"[P:{self.process_id}] flush_to_gcs: _write_tfrecord for iter {iteration_val} ({example_count} pos) to {file_path_on_gcs} took {t_tfrecord_write_end - t_tfrecord_write_start:.4f}s")
 
             if example_count > 0:
                 total_written_this_flush += example_count
                 files_created_this_flush += 1
-                
                 if iteration_val not in self.gcs_index: self.gcs_index[iteration_val] = []
                 self.gcs_index[iteration_val].append(file_path_on_gcs)
-                self.gcs_file_metadata[file_path_on_gcs] = {
-                    'size': example_count, 'timestamp': flush_timestamp, 'iteration': iteration_val
-                }
+                self.gcs_file_metadata[file_path_on_gcs] = {'size': example_count, 'timestamp': flush_timestamp, 'iteration': iteration_val}
                 self.metrics["files_added"] += 1
         
-        logger.info(f"[P:{self.process_id}] flush_to_gcs: Loop for _write_tfrecord calls took {time.time() - t_write_loop_start:.4f}s for {files_created_this_flush} files.")
+        if files_created_this_flush > 0:
+             logger.info(f"[P:{self.process_id}] flush_to_gcs: TFRecord write loop created {files_created_this_flush} files, took {time.time() - t_write_loop_start:.2f}s.")
 
-        self.local_size = 0
-        self.position = 0
+        self.local_size = 0; self.position = 0
         
-        # Update total_size with what was actually written and known GCS state
-        t_update_total_start = time.time()
-        self._update_total_size() # This recalculates based on self.gcs_file_metadata
-        logger.info(f"[P:{self.process_id}] flush_to_gcs: _update_total_size took {time.time() - t_update_total_start:.4f}s. New total_size: {self.total_size}")
+        self._update_total_size() # Recalcule self.total_size à partir de gcs_file_metadata
         
-        # Light index update (adds new files, doesn't re-list all of GCS unless interval passed)
         t_update_idx_start = time.time()
         self._update_gcs_index(force=False) 
-        logger.info(f"[P:{self.process_id}] flush_to_gcs: _update_gcs_index(force=False) took {time.time() - t_update_idx_start:.4f}s. Current total_size: {self.total_size}")
+        logger.info(f"[P:{self.process_id}] flush_to_gcs: _update_gcs_index(force=False) took {time.time() - t_update_idx_start:.2f}s. GCS Total: {self.total_size}")
             
         if self.total_size > self.max_buffer_size * self.buffer_cleanup_threshold:
-            logger.info(f"[P:{self.process_id}] flush_to_gcs: Cleanup needed. total_size ({self.total_size}) > threshold ({self.max_buffer_size * self.buffer_cleanup_threshold}).")
+            logger.info(f"[P:{self.process_id}] flush_to_gcs: Cleanup needed. GCS Total ({self.total_size}) > threshold.")
             t_cleanup_start = time.time()
             self._cleanup_buffer()
-            logger.info(f"[P:{self.process_id}] flush_to_gcs: _cleanup_buffer took {time.time() - t_cleanup_start:.4f}s. New total_size: {self.total_size}")
+            logger.info(f"[P:{self.process_id}] flush_to_gcs: _cleanup_buffer took {time.time() - t_cleanup_start:.2f}s. GCS Total after cleanup: {self.total_size}")
         
-        logger.info(f"[P:{self.process_id}] flush_to_gcs: Finished flush. Total {total_written_this_flush} positions in {files_created_this_flush} files. Total GCSReplayBuffer.flush_to_gcs time: {time.time() - t_flush_start:.4f}s")
+        logger.info(f"[P:{self.process_id}] flush_to_gcs: END. Flushed {total_written_this_flush} pos in {files_created_this_flush} files. Total GCSReplayBuffer.flush_to_gcs time: {time.time() - t_flush_start:.2f}s")
         return total_written_this_flush
 
     def _write_tfrecord(self, file_path_on_gcs: str, data: dict):
         t_start_write_tf = time.time()
-        logger.info(f"[P:{self.process_id}] _write_tfrecord: Starting to write to GCS path {file_path_on_gcs}")
-        
-        # Ensure /tmp directory exists or handle errors
-        tmp_dir = "/tmp"
-        if not os.path.exists(tmp_dir):
-            try:
-                os.makedirs(tmp_dir, exist_ok=True)
-            except OSError as e:
-                logger.error(f"[P:{self.process_id}] _write_tfrecord: Failed to create /tmp directory: {e}")
-                return 0 # Cannot proceed without /tmp
-
+        tmp_dir = "/tmp"; os.makedirs(tmp_dir, exist_ok=True)
         temp_local_path = os.path.join(tmp_dir, os.path.basename(file_path_on_gcs))
-        
         example_count = len(data['board'])
-        if example_count == 0:
-            logger.warning(f"[P:{self.process_id}] _write_tfrecord: No examples to write for {file_path_on_gcs}.")
-            return 0
+        if example_count == 0: return 0
             
         try:
-            with tf.io.TFRecordWriter(temp_local_path) as writer:
+            with tf.io.TFRecordWriter(temp_local_path) as writer: # Écriture locale
                 for i in range(example_count):
-                    example = tf.train.Example(features=tf.train.Features(feature={
-                        'board': tf.train.Feature(bytes_list=tf.train.BytesList(value=[data['board'][i].tobytes()])),
-                        'marbles_out': tf.train.Feature(bytes_list=tf.train.BytesList(value=[data['marbles_out'][i].tobytes()])),
-                        'policy': tf.train.Feature(bytes_list=tf.train.BytesList(value=[data['policy'][i].tobytes()])),
-                        'outcome': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['outcome'][i].item()])), # Use .item() for numpy scalars
-                        'player': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['player'][i].item()])),
-                        'game_id': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['game_id'][i].item()])),
-                        'move_num': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['move_num'][i].item()])),
-                        'iteration': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['iteration'][i].item()])),
-                        'model_version': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['model_version'][i].item()]))
-                    }))
+                    # ... (création de l'exemple TFRecord) ...
+                    example = tf.train.Example(features=tf.train.Features(feature={'board': tf.train.Feature(bytes_list=tf.train.BytesList(value=[data['board'][i].tobytes()])), 'marbles_out': tf.train.Feature(bytes_list=tf.train.BytesList(value=[data['marbles_out'][i].tobytes()])), 'policy': tf.train.Feature(bytes_list=tf.train.BytesList(value=[data['policy'][i].tobytes()])), 'outcome': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['outcome'][i].item()])), 'player': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['player'][i].item()])), 'game_id': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['game_id'][i].item()])), 'move_num': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['move_num'][i].item()])), 'iteration': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['iteration'][i].item()])), 'model_version': tf.train.Feature(int64_list=tf.train.Int64List(value=[data['model_version'][i].item()]))}))
                     writer.write(example.SerializeToString())
         except Exception as e:
-            logger.error(f"[P:{self.process_id}] _write_tfrecord: Failed to write local TFRecord {temp_local_path}: {e}", exc_info=True)
-            return 0 # Failed to write locally
+            logger.error(f"[P:{self.process_id}] _write_tfrecord: Failed to write local {temp_local_path}: {e}", exc_info=True)
+            return 0
 
-        # GCS Upload
         gcs_blob = self.bucket.blob(file_path_on_gcs)
         gcs_blob.metadata = {'example_count': str(example_count)}
-        
         t_upload_start = time.time()
         try:
-            gcs_blob.upload_from_filename(temp_local_path)
-            t_upload_end = time.time()
-            logger.info(f"[P:{self.process_id}] _write_tfrecord: GCS upload of {temp_local_path} to {file_path_on_gcs} ({example_count} pos) took {t_upload_end - t_upload_start:.4f}s")
+            gcs_blob.upload_from_filename(temp_local_path) # Upload GCS
+            logger.info(f"[P:{self.process_id}] _write_tfrecord: GCS upload for {file_path_on_gcs} ({example_count} pos) took {time.time() - t_upload_start:.2f}s.")
         except Exception as e:
-            logger.error(f"[P:{self.process_id}] _write_tfrecord: GCS upload failed for {file_path_on_gcs}: {e}", exc_info=True)
-            # Attempt to clean up local file even if upload fails
+            logger.error(f"[P:{self.process_id}] _write_tfrecord: GCS upload FAILED for {file_path_on_gcs}: {e}", exc_info=True)
             if os.path.exists(temp_local_path): os.remove(temp_local_path)
-            return 0 # Upload failed
-
+            return 0
         if os.path.exists(temp_local_path): os.remove(temp_local_path)
-        logger.info(f"[P:{self.process_id}] _write_tfrecord: Finished writing {file_path_on_gcs}. Total _write_tfrecord time: {time.time() - t_start_write_tf:.4f}s")
+        # Removed overall time log for _write_tfrecord to reduce verbosity, upload time is key.
         return example_count
 
     def _update_gcs_index(self, force=False):
@@ -1255,423 +1179,214 @@ class GCSReplayBufferSync:
         current_time = time.time()
         
         if not force and (current_time - self.last_index_update) < self.index_update_interval:
-            logger.info(f"[P:{self.process_id}] _update_gcs_index: Skipped due to interval. Last update {current_time - self.last_index_update:.2f}s ago.")
+            # logger.info(f"[P:{self.process_id}] _update_gcs_index: Skipped (interval).") # Peut être trop fréquent
             return True
         
-        logger.info(f"[P:{self.process_id}] _update_gcs_index: Starting index update (force={force}).")
+        logger.info(f"[P:{self.process_id}] _update_gcs_index: START (force={force}).")
         updated_successfully = False
         try:
             prefix_to_list = f"{self.buffer_dir}/"
-            
             t_list_blobs_start = time.time()
-            all_blobs_iterator = self.bucket.list_blobs(prefix=prefix_to_list)
-            # Convert iterator to list carefully if memory is a concern for millions of files
-            # For very large buckets, consider paginated listing or alternative index
-            blobs_list = list(all_blobs_iterator) 
-            t_list_blobs_end = time.time()
-            logger.info(f"[P:{self.process_id}] _update_gcs_index: list_blobs('{prefix_to_list}') found {len(blobs_list)} items, took {t_list_blobs_end - t_list_blobs_start:.4f}s")
+            blobs_list = list(self.bucket.list_blobs(prefix=prefix_to_list))
+            logger.info(f"[P:{self.process_id}] _update_gcs_index: list_blobs('{prefix_to_list}') found {len(blobs_list)} items, took {time.time() - t_list_blobs_start:.2f}s")
             
-            if not blobs_list and prefix_to_list == f"{self.buffer_dir}/": # Check if buffer_dir itself might not exist
-                 # Attempt to check if the bucket/prefix is truly empty or if listing failed
-                try:
-                    # Check if the bucket itself is accessible by trying to get its metadata
-                    self.bucket.reload() 
-                    logger.info(f"[P:{self.process_id}] _update_gcs_index: Bucket {self.bucket_name} accessible. Prefix {prefix_to_list} is likely empty or contains no TFRecords.")
-                except Exception as bucket_err:
-                    logger.error(f"[P:{self.process_id}] _update_gcs_index: Failed to access bucket {self.bucket_name}. Error: {bucket_err}")
-                    self.last_index_update = current_time # Mark update attempt
-                    logger.info(f"[P:{self.process_id}] _update_gcs_index: Finished (bucket access error). Total time: {time.time() - t_start_update_idx:.4f}s")
-                    return False # Cannot proceed if bucket not accessible
-
-            new_index_map = {}
-            new_metadata_map = {}
-            tfrecord_files_count = 0
-            total_gcs_examples = 0
-            
+            new_index_map, new_metadata_map, tfrecord_files_count, total_gcs_examples = {}, {}, 0, 0
+            # ... (logique de parsing des blobs comme avant, sans logs par blob) ...
             for blob_item in blobs_list:
-                path = blob_item.name
+                path = blob_item.name;_ = blob_item # Linter fix
                 if not path.endswith('.tfrecord'): continue
-                
                 tfrecord_files_count += 1
-                parts = path.split('/')
-                try: # Robust parsing of iteration from path
-                    iteration_str = next(p for p in reversed(parts) if p.startswith('iteration_'))
-                    iteration_val = int(iteration_str.replace('iteration_', ''))
-                except (StopIteration, ValueError):
-                    logger.warning(f"[P:{self.process_id}] _update_gcs_index: Could not parse iteration from path {path}. Skipping.")
-                    continue
-                
+                try: iteration_str = next(p for p in reversed(path.split('/')) if p.startswith('iteration_')); iteration_val = int(iteration_str.replace('iteration_', ''))
+                except: continue # Skip malformed paths
                 if iteration_val not in new_index_map: new_index_map[iteration_val] = []
                 new_index_map[iteration_val].append(path)
-                
-                try:
-                    filename_base = os.path.basename(path)
-                    timestamp_val = int(filename_base.split('_')[-1].split('.')[0])
-                except (IndexError, ValueError):
-                    timestamp_val = int(blob_item.time_created.timestamp()) if blob_item.time_created else 0
-                
+                try: filename_base = os.path.basename(path); timestamp_val = int(filename_base.split('_')[-1].split('.')[0])
+                except: timestamp_val = int(blob_item.time_created.timestamp()) if blob_item.time_created else 0
                 example_count = 0
                 if hasattr(blob_item, 'metadata') and blob_item.metadata and 'example_count' in blob_item.metadata:
-                    try:
-                        example_count = int(blob_item.metadata['example_count'])
-                    except ValueError:
-                        logger.warning(f"[P:{self.process_id}] _update_gcs_index: Invalid example_count in metadata for {path}. Estimating as 0.")
-                        example_count = 0 # Or re-evaluate by downloading, but that's slow here.
-                else: # Fallback: try to get from filename, or estimate (less reliable)
-                    logger.warning(f"[P:{self.process_id}] _update_gcs_index: Missing 'example_count' metadata for {path}. Estimating as 0.")
-                    example_count = 0 
-
+                    try: example_count = int(blob_item.metadata['example_count'])
+                    except ValueError: example_count = 0 
                 total_gcs_examples += example_count
                 new_metadata_map[path] = {'size': example_count, 'timestamp': timestamp_val, 'iteration': iteration_val}
-            
-            if tfrecord_files_count > 0:
-                self.gcs_index = new_index_map
-                self.gcs_file_metadata = new_metadata_map
-                # total_size should reflect GCS only here, local_size added separately or in get_stats
-                self.total_size = total_gcs_examples 
-                logger.info(f"[P:{self.process_id}] _update_gcs_index: Index updated. {tfrecord_files_count} TFRecords, {len(new_index_map)} unique iterations, {total_gcs_examples} total GCS positions.")
+
+            if tfrecord_files_count > 0 or not blobs_list : # Process if TFRecords found OR if GCS is truly empty
+                self.gcs_index, self.gcs_file_metadata, self.total_size = new_index_map, new_metadata_map, total_gcs_examples
+                logger.info(f"[P:{self.process_id}] _update_gcs_index: Index updated. {tfrecord_files_count} TFRecs, {len(new_index_map)} iters, {total_gcs_examples} GCS pos.")
                 updated_successfully = True
-            elif not blobs_list: # No blobs found at all
-                 logger.info(f"[P:{self.process_id}] _update_gcs_index: No blobs found under prefix {prefix_to_list}. Index is empty.")
-                 self.gcs_index = {}
-                 self.gcs_file_metadata = {}
-                 self.total_size = 0
-                 updated_successfully = True # Empty is a valid state
-            else: # Blobs found, but no .tfrecord files
-                 logger.warning(f"[P:{self.process_id}] _update_gcs_index: No TFRecord files found among {len(blobs_list)} items. Index is empty.")
-                 self.gcs_index = {}
-                 self.gcs_file_metadata = {}
-                 self.total_size = 0
+            else: # Blobs found, but no TFRecords
+                 logger.warning(f"[P:{self.process_id}] _update_gcs_index: No TFRecord files found among {len(blobs_list)} items. Index remains empty.")
+                 self.gcs_index, self.gcs_file_metadata, self.total_size = {}, {}, 0
                  updated_successfully = True
-
-
         except Exception as e:
-            logger.error(f"[P:{self.process_id}] _update_gcs_index: Error during full update: {e}", exc_info=True)
-            updated_successfully = False # Mark as failed
+            logger.error(f"[P:{self.process_id}] _update_gcs_index: Error: {e}", exc_info=True)
         
-        self.last_index_update = current_time # Mark update attempt time regardless of outcome
-        logger.info(f"[P:{self.process_id}] _update_gcs_index: Finished (success={updated_successfully}). Total time: {time.time() - t_start_update_idx:.4f}s")
+        self.last_index_update = current_time
+        logger.info(f"[P:{self.process_id}] _update_gcs_index: END (success={updated_successfully}). Total time: {time.time() - t_start_update_idx:.2f}s")
         return updated_successfully
 
     def _update_total_size(self):
-        # This method recalculates total_size based on gcs_file_metadata.
-        # It should NOT include local_size here, as local_size is transient before a flush.
-        # The true "global" size visible for sampling is what's on GCS.
-        # self.total_size will be updated in _update_gcs_index and _cleanup_buffer directly.
-        # flush_to_gcs updates its local view of total_size after calling _update_gcs_index.
-        # get_stats() can provide a combined view if needed.
-        current_gcs_size = sum(meta['size'] for meta in self.gcs_file_metadata.values())
-        self.total_size = current_gcs_size # Reflects GCS persisted state
+        self.total_size = sum(meta['size'] for meta in self.gcs_file_metadata.values())
         return self.total_size
-
 
     def _cleanup_buffer(self):
         t_start_cleanup = time.time()
-        # Recalculate GCS size from metadata to be sure, as local_size is not part of persisted state for cleanup
-        current_gcs_persisted_size = sum(meta['size'] for meta in self.gcs_file_metadata.values())
+        current_gcs_persisted_size = self._update_total_size() # Assure que self.total_size est à jour avec GCS
         
-        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Starting. GCS persisted size: {current_gcs_persisted_size}, Max buffer: {self.max_buffer_size}, Target fill: 80%")
-
-        if current_gcs_persisted_size <= self.max_buffer_size * 0.8: # Check against target fill
-            logger.info(f"[P:{self.process_id}] _cleanup_buffer: No cleanup needed (GCS size {current_gcs_persisted_size} is within 80% target of max {self.max_buffer_size}).")
-            return
+        logger.info(f"[P:{self.process_id}] _cleanup_buffer: START. GCS size: {current_gcs_persisted_size}, Max: {self.max_buffer_size}.")
+        if current_gcs_persisted_size <= self.max_buffer_size * 0.8: return
 
         self.metrics["cleanup_operations"] += 1
-        # Target 80% fill after cleanup
         amount_to_remove = current_gcs_persisted_size - int(self.max_buffer_size * 0.8)
-        if amount_to_remove <= 0:
-            logger.info(f"[P:{self.process_id}] _cleanup_buffer: No cleanup needed (amount_to_remove={amount_to_remove}).")
-            return
-
-        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Need to remove ~{amount_to_remove} positions from GCS current size {current_gcs_persisted_size}.")
+        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Need to remove ~{amount_to_remove} positions.")
         
-        all_files_meta = list(self.gcs_file_metadata.items()) # List of (file_path, metadata_dict)
-        if not all_files_meta:
-            logger.warning(f"[P:{self.process_id}] _cleanup_buffer: No files in GCS metadata to clean up.")
-            return
+        all_files_meta = list(self.gcs_file_metadata.items())
+        if not all_files_meta: logger.warning(f"[P:{self.process_id}] _cleanup_buffer: No GCS files in metadata."); return
         
-        # Sort by timestamp (oldest first) for recency-based deletion probability
         all_files_meta.sort(key=lambda x: x[1]['timestamp'])
-        
-        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Found {len(all_files_meta)} files in GCS metadata for potential deletion.")
-
-        # Prepare files with normalized age for probability calculation
+        # ... (logique de calcul des probabilités et sélection des fichiers à supprimer, comme avant, sans logs internes à la boucle) ...
         files_with_age = []
-        if len(all_files_meta) > 1:
-            oldest_time = all_files_meta[0][1]['timestamp']
-            newest_time = all_files_meta[-1][1]['timestamp']
-            time_span = float(max(1, newest_time - oldest_time))
-            for path, meta in all_files_meta:
-                # Normalized age: 0 for newest, 1 for oldest
-                norm_age = 1.0 - ((meta['timestamp'] - oldest_time) / time_span)
-                files_with_age.append({'path': path, 'size': meta['size'], 'age': norm_age})
-        elif len(all_files_meta) == 1:
-             files_with_age.append({'path': all_files_meta[0][0], 'size': all_files_meta[0][1]['size'], 'age': 0.5})
-
-
-        # Calculate deletion probabilities (higher probability for older files)
-        probs = np.array([math.exp(f['age'] * self.cleanup_temperature) for f in files_with_age])
-        if np.sum(probs) == 0 : # Avoid division by zero if all probs are zero (e.g. large negative temp)
-            if len(probs)>0: probs = np.ones(len(probs)) / len(probs) # Uniform if exp fails
-            else: 
-                logger.warning(f"[P:{self.process_id}] _cleanup_buffer: No files or probabilities for cleanup.")
-                return
-
-        probs /= np.sum(probs)
+        if len(all_files_meta) > 1: oldest_time, newest_time = all_files_meta[0][1]['timestamp'], all_files_meta[-1][1]['timestamp']; time_span = float(max(1, newest_time - oldest_time)); norm_age_fn = lambda ts: 1.0 - ((ts - oldest_time) / time_span)
+        elif len(all_files_meta) == 1: norm_age_fn = lambda ts: 0.5
+        else: norm_age_fn = lambda ts: 0.0 # Should not happen if all_files_meta not empty
+        for path, meta in all_files_meta: files_with_age.append({'path': path, 'size': meta['size'], 'age': norm_age_fn(meta['timestamp'])})
+        probs = np.array([math.exp(f['age'] * self.cleanup_temperature) for f in files_with_age]); total_prob = np.sum(probs)
+        if total_prob <= 0: probs = np.ones(len(files_with_age)) / len(files_with_age) if len(files_with_age)>0 else np.array([])
+        else: probs /= total_prob
+        files_to_delete_paths, examples_marked_for_removal = [], 0
+        if len(probs)>0: # Ensure probs is not empty
+            sorted_candidates_indices = np.argsort([-p for p in probs]) 
+            for idx in sorted_candidates_indices:
+                if examples_marked_for_removal >= amount_to_remove: break
+                file_info = files_with_age[idx]; files_to_delete_paths.append(file_info['path']); examples_marked_for_removal += file_info['size']
         
-        files_to_delete_paths = []
-        examples_marked_for_removal = 0
-        
-        # Shuffle available files according to probabilities for selection
-        # Use a copy for modification if needed, or sample indices
-        candidate_indices = np.arange(len(files_with_age))
-        
-        # Keep selecting files until enough examples are marked for removal
-        # This loop ensures we don't get stuck if a file is huge and overshoots target a lot
-        # Or if probabilities are skewed. Simpler: iterate through oldest first for aggressive cleanup.
-        # For now, respecting the probability distribution for selection:
-        
-        # Create a list of files sorted by probability (descending) to prioritize deletion
-        # This is a greedy approach based on probability; true random sampling would be different.
-        sorted_candidates_indices = np.argsort([-p for p in probs]) # Sort by descending probability
+        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Selected {len(files_to_delete_paths)} files ({examples_marked_for_removal} pos) for deletion.")
 
-        for idx in sorted_candidates_indices:
-            if examples_marked_for_removal >= amount_to_remove:
-                break
-            file_info = files_with_age[idx]
-            files_to_delete_paths.append(file_info['path'])
-            examples_marked_for_removal += file_info['size']
-        
-        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Selected {len(files_to_delete_paths)} files to remove, targeting {amount_to_remove} examples, marked {examples_marked_for_removal} for removal.")
-
-        deleted_files_count = 0
-        actually_removed_examples_count = 0
+        deleted_files_count, actually_removed_examples_count = 0, 0
         t_delete_loop_start = time.time()
-
-        # Perform batch deletion if possible, otherwise individual
-        # For simplicity, using individual delete as in original code.
-        # Batch delete would require grouping and specific GCS API calls.
         for file_path_to_delete in files_to_delete_paths:
             try:
                 file_metadata = self.gcs_file_metadata.get(file_path_to_delete)
-                file_size_for_log = file_metadata['size'] if file_metadata else 0
-                
-                t_delete_single_start = time.time()
-                blob_to_delete = self.bucket.blob(file_path_to_delete)
-                blob_to_delete.delete() # Actual GCS call
-                logger.info(f"[P:{self.process_id}] _cleanup_buffer: Deleted {file_path_to_delete} ({file_size_for_log} pos) in {time.time() - t_delete_single_start:.4f}s")
-                
-                if file_metadata: # Update local index and metadata
+                blob_to_delete = self.bucket.blob(file_path_to_delete); blob_to_delete.delete()
+                if file_metadata:
                     iteration_of_deleted = file_metadata['iteration']
                     if iteration_of_deleted in self.gcs_index and file_path_to_delete in self.gcs_index[iteration_of_deleted]:
                         self.gcs_index[iteration_of_deleted].remove(file_path_to_delete)
-                        if not self.gcs_index[iteration_of_deleted]:
-                            del self.gcs_index[iteration_of_deleted]
+                        if not self.gcs_index[iteration_of_deleted]: del self.gcs_index[iteration_of_deleted]
                     del self.gcs_file_metadata[file_path_to_delete]
-                    actually_removed_examples_count += file_size_for_log
-                
-                deleted_files_count += 1
-                self.metrics["files_removed"] += 1
-            except Exception as e:
-                logger.warning(f"[P:{self.process_id}] _cleanup_buffer: Error deleting {file_path_to_delete}: {e}", exc_info=True)
+                    actually_removed_examples_count += file_metadata['size']
+                deleted_files_count += 1; self.metrics["files_removed"] += 1
+            except Exception as e: logger.warning(f"[P:{self.process_id}] _cleanup_buffer: Error deleting {file_path_to_delete}: {e}", exc_info=True)
         
-        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Loop for GCS file deletions took {time.time() - t_delete_loop_start:.4f}s")
+        if deleted_files_count > 0:
+            logger.info(f"[P:{self.process_id}] _cleanup_buffer: GCS file deletion loop took {time.time() - t_delete_loop_start:.2f}s for {deleted_files_count} files.")
         
-        self._update_total_size() # Recalculate GCS persisted size
-        logger.info(f"[P:{self.process_id}] _cleanup_buffer: Finished. {deleted_files_count} files removed ({actually_removed_examples_count} examples). New GCS persisted size: {self.total_size}. Total _cleanup_buffer time: {time.time() - t_start_cleanup:.4f}s")
+        self._update_total_size()
+        logger.info(f"[P:{self.process_id}] _cleanup_buffer: END. {deleted_files_count} files removed ({actually_removed_examples_count} pos). New GCS size: {self.total_size}. Total time: {time.time() - t_start_cleanup:.2f}s")
 
     def _parse_tfrecord(self, example_proto):
-        feature_description = {
-            'board': tf.io.FixedLenFeature([], tf.string),
-            'marbles_out': tf.io.FixedLenFeature([], tf.string),
-            'policy': tf.io.FixedLenFeature([], tf.string),
-            'outcome': tf.io.FixedLenFeature([], tf.int64),
-            'player': tf.io.FixedLenFeature([], tf.int64),
-            'game_id': tf.io.FixedLenFeature([], tf.int64),
-            'move_num': tf.io.FixedLenFeature([], tf.int64),
-            'iteration': tf.io.FixedLenFeature([], tf.int64),
-            'model_version': tf.io.FixedLenFeature([], tf.int64)
-        }
+        # Pas de logs ici, appelé très fréquemment lors du sampling
+        # ... (logique de _parse_tfrecord comme avant) ...
+        feature_description = {'board': tf.io.FixedLenFeature([], tf.string),'marbles_out': tf.io.FixedLenFeature([], tf.string),'policy': tf.io.FixedLenFeature([], tf.string),'outcome': tf.io.FixedLenFeature([], tf.int64),'player': tf.io.FixedLenFeature([], tf.int64),'game_id': tf.io.FixedLenFeature([], tf.int64),'move_num': tf.io.FixedLenFeature([], tf.int64),'iteration': tf.io.FixedLenFeature([], tf.int64),'model_version': tf.io.FixedLenFeature([], tf.int64)}
         parsed = tf.io.parse_single_example(example_proto, feature_description)
-        return {
-            'board': tf.io.decode_raw(parsed['board'], tf.int8).numpy().reshape(self.board_size, self.board_size),
-            'marbles_out': tf.io.decode_raw(parsed['marbles_out'], tf.int8).numpy().reshape(2),
-            'policy': tf.io.decode_raw(parsed['policy'], tf.float32).numpy().reshape(self.action_space),
-            'outcome': parsed['outcome'].numpy().astype(np.int8),
-            'player': parsed['player'].numpy().astype(np.int8),
-            'game_id': parsed['game_id'].numpy().astype(np.int32),
-            'move_num': parsed['move_num'].numpy().astype(np.int16),
-            'iteration': parsed['iteration'].numpy().astype(np.int32),
-            'model_version': parsed['model_version'].numpy().astype(np.int32)
-        }
+        return {'board': tf.io.decode_raw(parsed['board'], tf.int8).numpy().reshape(self.board_size, self.board_size),'marbles_out': tf.io.decode_raw(parsed['marbles_out'], tf.int8).numpy().reshape(2),'policy': tf.io.decode_raw(parsed['policy'], tf.float32).numpy().reshape(self.action_space),'outcome': parsed['outcome'].numpy().astype(np.int8),'player': parsed['player'].numpy().astype(np.int8),'game_id': parsed['game_id'].numpy().astype(np.int32),'move_num': parsed['move_num'].numpy().astype(np.int16),'iteration': parsed['iteration'].numpy().astype(np.int32),'model_version': parsed['model_version'].numpy().astype(np.int32)}
 
     def sample(self, batch_size, rng_key=None):
         t_sample_start = time.time()
-        logger.info(f"[P:{self.process_id}] sample: Requesting {batch_size} samples.")
-        
         current_time_for_sample = time.time()
         if current_time_for_sample - self.last_index_update > self.index_update_interval:
-            logger.info(f"[P:{self.process_id}] sample: GCS index update triggered by interval ({self.index_update_interval}s). Last update {current_time_for_sample - self.last_index_update:.2f}s ago.")
+            logger.info(f"[P:{self.process_id}] sample: Triggering _update_gcs_index (interval: {self.index_update_interval}s).")
             t_idx_update_start_in_sample = time.time()
             self._update_gcs_index() 
-            logger.info(f"[P:{self.process_id}] sample: _update_gcs_index call took {time.time() - t_idx_update_start_in_sample:.4f}s")
+            logger.info(f"[P:{self.process_id}] sample: _update_gcs_index call took {time.time() - t_idx_update_start_in_sample:.2f}s")
         
-        gcs_has_data = bool(self.gcs_index) and self.total_size > 0 # self.total_size reflects GCS persisted data
-        
-        sampled_data = None
-        source = "N/A"
+        gcs_has_data = bool(self.gcs_index) and self.total_size > 0
+        sampled_data, source = None, "N/A"
 
         if not gcs_has_data:
-            logger.warning(f"[P:{self.process_id}] sample: No GCS data available (index empty or total_size is 0). Attempting local buffer (size: {self.local_size}).")
-            if self.local_size == 0:
-                logger.error(f"[P:{self.process_id}] sample: Buffer completely empty (no local data, no GCS data).")
-                raise ValueError("Buffer empty (no data locally or on GCS)")
-            
+            # ... (logique de fallback sur buffer local, comme avant) ...
+            logger.warning(f"[P:{self.process_id}] sample: No GCS data. Fallback to local (size: {self.local_size}).")
+            if self.local_size == 0: logger.error(f"[P:{self.process_id}] sample: Buffer COMPLETELY EMPTY."); raise ValueError("Buffer empty")
             indices = np.random.randint(0, self.local_size, size=batch_size) if rng_key is None else np.array(jax.random.randint(rng_key, (batch_size,), 0, self.local_size))
-            sampled_data = {k: self.local_buffer[k][indices] for k in self.local_buffer}
-            source = "local_buffer_fallback (no GCS data)"
-        else: # Try GCS
+            sampled_data = {k: self.local_buffer[k][indices] for k in self.local_buffer}; source = "local_fallback_no_gcs"
+        else:
             try:
                 t_gcs_sample_start = time.time()
                 sampled_data = self._sample_from_gcs(batch_size, rng_key)
-                logger.info(f"[P:{self.process_id}] sample: _sample_from_gcs for {batch_size} samples took {time.time() - t_gcs_sample_start:.4f}s")
+                logger.info(f"[P:{self.process_id}] sample: _sample_from_gcs took {time.time() - t_gcs_sample_start:.2f}s")
                 source = "GCS"
             except Exception as e:
-                logger.warning(f"[P:{self.process_id}] sample: Error sampling from GCS: {e}. Falling back to local buffer (size: {self.local_size}).", exc_info=True)
+                logger.warning(f"[P:{self.process_id}] sample: Error sampling GCS: {e}. Fallback to local (size: {self.local_size}).", exc_info=True)
                 if self.local_size > 0:
                     indices = np.random.randint(0, self.local_size, size=batch_size) if rng_key is None else np.array(jax.random.randint(rng_key, (batch_size,), 0, self.local_size))
-                    sampled_data = {k: self.local_buffer[k][indices] for k in self.local_buffer}
-                    source = f"local_buffer_fallback (GCS sample error)"
-                else:
-                    logger.error(f"[P:{self.process_id}] sample: GCS sample failed AND local buffer is empty.")
-                    raise ValueError("GCS sampling failed and local buffer empty")
-
-        if sampled_data: self.metrics["samples_served"] += batch_size
-        logger.info(f"[P:{self.process_id}] sample: Finished. Got {batch_size} samples from {source}. Total sample() time: {time.time() - t_sample_start:.4f}s")
+                    sampled_data = {k: self.local_buffer[k][indices] for k in self.local_buffer}; source = "local_fallback_gcs_error"
+                else: logger.error(f"[P:{self.process_id}] sample: GCS sample FAILED AND local empty."); raise ValueError("GCS sample fail, local empty")
+        
+        if sampled_data: self.metrics["samples_served"] += len(sampled_data['board']) # Utiliser len(sampled_data['board']) pour la taille réelle du batch
+        logger.info(f"[P:{self.process_id}] sample: END. Got {len(sampled_data['board']) if sampled_data else 0} samples from {source}. Total sample() time: {time.time() - t_sample_start:.2f}s")
         return sampled_data
 
     def _sample_from_gcs(self, n_samples, rng_key=None):
-        t_start_sample_gcs = time.time()
-        # ... (logique de sélection d'itérations et de fichiers telle que vous l'aviez)
-        #       Ajoutez des logs si vous voulez tracer quelles itérations/fichiers sont choisis
+        # Les logs internes à cette fonction peuvent être nombreux si elle appelle _load_examples_from_gcs plusieurs fois.
+        # Pour l'instant, gardons les logs dans _load_examples_from_gcs.
+        # ... (logique de _sample_from_gcs comme avant, sans logs additionnels ici pour réduire la verbosité) ...
+        # ... (sauf peut-être un log au début et à la fin avec le temps total)
+        t_sfg_start = time.time()
         iterations = sorted(list(self.gcs_index.keys()))
-        if not iterations:
-            logger.warning(f"[P:{self.process_id}] _sample_from_gcs: No iterations in GCS index.")
-            raise ValueError("No iterations in GCS index to sample from")
-
-        # (Recency bias logic as before)
-        if self.recency_enabled and len(iterations) > 1:
-            min_iter, max_iter = min(iterations), max(iterations)
-            iter_range = float(max(1, max_iter - min_iter))
-            weights = np.array([math.exp(((i - min_iter) / iter_range) * self.recency_temperature) for i in iterations])
-            probs = weights / np.sum(weights)
-        else:
-            probs = np.ones(len(iterations)) / len(iterations)
-
-        num_iters_to_sample_from = min(3, len(iterations)) # Sample from up to 3 different iteration groups
-        
-        if rng_key is None:
-            chosen_iteration_indices = np.random.choice(len(iterations), size=num_iters_to_sample_from, p=probs, replace=True)
-            selected_iteration_values = [iterations[i] for i in chosen_iteration_indices]
-        else:
-            rng_key, iter_choice_key = jax.random.split(rng_key)
-            chosen_iteration_indices = jax.random.choice(iter_choice_key, np.arange(len(iterations)), shape=(num_iters_to_sample_from,), p=probs, replace=True)
-            selected_iteration_values = [iterations[i] for i in chosen_iteration_indices]
-        
-        logger.info(f"[P:{self.process_id}] _sample_from_gcs: Selected iterations to sample from: {selected_iteration_values} with probs {probs.round(3)}")
-
+        if not iterations: raise ValueError("No GCS iters")
+        if self.recency_enabled and len(iterations) > 1: min_iter, max_iter = min(iterations), max(iterations); iter_range = float(max(1, max_iter - min_iter)); weights = np.array([math.exp(((i - min_iter) / iter_range) * self.recency_temperature) for i in iterations]); probs = weights / np.sum(weights)
+        else: probs = np.ones(len(iterations)) / len(iterations)
+        num_iters_to_sample_from = min(3, len(iterations))
+        if rng_key is None: chosen_iteration_indices = np.random.choice(len(iterations), size=num_iters_to_sample_from, p=probs, replace=True); selected_iteration_values = [iterations[i] for i in chosen_iteration_indices]
+        else: rng_key, iter_choice_key = jax.random.split(rng_key); chosen_iteration_indices = jax.random.choice(iter_choice_key, np.arange(len(iterations)), shape=(num_iters_to_sample_from,), p=probs, replace=True); selected_iteration_values = [iterations[i] for i in chosen_iteration_indices] # Linter fix
         all_loaded_examples = []
-        # Aim to get roughly even samples from each selected iteration's files
-        # This logic might need refinement for precise distribution
-        target_samples_per_iteration_group = n_samples // num_iters_to_sample_from + 1 
-
+        target_samples_per_iteration_group = n_samples // num_iters_to_sample_from + 1
         for iter_val in selected_iteration_values:
             if len(all_loaded_examples) >= n_samples: break
             files_in_iter = self.gcs_index.get(iter_val, [])
             if not files_in_iter: continue
-
-            num_files_to_try_from_iter = min(2, len(files_in_iter)) # Load from up to 2 files per iter group
-            if rng_key is None:
-                chosen_file_indices_in_iter = np.random.choice(len(files_in_iter), size=num_files_to_try_from_iter, replace=False)
-            else:
-                rng_key, file_choice_key = jax.random.split(rng_key)
-                chosen_file_indices_in_iter = jax.random.choice(file_choice_key, np.arange(len(files_in_iter)), shape=(num_files_to_try_from_iter,), replace=False)
-            
+            num_files_to_try_from_iter = min(2, len(files_in_iter))
+            if rng_key is None: chosen_file_indices_in_iter = np.random.choice(len(files_in_iter), size=num_files_to_try_from_iter, replace=False)
+            else: rng_key, file_choice_key = jax.random.split(rng_key); chosen_file_indices_in_iter = jax.random.choice(file_choice_key, np.arange(len(files_in_iter)), shape=(num_files_to_try_from_iter,), replace=False) # Linter fix
             selected_files_paths = [files_in_iter[i] for i in chosen_file_indices_in_iter]
-            logger.info(f"[P:{self.process_id}] _sample_from_gcs: For iteration {iter_val}, attempting to load from files: {selected_files_paths}")
-
             samples_needed_from_this_iter_group = min(target_samples_per_iteration_group, n_samples - len(all_loaded_examples))
-            target_per_file = samples_needed_from_this_iter_group // num_files_to_try_from_iter + 1
-
+            target_per_file = samples_needed_from_this_iter_group // num_files_to_try_from_iter + 1 if num_files_to_try_from_iter > 0 else samples_needed_from_this_iter_group
             for file_path_to_load in selected_files_paths:
                 if len(all_loaded_examples) >= n_samples: break
-                try:
-                    # Pass how many samples are roughly needed from this file
-                    loaded_from_file = self._load_examples_from_gcs(file_path_to_load, target_per_file)
-                    all_loaded_examples.extend(loaded_from_file)
-                except Exception as e_load:
-                    logger.warning(f"[P:{self.process_id}] _sample_from_gcs: Error loading from {file_path_to_load}: {e_load}", exc_info=True)
-        
-        if not all_loaded_examples:
-            logger.error(f"[P:{self.process_id}] _sample_from_gcs: Failed to load any examples from GCS.")
-            raise ValueError("No examples could be loaded from GCS")
-            
-        # Ensure exact n_samples by duplicating or truncating
-        if len(all_loaded_examples) < n_samples:
-            logger.warning(f"[P:{self.process_id}] _sample_from_gcs: Loaded {len(all_loaded_examples)} but needed {n_samples}. Duplicating.")
-            indices_to_dup = np.random.choice(len(all_loaded_examples), size=n_samples - len(all_loaded_examples), replace=True)
-            all_loaded_examples.extend([all_loaded_examples[i] for i in indices_to_dup])
-        elif len(all_loaded_examples) > n_samples:
-            all_loaded_examples = all_loaded_examples[:n_samples] # Simple truncation
-
-        # Consolidate list of dicts to dict of numpy arrays
+                try: loaded_from_file = self._load_examples_from_gcs(file_path_to_load, target_per_file); all_loaded_examples.extend(loaded_from_file)
+                except Exception as e_load: logger.warning(f"[P:{self.process_id}] _sample_from_gcs: Error loading {file_path_to_load}: {e_load}", exc_info=False) # exc_info=False pour moins de bruit
+        if not all_loaded_examples: raise ValueError("No examples from GCS")
+        if len(all_loaded_examples) < n_samples: indices_to_dup = np.random.choice(len(all_loaded_examples), size=n_samples - len(all_loaded_examples), replace=True); all_loaded_examples.extend([all_loaded_examples[i] for i in indices_to_dup])
+        elif len(all_loaded_examples) > n_samples: all_loaded_examples = all_loaded_examples[:n_samples]
         result_batch = {k: np.array([ex[k] for ex in all_loaded_examples]) for k in all_loaded_examples[0].keys()}
-        logger.info(f"[P:{self.process_id}] _sample_from_gcs: Finished. Loaded {len(all_loaded_examples)} examples. Total time: {time.time() - t_start_sample_gcs:.4f}s")
+        # logger.info(f"[P:{self.process_id}] _sample_from_gcs: END. Loaded {len(all_loaded_examples)} examples. Total time: {time.time() - t_sfg_start:.2f}s") # Peut être un peu trop
         return result_batch
-
 
     def _load_examples_from_gcs(self, file_path_on_gcs: str, max_examples_to_load: int):
         t_start_load_gcs_file = time.time()
-        logger.info(f"[P:{self.process_id}] _load_examples_from_gcs: Attempting to load up to {max_examples_to_load} examples from GCS file {file_path_on_gcs}")
-        
+        # Pas de log au début ici pour réduire verbosité, le log de download suffira
         gcs_blob_to_load = self.bucket.blob(file_path_on_gcs)
-        
-        # Ensure /tmp exists
-        tmp_dir = "/tmp"
-        if not os.path.exists(tmp_dir): os.makedirs(tmp_dir, exist_ok=True)
-        temp_local_download_path = os.path.join(tmp_dir, os.path.basename(file_path_on_gcs) + f"_dl_{self.process_id}") # Add PID to avoid conflict if multiple processes on same host download same file
-        
+        tmp_dir = "/tmp"; os.makedirs(tmp_dir, exist_ok=True) # Linter fix
+        temp_local_download_path = os.path.join(tmp_dir, os.path.basename(file_path_on_gcs) + f"_dl_{self.process_id}_{int(t_start_load_gcs_file)}") # Unique temp file
         examples_list = []
         try:
             t_download_start_gcs = time.time()
-            gcs_blob_to_load.download_to_filename(temp_local_download_path)
-            logger.info(f"[P:{self.process_id}] _load_examples_from_gcs: Downloaded {file_path_on_gcs} to {temp_local_download_path} in {time.time() - t_download_start_gcs:.4f}s")
-            
+            gcs_blob_to_load.download_to_filename(temp_local_download_path) # GCS Download
+            logger.info(f"[P:{self.process_id}] _load_examples_from_gcs: Downloaded {file_path_on_gcs} ({os.path.getsize(temp_local_download_path) if os.path.exists(temp_local_download_path) else 0} bytes) in {time.time() - t_download_start_gcs:.2f}s")
             raw_tf_dataset = tf.data.TFRecordDataset(temp_local_download_path)
-            
-            loaded_count = 0
-            for raw_example_proto in raw_tf_dataset:
+            for loaded_count, raw_example_proto in enumerate(raw_tf_dataset): # Linter fix
                 if loaded_count >= max_examples_to_load: break
                 examples_list.append(self._parse_tfrecord(raw_example_proto))
-                loaded_count +=1
-        except Exception as e:
-            logger.error(f"[P:{self.process_id}] _load_examples_from_gcs: Error processing file {file_path_on_gcs} (downloaded to {temp_local_download_path}): {e}", exc_info=True)
-            # examples_list will remain as is, possibly empty
+        except Exception as e: logger.error(f"[P:{self.process_id}] _load_examples_from_gcs: Error processing {file_path_on_gcs}: {e}", exc_info=False)
         finally:
             if os.path.exists(temp_local_download_path): os.remove(temp_local_download_path)
-        
-        logger.info(f"[P:{self.process_id}] _load_examples_from_gcs: Loaded {len(examples_list)} examples from {file_path_on_gcs}. Total _load_examples_from_gcs time: {time.time() - t_start_load_gcs_file:.4f}s")
+        # logger.info(f"[P:{self.process_id}] _load_examples_from_gcs: Loaded {len(examples_list)} from {file_path_on_gcs}. Total time: {time.time() - t_start_load_gcs_file:.2f}s") # Peut être un peu trop
         return examples_list
     
     def sample_with_recency_bias(self, batch_size, temperature=None, rng_key=None):
-        # This method primarily just sets temperature and calls sample.
-        # Logging within sample() should cover most needs.
         original_temp = self.recency_temperature
         if temperature is not None: self.recency_temperature = temperature
-        
-        result = self.sample(batch_size, rng_key) # This will now have its own detailed logs
-        
-        if temperature is not None: self.recency_temperature = original_temp # Restore
+        result = self.sample(batch_size, rng_key)
+        if temperature is not None: self.recency_temperature = original_temp
         return result
     
     def start_new_game(self):
@@ -1679,41 +1394,21 @@ class GCSReplayBufferSync:
         return self.current_game_id
     
     def get_stats(self):
-        # Recalculate GCS persisted size for accurate "total_size" here
         gcs_persisted_size = sum(meta['size'] for meta in self.gcs_file_metadata.values())
-        
-        stats = {
-            "total_gcs_persisted_size": gcs_persisted_size, # What's actually on GCS
-            "local_cache_size": self.local_size,
-            "combined_current_size": gcs_persisted_size + self.local_size, # GCS + current local cache
-            "max_buffer_size_config": self.max_buffer_size,
-            "fill_percentage": 100 * gcs_persisted_size / self.max_buffer_size if self.max_buffer_size > 0 else 0,
-            "iterations": len(self.gcs_index),
-            "files": sum(len(files) for files in self.gcs_index.values()),
-        }
-        stats.update(self.metrics)
-        return stats
+        stats = {"total_gcs_persisted_size": gcs_persisted_size, "local_cache_size": self.local_size, "combined_current_size": gcs_persisted_size + self.local_size, "max_buffer_size_config": self.max_buffer_size, "fill_percentage": 100 * gcs_persisted_size / self.max_buffer_size if self.max_buffer_size > 0 else 0, "iterations": len(self.gcs_index), "files": sum(len(files) for files in self.gcs_index.values())}
+        stats.update(self.metrics); return stats
     
     def close(self):
-        logger.info(f"[P:{self.process_id}] close: Closing GCSReplayBufferSync. Current local_size: {self.local_size}")
+        logger.info(f"[P:{self.process_id}] close: Closing GCSReplayBufferSync. Local cache size: {self.local_size}")
         if self.local_size > 0:
             logger.info(f"[P:{self.process_id}] close: Performing final flush of {self.local_size} local positions.")
             t_final_flush_start = time.time()
-            positions_flushed = self.flush_to_gcs() 
-            logger.info(f"[P:{self.process_id}] close: Final flush wrote {positions_flushed} positions, took {time.time() - t_final_flush_start:.4f}s")
-        else:
-            logger.info(f"[P:{self.process_id}] close: Local buffer already empty. No final flush needed.")
-        
-        # Log final stats from GCS after potential last flush
+            self.flush_to_gcs() 
+            logger.info(f"[P:{self.process_id}] close: Final flush took {time.time() - t_final_flush_start:.2f}s")
         final_gcs_size = sum(meta['size'] for meta in self.gcs_file_metadata.values())
         logger.info(f"[P:{self.process_id}] close: GCSReplayBufferSync closed. Final GCS persisted size: {final_gcs_size}")
     
     def __del__(self):
-
         try:
-            if self.local_size > 0: # Attempt a last-ditch flush if not closed properly
-                logger.warning(f"[P:{self.process_id}] __del__: Buffer not closed explicitly and local_size > 0. Attempting a final flush from __del__.")
-                self.close()
-        except Exception as e:
-            logger.error(f"[P:{self.process_id}] __del__: Error during final cleanup/flush: {e}", exc_info=True)
-            pass
+            if self.local_size > 0: self.close()
+        except: pass
