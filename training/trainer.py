@@ -532,20 +532,20 @@ class AbaloneTrainerSync:
         self.total_games += local_total_games
 
         # Enregistrer les parties pour analyse si activé
-        if self.save_games and hasattr(self, 'game_logger'):
-            # Générer un préfixe incluant l'ID de processus pour éviter les conflits
-            game_id_prefix = f"iter{self.iteration}_p{self.process_id}"
+        # if self.save_games and hasattr(self, 'game_logger'):
+        #     # Générer un préfixe incluant l'ID de processus pour éviter les conflits
+        #     game_id_prefix = f"iter{self.iteration}_p{self.process_id}"
 
-            # Convertir les parties dans un format adapté à l'analyse
-            converted_games = convert_games_batch(
-                games_data,
-                self.env,
-                base_game_id=game_id_prefix,
-                model_iteration=self.iteration
-            )
+        #     # Convertir les parties dans un format adapté à l'analyse
+        #     converted_games = convert_games_batch(
+        #         games_data,
+        #         self.env,
+        #         base_game_id=game_id_prefix,
+        #         model_iteration=self.iteration
+        #     )
 
-            # Envoyer les parties au logger qui les écrira de manière asynchrone
-            self.game_logger.log_games_batch(converted_games)
+        #     # Envoyer les parties au logger qui les écrira de manière asynchrone
+        #     self.game_logger.log_games_batch(converted_games)
 
         return games_data
     def _log_metrics_to_tensorboard(self, metrics_dict, prefix="training"):
