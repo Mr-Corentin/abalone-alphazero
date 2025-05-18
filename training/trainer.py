@@ -172,8 +172,10 @@ class AbaloneTrainerSync:
         rng = jax.random.PRNGKey(42)
         sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
-        self.params = network.init(rng, sample_board, sample_marbles)
-        self.opt_state = self.optimizer.init(self.params)
+        # self.params = network.init(rng, sample_board, sample_marbles)
+        # self.opt_state = self.optimizer.init(self.params)
+        self.model_variables = network.init(rng, sample_board, sample_marbles, train=True)
+        self.opt_state = self.optimizer.init(self.model_variables['params'])
 
         # Statistiques
         self.iteration = 0
@@ -272,7 +274,7 @@ class AbaloneTrainerSync:
             )
 
             # Réinitialiser l'état de l'optimiseur
-            self.opt_state = self.optimizer.init(self.params)
+            self.opt_state = self.optimizer.init(self.model_variables['params'])
 
             # Mettre à jour les fonctions JAX qui utilisent l'optimiseur
             self.optimizer_update_pmap = jax.pmap(
@@ -295,7 +297,7 @@ class AbaloneTrainerSync:
         )
 
         # Réinitialiser l'état de l'optimiseur
-        self.opt_state = self.optimizer.init(self.params)
+        self.opt_state = self.optimizer.init(self.model_variables['params'])
 
         # Configurer les fonctions de traitement parallèle
         self.train_step_pmap = jax.pmap(
@@ -315,180 +317,6 @@ class AbaloneTrainerSync:
             axis_name='devices',
             devices=self.devices
         )
-
-    # def train(self, num_iterations=100, games_per_iteration=64,
-    #         training_steps_per_iteration=100, save_frequency=10):
-    #     """
-    #     Démarre l'entraînement avec approche synchronisée par étapes.
-    #     L'évaluation est maintenant déclenchée par les checkpoints de référence.
-
-    #     Args:
-    #         num_iterations: Nombre total d'itérations
-    #         games_per_iteration: Nombre de parties à générer par itération
-    #         training_steps_per_iteration: Nombre d'étapes d'entraînement par itération
-    #         save_frequency: Fréquence de sauvegarde régulière (en itérations)
-    #     """
-    #     # Initialiser le timer global
-    #     start_time_global = time.time()
-
-    #     # Initialiser la clé aléatoire spécifique au processus
-    #     seed_base = 42
-    #     process_specific_seed = seed_base + (self.process_id * 1000)
-    #     rng_key = jax.random.PRNGKey(process_specific_seed)
-
-    #     # Déterminer les itérations de référence pour tout l'entraînement
-    #     from evaluation.models_evaluator import generate_evaluation_checkpoints
-    #     self.reference_iterations = generate_evaluation_checkpoints(num_iterations)
-        
-    #     if self.verbose:
-    #         logger.info(f"Itérations de référence planifiées: {self.reference_iterations}")
-    #         logger.info(f"Évaluation {'activée' if self.eval_enabled else 'désactivée'}")
-
-    #     try:
-    #         for iteration in range(num_iterations):
-    #             self.iteration = iteration
-
-    #             # Mettre à jour le taux d'apprentissage selon le planning
-    #             iteration_percentage = iteration / num_iterations
-    #             self._update_learning_rate(iteration_percentage)
-                
-    #             if self.verbose:
-    #                 logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
-
-    #             # 1. Phase de génération
-    #             rng_key, gen_key = jax.random.split(rng_key)
-    #             t_start = time.time()
-    #             games_data = self._generate_games(gen_key, games_per_iteration)
-    #             t_gen = time.time() - t_start
-
-    #             if self.verbose:
-    #                 logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
-
-    #             # 2. Mise à jour du buffer
-    #             jax.experimental.multihost_utils.sync_global_devices("post_generation")
-    #             t_start = time.time()
-    #             positions_added = self._update_buffer(games_data)
-    #             t_buffer = time.time() - t_start
-    #             self.total_positions += positions_added
-
-    #             # Afficher les infos du buffer
-    #             if self.verbose:
-    #                 if hasattr(self.buffer, 'gcs_index'):
-    #                     # Buffer GCS
-    #                     logger.info(f"Buffer mis à jour: +{positions_added} positions")
-    #                     logger.info(f"  - Cache local: {self.buffer.local_size} positions")
-    #                     logger.info(f"  - Total estimé: {self.buffer.total_size} positions")
-    #                 else:
-    #                     # Buffer local
-    #                     logger.info(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
-
-    #             # 3. Phase d'entraînement
-    #             rng_key, train_key = jax.random.split(rng_key)
-    #             t_start = time.time()
-    #             metrics = self._train_network(train_key, training_steps_per_iteration)
-    #             t_train = time.time() - t_start
-                
-    #             if self.verbose:
-    #                 logger.info(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
-    #                 logger.info(f"  Perte totale: {metrics['total_loss']:.4f}")
-    #                 logger.info(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
-    #                 logger.info(f"  Précision politique: {metrics['policy_accuracy']}%")
-
-    #             # 4. Gestion des checkpoints de référence
-    #             if iteration in self.reference_iterations:
-    #                 # TOUS les processus entrent dans ce bloc
-    #                 if self.is_main_process:
-    #                     if self.verbose:
-    #                         logger.info(f"\nItération {iteration}: Checkpoint de référence détecté")
-                        
-    #                     # Sauvegarder le modèle de référence (seulement le processus principal)
-    #                     self._save_checkpoint(is_reference=True)
-                    
-    #                 # Synchroniser TOUS les processus après la sauvegarde
-    #                 jax.experimental.multihost_utils.sync_global_devices("post_checkpoint_save")
-                    
-    #                 # Évaluer si activé et pas à l'itération 0
-    #                 if self.eval_enabled and iteration > 0:
-    #                     # TOUS les processus participent à l'évaluation
-    #                     eval_start = time.time()
-    #                     if self.verbose:
-    #                         logger.info("Évaluation déclenchée par nouveau modèle de référence...")
-                        
-    #                     # Appeler l'évaluation pour TOUS les processus
-    #                     self.evaluate_against_previous_models(num_iterations)
-                        
-    #                     eval_time = time.time() - eval_start
-    #                     if self.verbose:
-    #                         logger.info(f"Évaluation terminée en {eval_time:.2f}s")
-                
-    #             # 5. Sauvegarde périodique standard (non-référence)
-    #             elif save_frequency > 0 and (iteration + 1) % save_frequency == 0:
-    #                 if self.is_main_process:
-    #                     # Sauvegarde normale (pas un checkpoint de référence)
-    #                     if self.verbose:
-    #                         logger.info("\nSauvegarde périodique du checkpoint...")
-    #                     self._save_checkpoint(is_reference=False)
-                    
-    #                 # Synchroniser tous les processus après la sauvegarde
-    #                 jax.experimental.multihost_utils.sync_global_devices("post_regular_checkpoint")
-
-    #         # Sauvegarde finale
-    #         final_is_reference = (num_iterations - 1) in self.reference_iterations
-    #         if self.is_main_process:
-    #             self._save_checkpoint(is_final=True, is_reference=final_is_reference)
-            
-    #         # Synchroniser avant la fin
-    #         jax.experimental.multihost_utils.sync_global_devices("post_final_save")
-                
-    #         if self.metrics_history and self.is_main_process:
-    #             final_metrics = self.metrics_history[-1]
-                
-    #             # Métriques d'entraînement
-    #             training_metrics = {k: v for k, v in final_metrics.items() 
-    #                             if k in ['total_loss', 'policy_loss', 'value_loss', 
-    #                                     'policy_accuracy', 'value_sign_match']}
-    #             self._log_metrics_to_tensorboard(training_metrics, "training")
-                
-    #             # Taux d'apprentissage
-    #             self._log_metrics_to_tensorboard({"learning_rate": self.current_lr}, "training")
-                
-    #             # Statistiques du buffer et des parties
-    #             buffer_stats = {}
-    #             if hasattr(self.buffer, 'gcs_index'):
-    #                 buffer_stats["buffer_size_total"] = self.buffer.total_size
-    #                 buffer_stats["buffer_size_local"] = self.buffer.local_size
-    #             else:
-    #                 buffer_stats["buffer_size"] = self.buffer.size
-                
-    #             buffer_stats["total_games_local"] = self.total_games
-    #             buffer_stats["total_games_global"] = self.total_games * self.num_processes
-    #             self._log_metrics_to_tensorboard(buffer_stats, "stats")
-                
-    #             eval_metrics = {k: v for k, v in final_metrics.items() 
-    #                         if k.startswith('win_rate_vs_iter_') or k == 'avg_win_rate_vs_prev'}
-    #             if eval_metrics:
-    #                 self._log_metrics_to_tensorboard(eval_metrics, "eval_vs_prev")
-
-    #     finally:
-    #         jax.experimental.multihost_utils.sync_global_devices("pre_close_resources")
-            
-    #         if self.is_main_process:
-    #             self.writer.close()
-
-    #         if self.save_games and hasattr(self, 'game_logger'):
-    #             self.game_logger.stop()
-
-    #         if hasattr(self.buffer, 'close'):
-    #             if self.verbose and self.is_main_process:
-    #                 logger.info("Fermeture du buffer GCS...")
-    #             self.buffer.close()
-
-    #         total_time = time.time() - start_time_global
-    #         if self.verbose:
-    #             logger.info(f"\n=== Entraînement terminé ===")
-    #             logger.info(f"Parties générées: {self.total_games}")
-    #             logger.info(f"Positions totales: {self.total_positions}")
-    #             logger.info(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
 
     def train(self, num_iterations=100, games_per_iteration=64,
             training_steps_per_iteration=100, save_frequency=10):
@@ -755,12 +583,13 @@ class AbaloneTrainerSync:
         sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
 
         # Répliquer les paramètres sur les dispositifs locaux
-        sharded_params = jax.device_put_replicated(self.params, self.devices)
+        #sharded_params = jax.device_put_replicated(self.params, self.devices)
+        sharded_model_variables = jax.device_put_replicated(self.model_variables, self.devices)
 
         # Génération des parties avec version optimisée
         games_data_pmap = self.generate_games_pmap(
             sharded_rngs,
-            sharded_params,
+            sharded_model_variables,
             self.network,
             self.env,
             batch_size_per_device
@@ -930,7 +759,9 @@ class AbaloneTrainerSync:
         using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
 
         # Réplication des paramètres et état d'optimisation sur les dispositifs
-        params_sharded = jax.device_put_replicated(self.params, self.devices)
+        #params_sharded = jax.device_put_replicated(self.params, self.devices)
+        model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
+        
         opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
 
         # Cumul des métriques pour ce processus
@@ -976,15 +807,24 @@ class AbaloneTrainerSync:
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
 
             # Exécution de l'étape d'entraînement
-            metrics_sharded, grads_averaged = self.train_step_pmap(
-                params_sharded, (boards, marbles), policies, values
+            # metrics_sharded, grads_averaged = self.train_step_pmap(
+            #     model_variables_sharded, (boards, marbles), policies, values
+            # )
+            metrics_sharded, grads_averaged, updated_batch_stats_sharded = self.train_step_pmap(
+                model_variables_sharded, (boards, marbles), policies, values
             )
 
             # Application des mises à jour
+            params_sharded = jax.tree.map(lambda mv: mv['params'], model_variables_sharded)
             updates, opt_state_sharded = self.optimizer_update_pmap(
                 grads_averaged, opt_state_sharded, params_sharded
             )
             params_sharded = jax.tree.map(lambda p, u: p + u, params_sharded, updates)
+
+            model_variables_sharded = jax.tree.map(
+                lambda p, bs: {'params': p, 'batch_stats': bs},
+                params_sharded, updated_batch_stats_sharded
+            )
 
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
@@ -997,7 +837,9 @@ class AbaloneTrainerSync:
             steps_completed += 1
 
         # Récupérer les paramètres mis à jour
-        self.params = jax.tree.map(lambda x: x[0], params_sharded)
+        #self.params = jax.tree.map(lambda x: x[0], params_sharded)
+        #self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
+        self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
         self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
 
         # Si aucune étape d'entraînement n'a été effectuée
@@ -1043,7 +885,6 @@ class AbaloneTrainerSync:
 
         return avg_metrics
     
-
     def _save_checkpoint(self, is_final=False, is_reference=False):
         """Sauvegarde un point de contrôle du modèle"""
         if not self.is_main_process:
@@ -1057,7 +898,7 @@ class AbaloneTrainerSync:
             prefix = f"iter{self.iteration}"
 
         checkpoint = {
-            'params': self.params,
+            'model_variables': self.model_variables,  # ← Changé de 'params' à 'model_variables'
             'opt_state': self.opt_state,
             'iteration': self.iteration,
             'current_lr': self.current_lr,
@@ -1153,8 +994,17 @@ class AbaloneTrainerSync:
             with open(checkpoint_path, 'rb') as f:
                 checkpoint = pickle.load(f)
 
-        # Restaurer l'état
-        self.params = checkpoint['params']
+        # Restaurer l'état avec support des anciens checkpoints
+        if 'model_variables' in checkpoint:
+            # Nouveau format avec model_variables
+            self.model_variables = checkpoint['model_variables']
+        else:
+            # Ancien format avec params seulement - créer la structure model_variables
+            self.model_variables = {
+                'params': checkpoint['params'],
+                'batch_stats': checkpoint.get('batch_stats', {})
+            }
+        
         self.opt_state = checkpoint['opt_state']
         self.iteration = checkpoint['iteration']
         self.current_lr = checkpoint['current_lr']
@@ -1165,7 +1015,6 @@ class AbaloneTrainerSync:
         if self.verbose:
             logger.info(f"Checkpoint loaded: {checkpoint_path}")
             logger.info(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
-
 
     
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
@@ -1183,7 +1032,7 @@ class AbaloneTrainerSync:
             generate_evaluation_checkpoints,
             check_checkpoint_exists,
             download_checkpoint,
-            load_checkpoint_params,
+            load_checkpoint_model_variables,
             ModelsEvaluator
         )
 
@@ -1232,7 +1081,7 @@ class AbaloneTrainerSync:
             games_per_model=games_per_model
         )
 
-        current_params = self.params
+        current_model_variables = self.model_variables
         local_results = {}
 
         for ref_iter in available_refs:
@@ -1255,17 +1104,17 @@ class AbaloneTrainerSync:
             else:
                 local_path = ref_path
 
-            ref_params = load_checkpoint_params(local_path)
-            if ref_params is None:
+            ref_model_variables = load_checkpoint_model_variables(local_path)  # Fonction mise à jour
+            if ref_model_variables is None:
                 if self.verbose:
                     logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
                 # Synchroniser même en cas d'échec
                 jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}_failed_load")
                 continue
-
+            
             eval_results = evaluator.evaluate_model_pair(
-                current_params,
-                ref_params,
+                current_model_variables,
+                ref_model_variables,
                 games_to_play=local_games_per_model
             )
 

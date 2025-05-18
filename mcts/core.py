@@ -2,13 +2,15 @@ import mctx
 import jax
 import jax.numpy as jnp
 import chex
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any # Assurez-vous que Any est bien importé
 from functools import partial
 
 # Importations locales
 from environment.env import AbaloneEnv, AbaloneState
-from model.neural_net import AbaloneModel
+from model.neural_net import AbaloneModel # Votre AbaloneModel mis à jour
 from core.coord_conversion import prepare_input
+
+REWARD_SCALING_FACTOR = 0.1 # Vous l'aviez déjà, c'est bien
 
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
@@ -19,10 +21,10 @@ def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> f
     white_diff = next_state.white_out - current_state.white_out
 
     billes_sorties = jnp.where(current_state.actual_player == 1,
-                              white_diff,
-                              black_diff)
+                               white_diff,
+                               black_diff)
 
-    return billes_sorties
+    return billes_sorties * REWARD_SCALING_FACTOR # Utilisation du facteur d'échelle
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
@@ -39,15 +41,16 @@ class AbaloneMCTSRecurrentFn:
     """
     def __init__(self, env: AbaloneEnv, network: AbaloneModel):
         self.env = env
-        self.network = network
+        self.network = network # network est une instance de AbaloneModel
 
     @partial(jax.jit, static_argnums=(0,))
-    def recurrent_fn(self, params, rng_key, action, embedding):
+    # Modifier la signature pour accepter model_variables
+    def recurrent_fn(self, model_variables: Dict[str, Any], rng_key, action, embedding):
         """
         Fonction récurrente pour MCTS qui gère un batch d'états
 
         Args:
-            params: Paramètres du réseau
+            model_variables: Dict contenant les 'params' et 'batch_stats' du réseau
             rng_key: Clé JAX RNG
             action: Actions à appliquer (shape: (batch_size,))
             embedding: Dict contenant l'état du batch
@@ -72,16 +75,22 @@ class AbaloneMCTSRecurrentFn:
 
         # 4. Préparation des entrées du réseau en batch
         our_marbles = jnp.where(next_states.actual_player == 1,
-                               next_states.black_out,
-                               next_states.white_out)
+                                next_states.black_out,
+                                next_states.white_out)
         opp_marbles = jnp.where(next_states.actual_player == 1,
-                               next_states.white_out,
-                               next_states.black_out)
+                                next_states.white_out,
+                                next_states.black_out)
 
         board_2d, marbles_out = prepare_input(next_states.board, our_marbles, opp_marbles)
 
         # 5. Évaluation par le réseau
-        prior_logits, value = self.network.apply(params, board_2d, marbles_out)
+        # MODIFICATION ICI: Utiliser model_variables et ajouter train=False
+        prior_logits, value = self.network.apply(
+            model_variables, # Contient {'params': ..., 'batch_stats': ...}
+            board_2d,
+            marbles_out,
+            train=False # Important: mode inférence pour MCTS
+        )
 
         # 6. Préparation du prochain embedding
         next_embedding = {
@@ -93,48 +102,54 @@ class AbaloneMCTSRecurrentFn:
         }
 
         return mctx.RecurrentFnOutput(
-            reward=reward,  # shape: (batch_size,)
-            discount=discount,  # shape: (batch_size,)
-            prior_logits=prior_logits,  # shape: (batch_size, num_actions)
-            value=value  # shape: (batch_size,)
+            reward=reward,
+            discount=discount,
+            prior_logits=prior_logits,
+            value=value
         ), next_embedding
 
 
+# Modifier la signature pour accepter model_variables
 @partial(jax.jit, static_argnames=['network', 'env'])
-def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, env: AbaloneEnv):
+def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_variables: Dict[str, Any], env: AbaloneEnv):
     """
     Version vectorisée de get_root_output pour traiter un batch d'états
 
     Args:
         states: Batch d'états AbaloneState (avec batch_size états)
         network: Le réseau de neurones
-        params: Paramètres du réseau
+        model_variables: Dict contenant les 'params' et 'batch_stats' du réseau
         env: L'environnement Abalone
     """
     # Calculer les billes out pour chaque état dans le batch
     our_marbles = jnp.where(states.actual_player == 1,
-                           states.black_out,
-                           states.white_out)
+                            states.black_out,
+                            states.white_out)
     opp_marbles = jnp.where(states.actual_player == 1,
-                           states.white_out,
-                           states.black_out)
+                            states.white_out,
+                            states.black_out)
 
     # Préparer les entrées du réseau
     board_2d, marbles_out = prepare_input(states.board, our_marbles, opp_marbles)
 
     # Obtenir les prédictions du réseau
-    prior_logits, value = network.apply(params, board_2d, marbles_out)
+    prior_logits, value = network.apply(
+        model_variables,
+        board_2d,
+        marbles_out,
+        train=False 
+    )
 
     embedding = {
-        'board_3d': states.board,  # shape: (batch_size, x, y, z)
-        'actual_player': states.actual_player,  # shape: (batch_size,)
-        'black_out': states.black_out,  # shape: (batch_size,)
-        'white_out': states.white_out,  # shape: (batch_size,)
-        'moves_count': states.moves_count  # shape: (batch_size,)
+        'board_3d': states.board,
+        'actual_player': states.actual_player,
+        'black_out': states.black_out,
+        'white_out': states.white_out,
+        'moves_count': states.moves_count
     }
 
     return mctx.RootFnOutput(
-        prior_logits=prior_logits,  # shape: (batch_size, num_actions)
-        value=value,  # shape: (batch_size,)
+        prior_logits=prior_logits,
+        value=value,
         embedding=embedding
     )
