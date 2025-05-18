@@ -243,7 +243,7 @@ class AbaloneTrainerSync:
     def _setup_gcs_logger(self, gcs_bucket):
         """Configure le logger GCS pour les métriques d'entraînement"""
         if gcs_bucket and self.is_main_process:
-            from logger import GCSLogger  
+            from training.logger import GCSLogger
             
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             training_id = f"training_{timestamp}_p{self.num_processes}w"
