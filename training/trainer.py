@@ -189,6 +189,8 @@ class AbaloneTrainerSync:
         # Initialisation du logger de jeu
         if self.save_games:
             self._setup_game_logger(gcs_bucket, games_buffer_size, games_flush_interval)
+        if gcs_bucket:
+            self._setup_gcs_logger(gcs_bucket)
 
         # Configuration des fonctions JAX
         self._setup_jax_functions()
@@ -238,6 +240,23 @@ class AbaloneTrainerSync:
                 buffer_size=buffer_size,
                 flush_interval=flush_interval
             )
+    def _setup_gcs_logger(self, gcs_bucket):
+        """Configure le logger GCS pour les métriques d'entraînement"""
+        if gcs_bucket and self.is_main_process:
+            from logger import GCSLogger  
+            
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            training_id = f"training_{timestamp}_p{self.num_processes}w"
+            
+            self.gcs_logger = GCSLogger(
+                gcs_bucket=gcs_bucket,
+                training_id=training_id
+            )
+            
+            if self.verbose:
+                logger.info(f"GCS Logger activé: gs://{gcs_bucket}/logs_training/{training_id}")
+        else:
+            self.gcs_logger = None
 
     def enable_evaluation(self, enable=True):
         """Active ou désactive l'évaluation"""
@@ -266,6 +285,9 @@ class AbaloneTrainerSync:
             if self.verbose:
                 logger.info(f"Learning rate updated: {self.current_lr} -> {new_lr}")
             self.current_lr = new_lr
+            # Log GCS : changement learning rate
+            if self.gcs_logger:
+                self.gcs_logger.log_learning_rate_update(self.iteration, self.current_lr, new_lr)
 
             # Créer un nouvel optimiseur avec écrêtage de gradient
             self.optimizer = optax.chain(
@@ -362,6 +384,9 @@ class AbaloneTrainerSync:
                 
                 if self.verbose:
                     logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
+                
+                if self.gcs_logger:
+                    self.gcs_logger.log_iteration_start(iteration, num_iterations)
 
                 # Synchronisation au début de l'itération
                 jax.experimental.multihost_utils.sync_global_devices(f"iter_{iteration}_start")
@@ -370,6 +395,9 @@ class AbaloneTrainerSync:
                 # 1. Phase de génération
                 gen_start_time = time.time()
                 logger.info(f"Processus {self.process_id}: Début génération pour itération {iteration+1}")
+
+                if self.gcs_logger:
+                    self.gcs_logger.log_generation_start(iteration, games_per_iteration)
                 
                 rng_key, gen_key = jax.random.split(rng_key)
                 t_start = time.time()
@@ -381,6 +409,8 @@ class AbaloneTrainerSync:
                 if self.verbose:
                     logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
 
+                if self.gcs_logger:
+                    self.gcs_logger.log_generation_end(iteration, t_gen, games_per_iteration)
                 # 2. Mise à jour du buffer
                 logger.info(f"Processus {self.process_id}: En attente de synchronisation post-génération")
                 jax.experimental.multihost_utils.sync_global_devices(f"post_generation_iter_{iteration}")
@@ -414,6 +444,8 @@ class AbaloneTrainerSync:
                 # 3. Phase d'entraînement
                 train_start_time = time.time()
                 logger.info(f"Processus {self.process_id}: Début entraînement pour itération {iteration+1}")
+                if self.gcs_logger:
+                    self.gcs_logger.log_training_start(iteration, training_steps_per_iteration)
                 
                 rng_key, train_key = jax.random.split(rng_key)
                 t_start = time.time()
@@ -427,7 +459,8 @@ class AbaloneTrainerSync:
                     logger.info(f"  Perte totale: {metrics['total_loss']:.4f}")
                     logger.info(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
                     logger.info(f"  Précision politique: {metrics['policy_accuracy']}%")
-
+                if self.gcs_logger:
+                    self.gcs_logger.log_training_end(iteration, t_train, metrics)
                 # Synchronisation après l'entraînement
                 jax.experimental.multihost_utils.sync_global_devices(f"post_training_iter_{iteration}")
                 logger.info(f"Processus {self.process_id}: Synchronisé après entraînement")
@@ -487,6 +520,9 @@ class AbaloneTrainerSync:
                 # IMPORTANT: Synchronisation à la fin de chaque itération
                 iter_time = time.time() - iter_start_time
                 logger.info(f"Processus {self.process_id}: Itération {iteration+1} terminée en {iter_time:.2f}s")
+                if self.gcs_logger:
+                    self.gcs_logger.log_iteration_end(iteration, iter_time)
+
                 logger.info(f"Processus {self.process_id}: En attente de synchronisation fin d'itération")
                 jax.experimental.multihost_utils.sync_global_devices(f"end_of_iteration_{iteration}")
                 logger.info(f"Processus {self.process_id}: Synchronisé à la fin de l'itération {iteration+1}")
@@ -541,6 +577,17 @@ class AbaloneTrainerSync:
             if self.is_main_process:
                 self.writer.close()
                 logger.info(f"Processus {self.process_id}: TensorBoard writer fermé")
+
+            if self.gcs_logger:
+                final_stats = {
+                    "total_iterations": num_iterations,
+                    "total_games": self.total_games,
+                    "total_positions": self.total_positions,
+                    "final_metrics": self.metrics_history[-1] if self.metrics_history else {},
+                    "training_duration": time.time() - start_time_global
+                }
+                self.gcs_logger.create_summary(final_stats)
+                self.gcs_logger.close()
 
             if self.save_games and hasattr(self, 'game_logger'):
                 self.game_logger.stop()
@@ -942,6 +989,12 @@ class AbaloneTrainerSync:
             if self.verbose:
                 checkpoint_type = "de référence" if is_reference else "standard"
                 logger.info(f"Checkpoint {checkpoint_type} sauvegardé: {gcs_path}")
+            
+            # Log GCS : checkpoint sauvegardé
+            if self.gcs_logger:
+                checkpoint_type = "reference" if is_reference else ("final" if is_final else "periodic")
+                path = gcs_path if is_gcs else filename
+                self.gcs_logger.log_checkpoint_save(self.iteration, checkpoint_type, path)
 
             # Supprimer le fichier local
             os.remove(local_path)
@@ -1083,6 +1136,10 @@ class AbaloneTrainerSync:
         current_model_variables = self.model_variables
         local_results = {}
 
+        if self.gcs_logger:
+            self.gcs_logger.log_evaluation_start(current_iter, len(available_refs))
+
+        eval_start = time.time()
         for ref_iter in available_refs:
             # Synchroniser avant chaque évaluation de modèle
             jax.experimental.multihost_utils.sync_global_devices(f"pre_eval_iter_{ref_iter}")
@@ -1118,6 +1175,14 @@ class AbaloneTrainerSync:
             )
 
             local_results[ref_iter] = eval_results
+            if self.gcs_logger:
+                self.gcs_logger.log_evaluation_model(
+                    current_iter, ref_iter,
+                    eval_results['current_wins'],
+                    eval_results['reference_wins'], 
+                    eval_results['draws'],
+                    eval_results['win_rate']
+                )
             
             # Synchroniser après chaque évaluation
             jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}")
@@ -1158,6 +1223,9 @@ class AbaloneTrainerSync:
             
             # 4. Logging de résumé
             logger.info(f"Win rate global: {global_win_rate:.1%} ({total_wins}/{total_games} victoires)")
+            if self.gcs_logger:
+                eval_time = time.time() - eval_start  # Assurez-vous de capturer eval_start avant la boucle
+                self.gcs_logger.log_evaluation_end(current_iter, eval_time, global_win_rate, total_wins, total_games)
             
             # 5. Mise à jour de l'historique des métriques pour la sauvegarde
             if self.metrics_history and current_iter > 0:
