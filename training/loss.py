@@ -3,9 +3,9 @@ import jax.numpy as jnp
 import optax
 import numpy as np
 from functools import partial
+from typing import Dict, Any, Tuple
 
-# MODIFIÉ: Cette fonction ne prend plus params ni network, mais directement les prédictions.
-# Elle ne fait plus l'appel network.apply.
+
 @partial(jax.jit, static_argnames=['value_weight'])
 def calculate_losses_and_metrics(predicted_policies,
                                  predicted_values,
