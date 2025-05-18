@@ -807,24 +807,23 @@ class AbaloneTrainerSync:
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
 
             # Exécution de l'étape d'entraînement
-            # metrics_sharded, grads_averaged = self.train_step_pmap(
-            #     model_variables_sharded, (boards, marbles), policies, values
-            # )
+  
             metrics_sharded, grads_averaged, updated_batch_stats_sharded = self.train_step_pmap(
                 model_variables_sharded, (boards, marbles), policies, values
             )
 
             # Application des mises à jour
-            params_sharded = jax.tree.map(lambda mv: mv['params'], model_variables_sharded)
+            params_sharded = model_variables_sharded['params']  
             updates, opt_state_sharded = self.optimizer_update_pmap(
                 grads_averaged, opt_state_sharded, params_sharded
             )
             params_sharded = jax.tree.map(lambda p, u: p + u, params_sharded, updates)
 
-            model_variables_sharded = jax.tree.map(
-                lambda p, bs: {'params': p, 'batch_stats': bs},
-                params_sharded, updated_batch_stats_sharded
-            )
+            # Reconstruire model_variables_sharded
+            model_variables_sharded = {
+                'params': params_sharded,
+                'batch_stats': updated_batch_stats_sharded
+            }
 
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
