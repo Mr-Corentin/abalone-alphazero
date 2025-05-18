@@ -67,7 +67,11 @@ def generate_evaluation_checkpoints(total_iterations: int, num_checkpoints: int 
     checkpoints = [cp for cp in checkpoints if cp > 0]
     checkpoints = sorted(list(set(checkpoints)))
     
-    return checkpoints
+    final_iteration = total_iterations - 1
+    if final_iteration not in checkpoints and final_iteration > 0:
+        checkpoints.append(final_iteration)
+
+    return sorted(checkpoints)
 
 def check_checkpoint_exists(checkpoint_path):
     """Vérifie si un checkpoint existe au chemin spécifié."""
