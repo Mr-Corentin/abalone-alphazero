@@ -9,7 +9,7 @@ DEFAULT_CONFIG = {
     },
     
     "mcts": {
-        "num_simulations": 3,
+        "num_simulations": 700,
         "max_num_considered_actions": 16,
     },
     
