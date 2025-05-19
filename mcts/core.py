@@ -10,21 +10,42 @@ from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel # Votre AbaloneModel mis à jour
 from core.coord_conversion import prepare_input
 
-REWARD_SCALING_FACTOR = 0.1 # Vous l'aviez déjà, c'est bien
+REWARD_SCALING_FACTOR = 0.1 
 
+# @partial(jax.jit)
+# def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
+#     """
+#     Calcule la récompense d'une transition en version canonique
+#     """
+#     black_diff = next_state.black_out - current_state.black_out
+#     white_diff = next_state.white_out - current_state.white_out
+
+#     billes_sorties = jnp.where(current_state.actual_player == 1,
+#                                white_diff,
+#                                black_diff)
+
+#     return billes_sorties * REWARD_SCALING_FACTOR 
+
+
+# Dans votre calculate_reward
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
-    """
-    Calcule la récompense d'une transition en version canonique
-    """
-    black_diff = next_state.black_out - current_state.black_out
-    white_diff = next_state.white_out - current_state.white_out
-
-    billes_sorties = jnp.where(current_state.actual_player == 1,
-                               white_diff,
-                               black_diff)
-
-    return billes_sorties * REWARD_SCALING_FACTOR # Utilisation du facteur d'échelle
+    # Reward intermédiaire (comme maintenant)
+    # black_diff = next_state.black_out - current_state.black_out  
+    # white_diff = next_state.white_out - current_state.white_out
+    # intermediate_reward = jnp.where(current_state.actual_player == 1, white_diff, black_diff) * 0.1
+    intermediate_reward = 0
+    is_terminal = (next_state.black_out >= 6) | (next_state.white_out >= 6) | (next_state.moves_count >= 200)
+    final_reward = jnp.where(
+        is_terminal,
+        jnp.where(
+            next_state.white_out >= 6, 1.0,    # Noir gagne
+            jnp.where(next_state.black_out >= 6, -1.0, 0.0)  # Blanc gagne / Match nul
+        ),
+        0.0
+    )
+    
+    return intermediate_reward + final_reward
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
