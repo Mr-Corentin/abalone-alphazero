@@ -27,21 +27,26 @@ REWARD_SCALING_FACTOR = 0.1
 #     return billes_sorties * REWARD_SCALING_FACTOR 
 
 
-# Dans votre calculate_reward
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
-    # Reward intermédiaire (comme maintenant)
-    # black_diff = next_state.black_out - current_state.black_out  
-    # white_diff = next_state.white_out - current_state.white_out
-    # intermediate_reward = jnp.where(current_state.actual_player == 1, white_diff, black_diff) * 0.1
-    intermediate_reward = 0
+    """
+    Calcule la récompense d'une transition du point de vue du joueur qui a joué
+    """
+    intermediate_reward = 0.0
+    
     is_terminal = (next_state.black_out >= 6) | (next_state.white_out >= 6) | (next_state.moves_count >= 200)
+    
+    # +1 si noir gagne, -1 si blanc gagne, 0 si match nul
+    raw_final_reward = jnp.where(
+        next_state.white_out >= 6, 1.0,    # Noir gagne (6 billes blanches sorties)
+        jnp.where(next_state.black_out >= 6, -1.0, 0.0)  # Blanc gagne (6 billes noires sorties) / Match nul
+    )
+    
+    # Si actual_player = 1 (noir), on garde la reward telle quelle
+    # Si actual_player = -1 (blanc), on inverse la reward  
     final_reward = jnp.where(
         is_terminal,
-        jnp.where(
-            next_state.white_out >= 6, 1.0,    # Noir gagne
-            jnp.where(next_state.black_out >= 6, -1.0, 0.0)  # Blanc gagne / Match nul
-        ),
+        raw_final_reward * current_state.actual_player,
         0.0
     )
     
@@ -105,12 +110,11 @@ class AbaloneMCTSRecurrentFn:
         board_2d, marbles_out = prepare_input(next_states.board, our_marbles, opp_marbles)
 
         # 5. Évaluation par le réseau
-        # MODIFICATION ICI: Utiliser model_variables et ajouter train=False
         prior_logits, value = self.network.apply(
             model_variables, # Contient {'params': ..., 'batch_stats': ...}
             board_2d,
             marbles_out,
-            train=False # Important: mode inférence pour MCTS
+            train=False 
         )
 
         # 6. Préparation du prochain embedding
