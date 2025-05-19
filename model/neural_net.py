@@ -69,11 +69,11 @@ class ResBlock(nn.Module):
     def __call__(self, x):
         # Séquence : Conv -> BatchNorm -> ReLU
         y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=False)(x)
-        y = nn.BatchNorm(use_running_average=not self.train, momentum=0.8)(y)
+        y = nn.BatchNorm(use_running_average=not self.train, momentum=0.9)(y)
         y = nn.relu(y)
 
         y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=False)(y)
-        y = nn.BatchNorm(use_running_average=not self.train, momentum=0.8)(y)
+        y = nn.BatchNorm(use_running_average=not self.train, momentum=0.9)(y)
         output = nn.relu(x + y)
         return output
 
@@ -98,7 +98,7 @@ class AbaloneModel(nn.Module):
         # Tronc commun
         # Séquence : Conv -> BatchNorm -> ReLU
         x = nn.Conv(self.num_filters, (3, 3), padding='SAME', use_bias=False)(x)
-        x = nn.BatchNorm(use_running_average=not train, momentum=0.8)(x)
+        x = nn.BatchNorm(use_running_average=not train, momentum=0.9)(x)
         x = nn.relu(x)
 
         for _ in range(self.num_blocks):
