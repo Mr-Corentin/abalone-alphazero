@@ -5,11 +5,11 @@ Configuration d'entraînement pour AlphaZero Abalone
 DEFAULT_CONFIG = {
     "model": {
         "num_filters": 128,
-        "num_blocks": 10,
+        "num_blocks": 12,
     },
     
     "mcts": {
-        "num_simulations": 700,
+        "num_simulations": 800,
         "max_num_considered_actions": 16,
     },
     
