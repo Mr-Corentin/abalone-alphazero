@@ -679,7 +679,7 @@ class AbaloneTrainerSync:
         # Répliquer les paramètres sur les dispositifs locaux
         #sharded_params = jax.device_put_replicated(self.params, self.devices)
         sharded_model_variables = jax.device_put_replicated(self.model_variables, self.devices)
-
+        sharded_shaping_factor = jax.device_put_replicated(shaping_factor, self.devices)
         # Génération des parties avec version optimisée
         games_data_pmap = self.generate_games_pmap(
             sharded_rngs,
@@ -687,7 +687,7 @@ class AbaloneTrainerSync:
             self.network,
             self.env,
             batch_size_per_device,
-            shaping_factor
+            sharded_shaping_factor
         )
 
         # Récupérer les données sur CPU
