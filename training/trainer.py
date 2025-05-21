@@ -266,7 +266,6 @@ class AbaloneTrainerSync:
         else:
             self.gcs_logger = None
 
-
     def _collect_worker_metrics(self, metric_type: str, local_data: dict):
         """
         Collecte les métriques de tous les workers via JAX collective operations
@@ -281,11 +280,11 @@ class AbaloneTrainerSync:
         # Créer un tableau avec les données locales
         # Format: [process_id, duration, value1, value2, ...]
         local_array = jnp.array([
-            self.process_id,
+            float(self.process_id),
             local_data.get('duration', 0.0),
-            local_data.get('games_generated', 0),
-            local_data.get('positions_added', 0),
-            local_data.get('steps_completed', 0),
+            float(local_data.get('games_generated', 0)),
+            float(local_data.get('positions_added', 0)),
+            float(local_data.get('steps_completed', 0)),
             local_data.get('total_loss', 0.0)
         ], dtype=jnp.float32)
         
@@ -300,23 +299,35 @@ class AbaloneTrainerSync:
         
         # Récupérer sur CPU (seulement le processus principal utilise le résultat)
         if self.is_main_process:
-            all_data = jax.device_get(all_workers_data[0])  # Shape: [num_processes, 6]
+            # process_allgather retourne [num_processes * num_devices, data_size]
+            # On ne veut qu'un échantillon par processus
+            all_data = jax.device_get(all_workers_data)
+            
+            # Prendre seulement le premier device de chaque processus
+            # Shape devrait être [num_processes * num_devices, 6]
+            print(f"DEBUG: all_data shape = {all_data.shape}")  # Pour débugger
+            
+            # Reshape pour obtenir [num_processes, num_devices, 6]
+            reshaped_data = all_data.reshape(self.num_processes, self.num_devices, -1)
+            
+            # Prendre seulement le premier device de chaque processus
+            process_data = reshaped_data[:, 0, :]  # Shape: [num_processes, 6]
             
             workers_info = []
             for i in range(self.num_processes):
                 workers_info.append({
-                    'process_id': int(all_data[i, 0]),
-                    'duration': float(all_data[i, 1]),
-                    'games_generated': int(all_data[i, 2]),
-                    'positions_added': int(all_data[i, 3]),
-                    'steps_completed': int(all_data[i, 4]),
-                    'total_loss': float(all_data[i, 5])
+                    'process_id': int(process_data[i, 0]),
+                    'duration': float(process_data[i, 1]),
+                    'games_generated': int(process_data[i, 2]),
+                    'positions_added': int(process_data[i, 3]),
+                    'steps_completed': int(process_data[i, 4]),
+                    'total_loss': float(process_data[i, 5])
                 })
             
             return workers_info
         
         return None
-
+    
     def _log_all_workers_generation(self, iteration: int, workers_info: list):
         """Log les métriques de génération de tous les workers"""
         if not self.gcs_logger or not workers_info:
