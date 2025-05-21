@@ -12,42 +12,63 @@ from core.coord_conversion import prepare_input
 
 REWARD_SCALING_FACTOR = 0.1 
 
+INITIAL_SHAPING_FACTOR = 0.1  # Ou la valeur de départ que vous préférez
+K_POLYNOMIAL = 2.0  # Pour une décroissance quadratique (lent puis rapide), k > 1
+# TOTAL_TRAINING_EPOCHS sera défini dans votre boucle d'entraînement
+# SHAPING_DURATION_RATIO = 0.3 # 30% de l'entraînement total
 
+@jax.jit
+def get_dynamic_shaping_factor(
+    current_epoch: int,
+    total_training_epochs: int,
+    shaping_duration_ratio: float,
+    initial_factor: float,
+    k_polynomial: float
+) -> float:
+    """
+    Calcule le shaping_factor dynamiquement.
+    Décroissance lente au début, puis plus rapide.
+    Atteint zéro à la fin de la période de shaping.
+    """
+    shaping_active_epochs = int(shaping_duration_ratio * total_training_epochs)
+
+    if current_epoch < shaping_active_epochs:
+        progress_t = current_epoch / shaping_active_epochs
+        factor = initial_factor * (1.0 - progress_t**k_polynomial)
+        return factor
+    else:
+        return 0.0 
+    
 
 @partial(jax.jit, static_argnames=['shaping_factor'])
-def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, shaping_factor: float = 0.1) -> float:
+def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, shaping_factor: float) -> float: # Valeur par défaut enlevée pour clarté
     """
-    Calcule la récompense avec un facteur de shaping configurable
+    Calcule la récompense avec un facteur de shaping configurable et dynamique.
     """
     # 1. Reward intermédiaire pour billes sorties
     black_diff = next_state.black_out - current_state.black_out
     white_diff = next_state.white_out - current_state.white_out
-    
-    # Billes sorties par le joueur courant (selon sa perspective)
+
     billes_sorties_adv = jnp.where(current_state.actual_player == 1,
-                                white_diff,  # Noir a sorti des blanches  
-                                black_diff)  # Blanc a sorti des noires
-    
-    # Reward intermédiaire selon le facteur de shaping
+                                   white_diff,
+                                   black_diff)
+
     intermediate_reward = billes_sorties_adv * shaping_factor
-    
+
     # 2. Reward finale (victoire/défaite) - reste identique
     is_terminal = (next_state.black_out >= 6) | (next_state.white_out >= 6) | (next_state.moves_count >= 200)
-    
+
     raw_final_reward = jnp.where(
-        next_state.white_out >= 6, 1.0,    # Noir gagne
-        jnp.where(next_state.black_out >= 6, -1.0, 0.0)  # Blanc gagne / Match nul
+        next_state.white_out >= 6, 1.0,
+        jnp.where(next_state.black_out >= 6, -1.0, 0.0)
     )
-    
+
     final_reward = jnp.where(
         is_terminal,
         raw_final_reward * current_state.actual_player,
         0.0
     )
-    
-    # 3. Combinaison des rewards
     return intermediate_reward + final_reward
-
 
 
 
@@ -59,26 +80,25 @@ def calculate_discount(state: AbaloneState) -> float:
     is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= 200)
     return jnp.where(is_terminal, 0.0, 1.0)
 
-
 class AbaloneMCTSRecurrentFn:
     """
     Classe pour la fonction récurrente de MCTS, utilisant mctx
     """
-    def __init__(self, env: AbaloneEnv, network: AbaloneModel):
+    def __init__(self, env: AbaloneEnv, network: AbaloneModel, shaping_factor: float = INITIAL_SHAPING_FACTOR):
         self.env = env
-        self.network = network # network est une instance de AbaloneModel
+        self.network = network
+        self.shaping_factor = shaping_factor  # Stockage du facteur de shaping
+
+    def update_shaping_factor(self, new_factor: float):
+        """
+        Met à jour le facteur de shaping pour les futures simulations
+        """
+        self.shaping_factor = new_factor
 
     @partial(jax.jit, static_argnums=(0,))
-    # Modifier la signature pour accepter model_variables
     def recurrent_fn(self, model_variables: Dict[str, Any], rng_key, action, embedding):
         """
         Fonction récurrente pour MCTS qui gère un batch d'états
-
-        Args:
-            model_variables: Dict contenant les 'params' et 'batch_stats' du réseau
-            rng_key: Clé JAX RNG
-            action: Actions à appliquer (shape: (batch_size,))
-            embedding: Dict contenant l'état du batch
         """
         batch_size = action.shape[0]
 
@@ -95,28 +115,29 @@ class AbaloneMCTSRecurrentFn:
         next_states = jax.vmap(self.env.step)(current_states, action)
 
         # 3. Calcul des rewards et discounts en batch
-        reward = jax.vmap(calculate_reward)(current_states, next_states)
+        # Utiliser le facteur de shaping actuel
+        reward = jax.vmap(lambda cs, ns: calculate_reward(cs, ns, self.shaping_factor))(
+            current_states, next_states
+        )
         discount = jax.vmap(calculate_discount)(next_states)
 
-        # 4. Préparation des entrées du réseau en batch
+        # Reste du code reste identique...
         our_marbles = jnp.where(next_states.actual_player == 1,
-                                next_states.black_out,
-                                next_states.white_out)
+                              next_states.black_out,
+                              next_states.white_out)
         opp_marbles = jnp.where(next_states.actual_player == 1,
-                                next_states.white_out,
-                                next_states.black_out)
+                              next_states.white_out,
+                              next_states.black_out)
 
         board_2d, marbles_out = prepare_input(next_states.board, our_marbles, opp_marbles)
 
-        # 5. Évaluation par le réseau
         prior_logits, value = self.network.apply(
-            model_variables, # Contient {'params': ..., 'batch_stats': ...}
+            model_variables,
             board_2d,
             marbles_out,
             train=False 
         )
 
-        # 6. Préparation du prochain embedding
         next_embedding = {
             'board_3d': next_states.board,
             'actual_player': next_states.actual_player,
@@ -131,7 +152,6 @@ class AbaloneMCTSRecurrentFn:
             prior_logits=prior_logits,
             value=value
         ), next_embedding
-
 
 # Modifier la signature pour accepter model_variables
 @partial(jax.jit, static_argnames=['network', 'env'])

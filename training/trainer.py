@@ -48,6 +48,9 @@ class AbaloneTrainerSync:
             initial_lr=0.2,
             momentum=0.9,
             lr_schedule=None,
+            initial_shaping_factor=0.1,
+            shaping_duration_ratio=0.3,
+            k_polynomial=2.0,
             checkpoint_path="checkpoints/model",
             log_dir=None,
             gcs_bucket=None,
@@ -123,6 +126,11 @@ class AbaloneTrainerSync:
         self.initial_lr = initial_lr
         self.current_lr = initial_lr
         self.momentum = momentum
+
+        self.initial_shaping_factor = initial_shaping_factor
+        self.shaping_duration_ratio = shaping_duration_ratio
+        self.k_polynomial = k_polynomial
+        self.current_shaping_factor = initial_shaping_factor
 
         # Planning AlphaZero par défaut si non spécifié
         if lr_schedule is None:
@@ -306,11 +314,47 @@ class AbaloneTrainerSync:
             )
 
         return new_lr
+    
+
+    def _update_shaping_factor(self, iteration, num_iterations):
+        """
+        Met à jour le facteur de shaping en fonction de la progression de l'entraînement
+        """
+        from mcts.core import get_dynamic_shaping_factor
+        
+        # Calculer le nouveau facteur
+        new_factor = get_dynamic_shaping_factor(
+            current_epoch=iteration,
+            total_training_epochs=num_iterations,
+            shaping_duration_ratio=self.shaping_duration_ratio,
+            initial_factor=self.initial_shaping_factor,
+            k_polynomial=self.k_polynomial
+        )
+        
+        # Mettre à jour la valeur stockée
+        if new_factor != self.current_shaping_factor:
+            old_factor = self.current_shaping_factor
+            self.current_shaping_factor = new_factor
+            
+            if self.verbose:
+                logger.info(f"Reward shaping factor updated: {old_factor:.4f} -> {new_factor:.4f}")
+                
+            # Log GCS si disponible
+            if self.gcs_logger:
+                self.gcs_logger.log_shaping_factor_update(
+                    self.iteration, old_factor, new_factor
+                )
+        
+        return new_factor
 
     def _setup_jax_functions(self):
         """Configure les fonctions JAX pour la génération et l'entraînement."""
         # Utiliser notre générateur optimisé
-        self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
+        #self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
+        self.generate_games_pmap = create_optimized_game_generator(
+            self.num_simulations,
+            initial_shaping_factor=self.initial_shaping_factor  # Passer le facteur initial
+        )
 
         # Ajouter l'écrêtage de gradient à l'optimiseur
         self.optimizer = optax.chain(
@@ -381,6 +425,7 @@ class AbaloneTrainerSync:
                 # Mettre à jour le taux d'apprentissage selon le planning
                 iteration_percentage = iteration / num_iterations
                 self._update_learning_rate(iteration_percentage)
+                self._update_shaping_factor(iteration, num_iterations)
                 
                 if self.verbose:
                     logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
@@ -618,6 +663,8 @@ class AbaloneTrainerSync:
         Returns:
             Données des parties générées
         """
+
+        shaping_factor = self.current_shaping_factor
         # Calculer le nombre de jeux par processus et par dispositif
         games_per_process = math.ceil(num_games / self.num_processes)
         batch_size_per_device = math.ceil(games_per_process / self.num_devices)
@@ -639,7 +686,8 @@ class AbaloneTrainerSync:
             sharded_model_variables,
             self.network,
             self.env,
-            batch_size_per_device
+            batch_size_per_device,
+            shaping_factor
         )
 
         # Récupérer les données sur CPU
