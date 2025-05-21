@@ -37,7 +37,7 @@ def get_dynamic_shaping_factor(
     return jnp.where(current_epoch < shaping_active_epochs, factor, 0.0)
     
 
-@partial(jax.jit, static_argnames=['shaping_factor'])
+@partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, shaping_factor: float) -> float: # Valeur par défaut enlevée pour clarté
     """
     Calcule la récompense avec un facteur de shaping configurable et dynamique.
