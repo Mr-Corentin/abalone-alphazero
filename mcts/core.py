@@ -18,7 +18,7 @@ K_POLYNOMIAL = 2.0  # Pour une décroissance quadratique (lent puis rapide), k >
 # SHAPING_DURATION_RATIO = 0.3 # 30% de l'entraînement total
 
 @jax.jit
-def get_dynamic_shaping_factor_jax(
+def get_dynamic_shaping_factor(
     current_epoch: jnp.ndarray,
     total_training_epochs: jnp.ndarray,
     shaping_duration_ratio: jnp.ndarray,
