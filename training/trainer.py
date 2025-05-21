@@ -456,6 +456,14 @@ class AbaloneTrainerSync:
 
                 if self.gcs_logger:
                     self.gcs_logger.log_generation_end(iteration, t_gen, games_per_iteration)
+
+                if self.gcs_logger:
+                    self.gcs_logger.log_worker_generation(
+                        iteration, self.process_id, t_gen, 
+                        games_per_iteration, 
+                        0  # On mettra le vrai nombre après update_buffer
+                    )
+                    self.gcs_logger.log_generation_end(iteration, t_gen, games_per_iteration)
                 # 2. Mise à jour du buffer
                 logger.info(f"Processus {self.process_id}: En attente de synchronisation post-génération")
                 jax.experimental.multihost_utils.sync_global_devices(f"post_generation_iter_{iteration}")
@@ -481,6 +489,26 @@ class AbaloneTrainerSync:
                     else:
                         # Buffer local
                         logger.info(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
+
+                if self.gcs_logger:
+                    buffer_stats = {}
+                    if hasattr(self.buffer, 'gcs_index'):
+                        buffer_stats = {
+                            "local_size": self.buffer.local_size,
+                            "total_size": self.buffer.total_size
+                        }
+                    else:
+                        buffer_stats = {"size": self.buffer.size}
+                    
+                    self.gcs_logger.log_worker_buffer_update(
+                        iteration, self.process_id, positions_added, buffer_stats
+                    )
+                    
+                    # Mettre à jour le log de génération avec le bon nombre de positions
+                    self.gcs_logger.log_worker_generation(
+                        iteration, self.process_id, t_gen, 
+                        games_per_iteration, positions_added
+                    )
 
                 # Synchronisation après la mise à jour du buffer
                 jax.experimental.multihost_utils.sync_global_devices(f"post_buffer_update_iter_{iteration}")

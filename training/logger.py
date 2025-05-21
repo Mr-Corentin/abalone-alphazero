@@ -138,6 +138,16 @@ class GCSLogger:
             "new_lr": new_lr,
             "message": txt_msg
         }, txt_msg)
+
+    def log_shaping_factor_update(self, iteration: int, old_factor: float, new_factor: float):
+        """Log un changement de facteur de reward shaping"""
+        txt_msg = f"Reward Shaping Factor: {old_factor:.4f} → {new_factor:.4f}"
+        self._write_log("shaping_factor_update", {
+            "iteration": iteration,
+            "old_factor": old_factor,
+            "new_factor": new_factor,
+            "message": txt_msg
+        }, txt_msg)
     
     def log_checkpoint_save(self, iteration: int, checkpoint_type: str, path: str):
         """Log la sauvegarde d'un checkpoint"""
@@ -168,6 +178,67 @@ class GCSLogger:
             "training_time": training_time,
             "message": txt_msg
         }, txt_msg)
+
+    def log_worker_generation(self, iteration: int, process_id: int, duration: float, 
+                            games_generated: int, positions_added: int):
+        """Log les détails de génération pour un worker spécifique"""
+        games_per_sec = games_generated / duration if duration > 0 else 0
+        txt_msg = (f"Worker {process_id}: Génération terminée en {duration:.2f}s "
+                f"({games_generated} parties, {games_per_sec:.1f} parties/s, "
+                f"{positions_added} positions)")
+        
+        self._write_log("worker_generation", {
+            "iteration": iteration,
+            "process_id": process_id,
+            "duration_seconds": duration,
+            "games_generated": games_generated,
+            "positions_added": positions_added,
+            "games_per_second": games_per_sec,
+            "message": txt_msg
+        }, txt_msg)
+
+    def log_worker_buffer_update(self, iteration: int, process_id: int, 
+                                positions_added: int, buffer_stats: dict = None):
+        """Log la mise à jour du buffer pour un worker spécifique"""
+        txt_msg = f"Worker {process_id}: Buffer mis à jour avec +{positions_added} positions"
+        
+        log_data = {
+            "iteration": iteration,
+            "process_id": process_id,
+            "positions_added": positions_added,
+            "message": txt_msg
+        }
+        
+        if buffer_stats:
+            log_data["buffer_stats"] = buffer_stats
+            if "total_size" in buffer_stats:
+                txt_msg += f" (total: {buffer_stats['total_size']})"
+            elif "size" in buffer_stats:
+                txt_msg += f" (total: {buffer_stats['size']})"
+        
+        self._write_log("worker_buffer_update", log_data, txt_msg)
+
+    def log_worker_training(self, iteration: int, process_id: int, duration: float, 
+                        steps_completed: int, metrics: dict = None):
+        """Log les détails d'entraînement pour un worker spécifique"""
+        steps_per_sec = steps_completed / duration if duration > 0 else 0
+        txt_msg = (f"Worker {process_id}: Entraînement terminé en {duration:.2f}s "
+                f"({steps_completed} étapes, {steps_per_sec:.1f} étapes/s)")
+        
+        log_data = {
+            "iteration": iteration,
+            "process_id": process_id,
+            "duration_seconds": duration,
+            "steps_completed": steps_completed,
+            "steps_per_second": steps_per_sec,
+            "message": txt_msg
+        }
+        
+        if metrics:
+            log_data["metrics"] = metrics
+            txt_msg += f" - Loss: {metrics.get('total_loss', 0):.4f}"
+        
+        self._write_log("worker_training", log_data, txt_msg)
     
     def log_custom(self, log_type: str, data: Dict[str, Any], message: str = ""):
         """Log personnalisé avec données arbitraires"""
