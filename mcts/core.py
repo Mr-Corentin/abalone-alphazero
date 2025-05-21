@@ -12,45 +12,44 @@ from core.coord_conversion import prepare_input
 
 REWARD_SCALING_FACTOR = 0.1 
 
-# @partial(jax.jit)
-# def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
-#     """
-#     Calcule la récompense d'une transition en version canonique
-#     """
-#     black_diff = next_state.black_out - current_state.black_out
-#     white_diff = next_state.white_out - current_state.white_out
-
-#     billes_sorties = jnp.where(current_state.actual_player == 1,
-#                                white_diff,
-#                                black_diff)
-
-#     return billes_sorties * REWARD_SCALING_FACTOR 
 
 
-@partial(jax.jit)
-def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
+@partial(jax.jit, static_argnames=['shaping_factor'])
+def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, shaping_factor: float = 0.1) -> float:
     """
-    Calcule la récompense d'une transition du point de vue du joueur qui a joué
+    Calcule la récompense avec un facteur de shaping configurable
     """
-    intermediate_reward = 0.0
+    # 1. Reward intermédiaire pour billes sorties
+    black_diff = next_state.black_out - current_state.black_out
+    white_diff = next_state.white_out - current_state.white_out
     
+    # Billes sorties par le joueur courant (selon sa perspective)
+    billes_sorties_adv = jnp.where(current_state.actual_player == 1,
+                                white_diff,  # Noir a sorti des blanches  
+                                black_diff)  # Blanc a sorti des noires
+    
+    # Reward intermédiaire selon le facteur de shaping
+    intermediate_reward = billes_sorties_adv * shaping_factor
+    
+    # 2. Reward finale (victoire/défaite) - reste identique
     is_terminal = (next_state.black_out >= 6) | (next_state.white_out >= 6) | (next_state.moves_count >= 200)
     
-    # +1 si noir gagne, -1 si blanc gagne, 0 si match nul
     raw_final_reward = jnp.where(
-        next_state.white_out >= 6, 1.0,    # Noir gagne (6 billes blanches sorties)
-        jnp.where(next_state.black_out >= 6, -1.0, 0.0)  # Blanc gagne (6 billes noires sorties) / Match nul
+        next_state.white_out >= 6, 1.0,    # Noir gagne
+        jnp.where(next_state.black_out >= 6, -1.0, 0.0)  # Blanc gagne / Match nul
     )
     
-    # Si actual_player = 1 (noir), on garde la reward telle quelle
-    # Si actual_player = -1 (blanc), on inverse la reward  
     final_reward = jnp.where(
         is_terminal,
         raw_final_reward * current_state.actual_player,
         0.0
     )
     
+    # 3. Combinaison des rewards
     return intermediate_reward + final_reward
+
+
+
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
