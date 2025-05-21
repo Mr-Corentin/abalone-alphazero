@@ -250,11 +250,18 @@ class AbaloneTrainerSync:
             )
     def _setup_gcs_logger(self, gcs_bucket):
         """Configure le logger GCS pour les métriques d'entraînement"""
-        if gcs_bucket and self.is_main_process:
+        if gcs_bucket:  # ← Tous les workers ont un logger
             from training.logger import GCSLogger
             
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            training_id = f"training_{timestamp}_p{self.num_processes}w"
+            # Tous les workers utilisent le même timestamp/training_id de base
+            if self.is_main_process:
+                # Le processus principal crée le timestamp
+                self.training_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            else:
+                # Les autres processus utilisent un timestamp similaire (approximatif)
+                self.training_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+            training_id = f"training_{self.training_timestamp}_p{self.num_processes}w"
             
             self.gcs_logger = GCSLogger(
                 gcs_bucket=gcs_bucket,
@@ -262,7 +269,7 @@ class AbaloneTrainerSync:
             )
             
             if self.verbose:
-                logger.info(f"GCS Logger activé: gs://{gcs_bucket}/logs_training/{training_id}")
+                logger.info(f"GCS Logger activé pour worker {self.process_id}: gs://{gcs_bucket}/logs_training/{training_id}")
         else:
             self.gcs_logger = None
 
