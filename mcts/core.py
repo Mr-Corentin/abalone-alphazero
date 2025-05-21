@@ -18,26 +18,23 @@ K_POLYNOMIAL = 2.0  # Pour une décroissance quadratique (lent puis rapide), k >
 # SHAPING_DURATION_RATIO = 0.3 # 30% de l'entraînement total
 
 @jax.jit
-def get_dynamic_shaping_factor(
-    current_epoch: int,
-    total_training_epochs: int,
-    shaping_duration_ratio: float,
-    initial_factor: float,
-    k_polynomial: float
-) -> float:
+def get_dynamic_shaping_factor_jax(
+    current_epoch: jnp.ndarray,
+    total_training_epochs: jnp.ndarray,
+    shaping_duration_ratio: jnp.ndarray,
+    initial_factor: jnp.ndarray,
+    k_polynomial: jnp.ndarray
+) -> jnp.ndarray:
     """
-    Calcule le shaping_factor dynamiquement.
-    Décroissance lente au début, puis plus rapide.
-    Atteint zéro à la fin de la période de shaping.
+    Version JAX de la fonction - tous les paramètres doivent être des tableaux JAX
     """
-    shaping_active_epochs = int(shaping_duration_ratio * total_training_epochs)
-
-    if current_epoch < shaping_active_epochs:
-        progress_t = current_epoch / shaping_active_epochs
-        factor = initial_factor * (1.0 - progress_t**k_polynomial)
-        return factor
-    else:
-        return 0.0 
+    shaping_active_epochs = shaping_duration_ratio * total_training_epochs
+    
+    progress_t = current_epoch / shaping_active_epochs
+    factor = initial_factor * (1.0 - progress_t**k_polynomial)
+    
+    # Utiliser jnp.where au lieu de if/else
+    return jnp.where(current_epoch < shaping_active_epochs, factor, 0.0)
     
 
 @partial(jax.jit, static_argnames=['shaping_factor'])
