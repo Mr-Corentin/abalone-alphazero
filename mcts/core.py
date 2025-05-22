@@ -151,8 +151,10 @@ class AbaloneMCTSRecurrentFn:
         # 3. Calcul des rewards et discounts en batch
         # Utiliser le facteur de shaping actuel
       
-        current_iteration = embedding.get('current_iteration', 0)
-        total_iterations = embedding.get('total_iterations', 1000)
+        # current_iteration = embedding.get('current_iteration', 0)
+        # total_iterations = embedding.get('total_iterations', 1000)
+        current_iteration = embedding['current_iteration'][0]  # Prendre le premier élément
+        total_iterations = embedding['total_iterations'][0]    # Prendre le premier élément
 
         reward = jax.vmap(lambda cs, ns: calculate_reward(cs, ns, current_iteration, total_iterations))(
             current_states, next_states
@@ -181,7 +183,9 @@ class AbaloneMCTSRecurrentFn:
             'actual_player': next_states.actual_player,
             'black_out': next_states.black_out,
             'white_out': next_states.white_out,
-            'moves_count': next_states.moves_count
+            'moves_count': next_states.moves_count,
+            'current_iteration': embedding['current_iteration'],  
+            'total_iterations': embedding['total_iterations']     
         }
 
         return mctx.RecurrentFnOutput(
@@ -194,15 +198,8 @@ class AbaloneMCTSRecurrentFn:
 # Modifier la signature pour accepter model_variables
 @partial(jax.jit, static_argnames=['network', 'env'])
 def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_variables: Dict[str, Any], env: AbaloneEnv, current_iteration: int = 0, total_iterations: int = 1000):
-
     """
     Version vectorisée de get_root_output pour traiter un batch d'états
-
-    Args:
-        states: Batch d'états AbaloneState (avec batch_size états)
-        network: Le réseau de neurones
-        model_variables: Dict contenant les 'params' et 'batch_stats' du réseau
-        env: L'environnement Abalone
     """
     # Calculer les billes out pour chaque état dans le batch
     our_marbles = jnp.where(states.actual_player == 1,
@@ -223,14 +220,18 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_var
         train=False 
     )
 
+    batch_size = states.board.shape[0]
+    current_iteration_batch = jnp.full(batch_size, current_iteration, dtype=jnp.int32)
+    total_iterations_batch = jnp.full(batch_size, total_iterations, dtype=jnp.int32)
+
     embedding = {
         'board_3d': states.board,
         'actual_player': states.actual_player,
         'black_out': states.black_out,
         'white_out': states.white_out,
         'moves_count': states.moves_count,
-        'current_iteration': current_iteration,  
-        'total_iterations': total_iterations    
+        'current_iteration': current_iteration_batch,  
+        'total_iterations': total_iterations_batch     
     }
 
     return mctx.RootFnOutput(
