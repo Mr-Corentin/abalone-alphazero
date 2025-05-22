@@ -19,7 +19,9 @@ def run_search_batch(states: AbaloneState,
                      rng_key,
                      env: AbaloneEnv,
                      num_simulations: int = 600,
-                     max_num_considered_actions: int = 16):
+                     max_num_considered_actions: int = 16,
+                     current_iteration: int = 0,       
+                     total_iterations: int = 1000):     
     """
     Version batchée de run_search
     
@@ -32,12 +34,15 @@ def run_search_batch(states: AbaloneState,
         env: Environnement du jeu
         num_simulations: Nombre de simulations MCTS
         max_num_considered_actions: Nombre maximum d'actions à considérer
+        current_iteration: Itération actuelle de l'entraînement  # AJOUT
+        total_iterations: Nombre total d'itérations prévues      # AJOUT
         
     Returns:
         policy_output pour chaque état du batch
     """
-    # Obtenir root pour le batch
-    root = get_root_output_batch(states, network, model_variables, env)
+    # Obtenir root pour le batch (maintenant avec les paramètres d'itération)
+    root = get_root_output_batch(states, network, model_variables, env, current_iteration, total_iterations)
+
 
     # Obtenir les masques de mouvements légaux pour le batch
     legal_moves = jax.vmap(env.get_legal_moves)(states)
@@ -72,7 +77,8 @@ def generate_game_mcts_batch(rng_key,
                              env: AbaloneEnv,
                              batch_size: int,
                              num_simulations: int = 500,
-                             shaping_factor: float = 0.1):  # NOUVEAU PARAMÈTRE
+                             current_iteration: int = 0,      # REMPLACE shaping_factor
+                             total_iterations: int = 1000):   
     """
     Génère un batch de parties en utilisant MCTS pour la sélection des actions
     
@@ -92,7 +98,7 @@ def generate_game_mcts_batch(rng_key,
 
     init_states = env.reset_batch(rng_key, batch_size)
     # MODIFIÉ: Créer l'instance avec le facteur de shaping
-    recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network, shaping_factor)
+    recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network)
 
     # ... (pré-allocation des buffers reste identique) ...
     boards_3d = jnp.zeros((batch_size, max_moves + 1) + init_states.board.shape[1:], dtype=jnp.int8)
@@ -119,7 +125,7 @@ def generate_game_mcts_batch(rng_key,
         )
 
         rng, search_rng = jax.random.split(rng)
-        search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations)
+        search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations, current_iteration= current_iteration, total_iterations = total_iterations)
         next_states = jax.vmap(env.step)(states, search_outputs.action)
 
         # ... (logique de stockage reste identique mais utilise les variables renommées pour la clarté) ...
@@ -199,16 +205,18 @@ def generate_parallel_games_pmap(rngs,
                                  network: AbaloneModel,
                                  env: AbaloneEnv,
                                  batch_size_per_device: int,
-                                 shaping_factor: float = 0.1):  # NOUVEAU PARAMÈTRE
+                                 current_iteration: int = 0,      
+                                 total_iterations: int = 1000):  
     """
     Version pmappée de generate_game_mcts_batch pour paralléliser sur plusieurs devices
     """
     # MODIFIÉ: Passer shaping_factor ET model_variables
     return generate_game_mcts_batch(rngs, model_variables, network, env, batch_size_per_device, 
-                                   num_simulations=500, shaping_factor=shaping_factor)
+                                   num_simulations=500,  current_iteration=current_iteration,   
+                                   total_iterations=total_iterations)
 
 
-def create_optimized_game_generator(num_simulations: int = 500, initial_shaping_factor: float = 0.1):  # NOUVEAU PARAMÈTRE
+def create_optimized_game_generator(num_simulations: int = 500):  
     """
     Crée une version pmappée de la génération de parties optimisée
     
@@ -223,11 +231,12 @@ def create_optimized_game_generator(num_simulations: int = 500, initial_shaping_
                                       network: AbaloneModel,
                                       env: AbaloneEnv,
                                       batch_size_per_device: int,
-                                      shaping_factor: float = initial_shaping_factor):  # NOUVEAU PARAMÈTRE
+                                      current_iteration: int = 0,      
+                                      total_iterations: int = 1000): 
         """Version optimisée avec lax.scan et filtrage des parties terminées"""
 
         # MODIFIÉ: Créer l'instance avec le facteur de shaping
-        recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network, shaping_factor)
+        recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network)
 
         def game_step(carry, _):
             states, rng, current_moves_per_game, active, game_data_loop = carry
@@ -236,7 +245,7 @@ def create_optimized_game_generator(num_simulations: int = 500, initial_shaping_
             active_games = active & ~terminal_states
             rng, search_rng = jax.random.split(rng)
 
-            search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations)
+            search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations, current_iteration=current_iteration, total_iterations=total_iterations)
             next_states = jax.vmap(env.step)(states, search_outputs.action)
             current_boards_2d = jax.vmap(cube_to_2d)(states.board)
             
@@ -246,7 +255,7 @@ def create_optimized_game_generator(num_simulations: int = 500, initial_shaping_
             new_game_data = {}
             for key, value_to_store in [
                 ('boards_2d', current_boards_2d),
-                ('policies', jax.nn.softmax(search_outputs.action_weights)),  # S'assurer que c'est softmaxé
+                ('policies', jax.nn.softmax(search_outputs.action_weights)),  
                 ('actual_players', states.actual_player),
                 ('black_outs', states.black_out),
                 ('white_outs', states.white_out),

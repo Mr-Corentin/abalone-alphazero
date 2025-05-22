@@ -10,45 +10,90 @@ from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel # Votre AbaloneModel mis à jour
 from core.coord_conversion import prepare_input
 
-REWARD_SCALING_FACTOR = 0.1 
+# REWARD_SCALING_FACTOR = 0.1 
 
-INITIAL_SHAPING_FACTOR = 0.1  # Ou la valeur de départ que vous préférez
-K_POLYNOMIAL = 2.0  # Pour une décroissance quadratique (lent puis rapide), k > 1
-# TOTAL_TRAINING_EPOCHS sera défini dans votre boucle d'entraînement
-# SHAPING_DURATION_RATIO = 0.3 # 30% de l'entraînement total
+# INITIAL_SHAPING_FACTOR = 0.1  # Ou la valeur de départ que vous préférez
+# K_POLYNOMIAL = 2.0  # Pour une décroissance quadratique (lent puis rapide), k > 1
+# # TOTAL_TRAINING_EPOCHS sera défini dans votre boucle d'entraînement
+# # SHAPING_DURATION_RATIO = 0.3 # 30% de l'entraînement total
 
-@jax.jit
-def get_dynamic_shaping_factor(
-    current_epoch: jnp.ndarray,
-    total_training_epochs: jnp.ndarray,
-    shaping_duration_ratio: jnp.ndarray,
-    initial_factor: jnp.ndarray,
-    k_polynomial: jnp.ndarray
-) -> jnp.ndarray:
-    """
-    Version JAX de la fonction - tous les paramètres doivent être des tableaux JAX
-    """
-    shaping_active_epochs = shaping_duration_ratio * total_training_epochs
+# @jax.jit
+# def get_dynamic_shaping_factor(
+#     current_epoch: jnp.ndarray,
+#     total_training_epochs: jnp.ndarray,
+#     shaping_duration_ratio: jnp.ndarray,
+#     initial_factor: jnp.ndarray,
+#     k_polynomial: jnp.ndarray
+# ) -> jnp.ndarray:
+#     """
+#     Version JAX de la fonction - tous les paramètres doivent être des tableaux JAX
+#     """
+#     shaping_active_epochs = shaping_duration_ratio * total_training_epochs
     
-    progress_t = current_epoch / shaping_active_epochs
-    factor = initial_factor * (1.0 - progress_t**k_polynomial)
+#     progress_t = current_epoch / shaping_active_epochs
+#     factor = initial_factor * (1.0 - progress_t**k_polynomial)
     
-    # Utiliser jnp.where au lieu de if/else
-    return jnp.where(current_epoch < shaping_active_epochs, factor, 0.0)
+#     # Utiliser jnp.where au lieu de if/else
+#     return jnp.where(current_epoch < shaping_active_epochs, factor, 0.0)
     
+
+# @partial(jax.jit)
+# def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, shaping_factor: float) -> float: # Valeur par défaut enlevée pour clarté
+#     """
+#     Calcule la récompense avec un facteur de shaping configurable et dynamique.
+#     """
+#     # 1. Reward intermédiaire pour billes sorties
+#     black_diff = next_state.black_out - current_state.black_out
+#     white_diff = next_state.white_out - current_state.white_out
+
+#     billes_sorties_adv = jnp.where(current_state.actual_player == 1,
+#                                    white_diff,
+#                                    black_diff)
+
+#     intermediate_reward = billes_sorties_adv * shaping_factor
+
+#     # 2. Reward finale (victoire/défaite) - reste identique
+#     is_terminal = (next_state.black_out >= 6) | (next_state.white_out >= 6) | (next_state.moves_count >= 200)
+
+#     raw_final_reward = jnp.where(
+#         next_state.white_out >= 6, 1.0,
+#         jnp.where(next_state.black_out >= 6, -1.0, 0.0)
+#     )
+
+#     final_reward = jnp.where(
+#         is_terminal,
+#         raw_final_reward * current_state.actual_player,
+#         0.0
+#     )
+#     return intermediate_reward + final_reward
 
 @partial(jax.jit)
-def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, shaping_factor: float) -> float: # Valeur par défaut enlevée pour clarté
+def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, current_iteration: int, total_iterations: int) -> float:
     """
-    Calcule la récompense avec un facteur de shaping configurable et dynamique.
+    Calcule la récompense avec reward shaping par paliers basé sur l'itération actuelle.
+    Reward shaping réduit progressivement et s'arrête à 60% de l'entraînement.
     """
-    # 1. Reward intermédiaire pour billes sorties
+    # 1. Reward intermédiaire pour billes sorties (avec paliers)
     black_diff = next_state.black_out - current_state.black_out
     white_diff = next_state.white_out - current_state.white_out
 
     billes_sorties_adv = jnp.where(current_state.actual_player == 1,
                                    white_diff,
                                    black_diff)
+
+    # Calcul du facteur de shaping par paliers
+    progress = current_iteration / total_iterations
+    
+    shaping_factor = jnp.where(
+        progress < 0.2, 0.1,          # 0-20% : facteur 0.1
+        jnp.where(
+            progress < 0.4, 0.05,     # 20-40% : facteur 0.05  
+            jnp.where(
+                progress < 0.6, 0.02, # 40-60% : facteur 0.02
+                0.0                   # 60%+ : pas de reward shaping
+            )
+        )
+    )
 
     intermediate_reward = billes_sorties_adv * shaping_factor
 
@@ -65,9 +110,8 @@ def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, shap
         raw_final_reward * current_state.actual_player,
         0.0
     )
+    
     return intermediate_reward + final_reward
-
-
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
@@ -81,16 +125,9 @@ class AbaloneMCTSRecurrentFn:
     """
     Classe pour la fonction récurrente de MCTS, utilisant mctx
     """
-    def __init__(self, env: AbaloneEnv, network: AbaloneModel, shaping_factor: float = INITIAL_SHAPING_FACTOR):
+    def __init__(self, env: AbaloneEnv, network: AbaloneModel):
         self.env = env
         self.network = network
-        self.shaping_factor = shaping_factor  # Stockage du facteur de shaping
-
-    def update_shaping_factor(self, new_factor: float):
-        """
-        Met à jour le facteur de shaping pour les futures simulations
-        """
-        self.shaping_factor = new_factor
 
     @partial(jax.jit, static_argnums=(0,))
     def recurrent_fn(self, model_variables: Dict[str, Any], rng_key, action, embedding):
@@ -113,7 +150,11 @@ class AbaloneMCTSRecurrentFn:
 
         # 3. Calcul des rewards et discounts en batch
         # Utiliser le facteur de shaping actuel
-        reward = jax.vmap(lambda cs, ns: calculate_reward(cs, ns, self.shaping_factor))(
+      
+        current_iteration = embedding.get('current_iteration', 0)
+        total_iterations = embedding.get('total_iterations', 1000)
+
+        reward = jax.vmap(lambda cs, ns: calculate_reward(cs, ns, current_iteration, total_iterations))(
             current_states, next_states
         )
         discount = jax.vmap(calculate_discount)(next_states)
@@ -152,7 +193,8 @@ class AbaloneMCTSRecurrentFn:
 
 # Modifier la signature pour accepter model_variables
 @partial(jax.jit, static_argnames=['network', 'env'])
-def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_variables: Dict[str, Any], env: AbaloneEnv):
+def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_variables: Dict[str, Any], env: AbaloneEnv, current_iteration: int = 0, total_iterations: int = 1000):
+
     """
     Version vectorisée de get_root_output pour traiter un batch d'états
 
@@ -186,7 +228,9 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_var
         'actual_player': states.actual_player,
         'black_out': states.black_out,
         'white_out': states.white_out,
-        'moves_count': states.moves_count
+        'moves_count': states.moves_count,
+        'current_iteration': current_iteration,  
+        'total_iterations': total_iterations    
     }
 
     return mctx.RootFnOutput(

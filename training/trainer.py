@@ -48,9 +48,6 @@ class AbaloneTrainerSync:
             initial_lr=0.2,
             momentum=0.9,
             lr_schedule=None,
-            initial_shaping_factor=0.1,
-            shaping_duration_ratio=0.3,
-            k_polynomial=2.0,
             checkpoint_path="checkpoints/model",
             log_dir=None,
             gcs_bucket=None,
@@ -127,10 +124,6 @@ class AbaloneTrainerSync:
         self.current_lr = initial_lr
         self.momentum = momentum
 
-        self.initial_shaping_factor = initial_shaping_factor
-        self.shaping_duration_ratio = shaping_duration_ratio
-        self.k_polynomial = k_polynomial
-        self.current_shaping_factor = initial_shaping_factor
 
         # Planning AlphaZero par défaut si non spécifié
         if lr_schedule is None:
@@ -404,44 +397,12 @@ class AbaloneTrainerSync:
         return new_lr
     
 
-    def _update_shaping_factor(self, iteration, num_iterations):
-        """
-        Met à jour le facteur de shaping en fonction de la progression de l'entraînement
-        """
-        from mcts.core import get_dynamic_shaping_factor
-        
-        # Calculer le nouveau facteur
-        new_factor = get_dynamic_shaping_factor(
-            current_epoch=iteration,
-            total_training_epochs=num_iterations,
-            shaping_duration_ratio=self.shaping_duration_ratio,
-            initial_factor=self.initial_shaping_factor,
-            k_polynomial=self.k_polynomial
-        )
-        
-        # Mettre à jour la valeur stockée
-        if new_factor != self.current_shaping_factor:
-            old_factor = self.current_shaping_factor
-            self.current_shaping_factor = new_factor
-            
-            if self.verbose:
-                logger.info(f"Reward shaping factor updated: {old_factor:.4f} -> {new_factor:.4f}")
-                
-            # Log GCS si disponible
-            if self.gcs_logger:
-                self.gcs_logger.log_shaping_factor_update(
-                    self.iteration, old_factor, new_factor
-                )
-        
-        return new_factor
-
     def _setup_jax_functions(self):
         """Configure les fonctions JAX pour la génération et l'entraînement."""
         # Utiliser notre générateur optimisé
         #self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
         self.generate_games_pmap = create_optimized_game_generator(
-            self.num_simulations,
-            initial_shaping_factor=self.initial_shaping_factor  # Passer le facteur initial
+            self.num_simulations
         )
 
         # Ajouter l'écrêtage de gradient à l'optimiseur
@@ -826,7 +787,23 @@ class AbaloneTrainerSync:
                 # Mettre à jour le taux d'apprentissage selon le planning
                 iteration_percentage = iteration / num_iterations
                 self._update_learning_rate(iteration_percentage)
-                self._update_shaping_factor(iteration, num_iterations)
+                if self.is_main_process:
+                    progress = iteration_percentage
+                    
+                    if progress < 0.2:
+                        current_shaping_factor = 0.1
+                    elif progress < 0.4:
+                        current_shaping_factor = 0.05
+                    elif progress < 0.6:
+                        current_shaping_factor = 0.02
+                    else:
+                        current_shaping_factor = 0.0
+                    
+                    self._log_metrics_to_tensorboard({
+                        "reward_shaping_factor": current_shaping_factor,
+                        "training_progress": progress
+                    }, "reward_shaping")
+        
                 
                 if self.verbose:
                     logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
@@ -843,7 +820,7 @@ class AbaloneTrainerSync:
                 
                 rng_key, gen_key = jax.random.split(rng_key)
                 t_start = time.time()
-                games_data = self._generate_games(gen_key, games_per_iteration)
+                games_data = self._generate_games(gen_key, games_per_iteration, num_iterations)
                 t_gen = time.time() - t_start
 
                 logger.info(f"Processus {self.process_id}: Fin génération pour itération {iteration+1} en {t_gen:.2f}s")
@@ -1082,7 +1059,9 @@ class AbaloneTrainerSync:
                 logger.info(f"Parties générées: {self.total_games}")
                 logger.info(f"Positions totales: {self.total_positions}")
                 logger.info(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
-    def _generate_games(self, rng_key, num_games):
+
+                    
+    def _generate_games(self, rng_key, num_games,total_iterations=1000):
         """
         Génère des parties en parallèle sur les cœurs TPU locaux.
 
@@ -1093,8 +1072,6 @@ class AbaloneTrainerSync:
         Returns:
             Données des parties générées
         """
-
-        shaping_factor = self.current_shaping_factor
         # Calculer le nombre de jeux par processus et par dispositif
         games_per_process = math.ceil(num_games / self.num_processes)
         batch_size_per_device = math.ceil(games_per_process / self.num_devices)
@@ -1107,41 +1084,28 @@ class AbaloneTrainerSync:
         sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
 
         # Répliquer les paramètres sur les dispositifs locaux
-        #sharded_params = jax.device_put_replicated(self.params, self.devices)
         sharded_model_variables = jax.device_put_replicated(self.model_variables, self.devices)
-        sharded_shaping_factor = jax.device_put_replicated(shaping_factor, self.devices)
-        # Génération des parties avec version optimisée
+        
+        # NOUVEAU: Répliquer l'itération actuelle et totale
+        sharded_current_iteration = jax.device_put_replicated(self.iteration, self.devices)
+        sharded_total_iterations = jax.device_put_replicated(total_iterations, self.devices)  
+        
+        # Génération des parties avec les paramètres d'itération
         games_data_pmap = self.generate_games_pmap(
             sharded_rngs,
             sharded_model_variables,
             self.network,
             self.env,
             batch_size_per_device,
-            sharded_shaping_factor
+            sharded_current_iteration,     # Remplace shaping_factor
+            sharded_total_iterations       # Nouveau paramètre
         )
 
         # Récupérer les données sur CPU
         games_data = jax.device_get(games_data_pmap)
         
-
         # Mettre à jour le compteur avec les jeux locaux
         self.total_games += local_total_games
-
-        # Enregistrer les parties pour analyse si activé//Debug currently
-        # if self.save_games and hasattr(self, 'game_logger'):
-        #     # Générer un préfixe incluant l'ID de processus pour éviter les conflits
-        #     game_id_prefix = f"iter{self.iteration}_p{self.process_id}"
-
-        #     # Convertir les parties dans un format adapté à l'analyse
-        #     converted_games = convert_games_batch(
-        #         games_data,
-        #         self.env,
-        #         base_game_id=game_id_prefix,
-        #         model_iteration=self.iteration
-        #     )
-
-        #     # Envoyer les parties au logger qui les écrira de manière asynchrone
-        #     self.game_logger.log_games_batch(converted_games)
 
         return games_data
     def _log_metrics_to_tensorboard(self, metrics_dict, prefix="training"):
