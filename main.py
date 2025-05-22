@@ -229,8 +229,8 @@ def create_trainer(config, args):
         verbose=args.verbose)
 
     # Load checkpoint if specified
-    if args.checkpoint:
-        trainer.load_checkpoint(args.checkpoint)
+    # if args.checkpoint:
+    #     trainer.load_checkpoint(args.checkpoint)
 
     return trainer
 
