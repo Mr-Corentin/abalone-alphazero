@@ -17,44 +17,63 @@ logging.basicConfig(
 logger = logging.getLogger("alphazero.buffer")
 
 class CPUReplayBuffer:
-    def __init__(self, capacity, board_size=9, action_space=1734):
+    def __init__(self, capacity, board_size=9, history_size=4, action_space=1734):
         self.capacity = capacity
         self.size = 0
         self.position = 0
+        self.history_size = history_size
 
         self.buffer = {
-            'board': np.zeros((capacity, board_size, board_size), dtype=np.int8),
+            'board': np.zeros((capacity, board_size, board_size, history_size + 1), dtype=np.int8),  # +1 pour position actuelle
             'marbles_out': np.zeros((capacity, 2), dtype=np.int8),
             'policy': np.zeros((capacity, action_space), dtype=np.float32),
             'outcome': np.zeros(capacity, dtype=np.int8),
             'player': np.zeros(capacity, dtype=np.int8),
-            'game_id': np.zeros(capacity, dtype=np.int32),  # ID unique de partie
-            'move_num': np.zeros(capacity, dtype=np.int16),  # Numéro du coup dans la partie
-            'iteration': np.zeros(capacity, dtype=np.int32),  # Itération d'entraînement
-            'model_version': np.zeros(capacity, dtype=np.int32)  # Version du modèle
+            'game_id': np.zeros(capacity, dtype=np.int32),
+            'move_num': np.zeros(capacity, dtype=np.int16),
+            'iteration': np.zeros(capacity, dtype=np.int32),
+            'model_version': np.zeros(capacity, dtype=np.int32)
         }
 
         self.current_game_id = 0  
 
-    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
+    def add(self, board_with_history, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
             iteration=0, model_version=0):
-        """Ajoute une transition individuelle au buffer"""
+        """
+        Ajoute une transition individuelle au buffer
+        
+        Args:
+            board_with_history: Plateau avec historique, shape (9, 9, 5) - [actuel + 4 historiques]
+            marbles_out: Billes sorties [2]
+            policy: Politique [1734]
+            outcome: Résultat de la partie
+            player: Joueur actuel
+            game_id: ID de la partie (optionnel)
+            move_num: Numéro du coup
+            iteration: Itération d'entraînement
+            model_version: Version du modèle
+        """
         idx = self.position
 
         # Convertir en numpy si nécessaire
-        if hasattr(board, 'device'):  # Détecte si c'est un tableau JAX
-            board = np.array(board)
+        if hasattr(board_with_history, 'device'):  # Détecte si c'est un tableau JAX
+            board_with_history = np.array(board_with_history)
         if hasattr(marbles_out, 'device'):
             marbles_out = np.array(marbles_out)
         if hasattr(policy, 'device'):
             policy = np.array(policy)
+
+        # Vérifier les dimensions
+        expected_shape = (9, 9, self.history_size + 1)
+        if board_with_history.shape != expected_shape:
+            raise ValueError(f"board_with_history doit avoir la forme {expected_shape}, reçu {board_with_history.shape}")
 
         # Si game_id n'est pas fourni, incrémenter le compteur interne
         if game_id is None:
             game_id = self.current_game_id
 
         # Stocker les données
-        self.buffer['board'][idx] = board
+        self.buffer['board'][idx] = board_with_history
         self.buffer['marbles_out'][idx] = marbles_out
         self.buffer['policy'][idx] = policy
         self.buffer['outcome'][idx] = outcome
@@ -169,15 +188,12 @@ class CPUReplayBuffer:
         }
 
         return batch
-    
 
-logger = logging.getLogger("alphazero.buffer")
+
 class GCSReplayBufferSync:
     """
     Buffer d'expérience synchrone utilisant Google Cloud Storage comme stockage principal.
-    - Permet le partage des expériences entre plusieurs nœuds TPU
-    - Maintient une taille fixe avec échantillonnage basé sur la récence
-    - Version synchrone pour simplicité et fiabilité
+    Version mise à jour pour supporter l'historique des positions.
     """
     def __init__(self, 
                 bucket_name: str,
@@ -186,13 +202,14 @@ class GCSReplayBufferSync:
                 max_buffer_size: int = 20_000_000,
                 buffer_cleanup_threshold: float = 0.95,
                 board_size: int = 9,
+                history_size: int = 4,
                 action_space: int = 1734,
                 recency_enabled: bool = True,
                 recency_temperature: float = 0.8,
                 cleanup_temperature: float = 2.0,
                 log_level: str = 'INFO'):
         """
-        Initialise le buffer d'expérience synchrone basé sur GCS.
+        Initialise le buffer d'expérience synchrone basé sur GCS avec support de l'historique.
         
         Args:
             bucket_name: Nom du bucket GCS
@@ -201,6 +218,7 @@ class GCSReplayBufferSync:
             max_buffer_size: Taille maximale du buffer global (en nombre de positions)
             buffer_cleanup_threshold: Seuil de remplissage déclenchant le nettoyage (entre 0 et 1)
             board_size: Taille du plateau (par défaut: 9 pour Abalone 2D)
+            history_size: Taille de l'historique (par défaut: 4)
             action_space: Nombre d'actions possibles
             recency_enabled: Activer l'échantillonnage avec biais de récence
             recency_temperature: Température pour le biais de récence pour l'échantillonnage
@@ -213,6 +231,7 @@ class GCSReplayBufferSync:
         self.max_buffer_size = max_buffer_size
         self.buffer_cleanup_threshold = buffer_cleanup_threshold
         self.board_size = board_size
+        self.history_size = history_size
         self.action_space = action_space
         self.recency_enabled = recency_enabled
         self.recency_temperature = recency_temperature
@@ -226,9 +245,9 @@ class GCSReplayBufferSync:
         self.process_id = jax.process_index()
         self.host_id = f"{os.uname().nodename}_{self.process_id}"
         
-        # Cache local de données
+        # Cache local de données avec support de l'historique
         self.local_buffer = {
-            'board': np.zeros((max_local_size, board_size, board_size), dtype=np.int8),
+            'board': np.zeros((max_local_size, board_size, board_size, history_size + 1), dtype=np.int8),
             'marbles_out': np.zeros((max_local_size, 2), dtype=np.int8),
             'policy': np.zeros((max_local_size, action_space), dtype=np.float32),
             'outcome': np.zeros(max_local_size, dtype=np.int8),
@@ -266,18 +285,36 @@ class GCSReplayBufferSync:
             "cleanup_operations": 0
         }
         
-        logger.info(f"GCSReplayBufferSync initialisé - Max buffer size: {self.max_buffer_size} positions")
+        logger.info(f"GCSReplayBufferSync initialisé avec historique - Max buffer size: {self.max_buffer_size} positions")
     
-    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
+    def add(self, board_with_history, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
             iteration=0, model_version=0):
-        """Ajoute une transition individuelle au buffer"""
+        """
+        Ajoute une transition individuelle au buffer
+        
+        Args:
+            board_with_history: Plateau avec historique, shape (9, 9, 5) - [actuel + 4 historiques]
+            marbles_out: Billes sorties [2]
+            policy: Politique [1734]
+            outcome: Résultat de la partie
+            player: Joueur actuel
+            game_id: ID de la partie (optionnel)
+            move_num: Numéro du coup
+            iteration: Itération d'entraînement
+            model_version: Version du modèle
+        """
         # Convertir en numpy si nécessaire
-        if hasattr(board, 'device'):
-            board = np.array(board)
+        if hasattr(board_with_history, 'device'):
+            board_with_history = np.array(board_with_history)
         if hasattr(marbles_out, 'device'):
             marbles_out = np.array(marbles_out)
         if hasattr(policy, 'device'):
             policy = np.array(policy)
+        
+        # Vérifier les dimensions
+        expected_shape = (self.board_size, self.board_size, self.history_size + 1)
+        if board_with_history.shape != expected_shape:
+            raise ValueError(f"board_with_history doit avoir la forme {expected_shape}, reçu {board_with_history.shape}")
         
         # Si game_id n'est pas fourni, incrémenter le compteur interne
         if game_id is None:
@@ -285,7 +322,7 @@ class GCSReplayBufferSync:
         
         # Stocker dans le cache local
         idx = self.position
-        self.local_buffer['board'][idx] = board
+        self.local_buffer['board'][idx] = board_with_history
         self.local_buffer['marbles_out'][idx] = marbles_out
         self.local_buffer['policy'][idx] = policy
         self.local_buffer['outcome'][idx] = outcome
@@ -334,9 +371,6 @@ class GCSReplayBufferSync:
             return 0  
         
         logger.info(f"Début du flush vers GCS: {self.local_size} positions à écrire")
-        # else:
-            
-        #     logger.info(f"Flush vers GCS: {self.local_size} positions")
         
         # Préparer les données du buffer local
         data_to_write = {}
@@ -367,7 +401,6 @@ class GCSReplayBufferSync:
             # Créer le chemin dans le bucket
             iter_path = f"{self.buffer_dir}/iteration_{iteration}"
             file_path = f"{iter_path}/{batch_id}.tfrecord"
-            
             
             logger.info(f"Écriture de {positions_in_iter} positions pour l'itération {iteration}")
             
@@ -417,7 +450,7 @@ class GCSReplayBufferSync:
         
         with tf.io.TFRecordWriter(temp_path) as writer:
             for i in range(example_count):
-                # Créer un exemple TF avec les caractéristiques
+                # Créer un exemple TF avec les caractéristiques (incluant l'historique)
                 example = tf.train.Example(features=tf.train.Features(feature={
                     'board': tf.train.Feature(
                         bytes_list=tf.train.BytesList(value=[data['board'][i].tobytes()])),
@@ -462,24 +495,45 @@ class GCSReplayBufferSync:
         
         return example_count
     
+    def _parse_tfrecord(self, example):
+        """Parse un exemple TFRecord en dictionnaire numpy"""
+        # Définir le schéma de fonctionnalités
+        feature_description = {
+            'board': tf.io.FixedLenFeature([], tf.string),
+            'marbles_out': tf.io.FixedLenFeature([], tf.string),
+            'policy': tf.io.FixedLenFeature([], tf.string),
+            'outcome': tf.io.FixedLenFeature([], tf.int64),
+            'player': tf.io.FixedLenFeature([], tf.int64),
+            'game_id': tf.io.FixedLenFeature([], tf.int64),
+            'move_num': tf.io.FixedLenFeature([], tf.int64),
+            'iteration': tf.io.FixedLenFeature([], tf.int64),
+            'model_version': tf.io.FixedLenFeature([], tf.int64)
+        }
+        
+        parsed = tf.io.parse_single_example(example, feature_description)
+        
+        return {
+            'board': tf.io.decode_raw(parsed['board'], tf.int8).numpy().reshape(
+                self.board_size, self.board_size, self.history_size + 1),
+            'marbles_out': tf.io.decode_raw(parsed['marbles_out'], tf.int8).numpy().reshape(2),
+            'policy': tf.io.decode_raw(parsed['policy'], tf.float32).numpy().reshape(self.action_space),
+            'outcome': parsed['outcome'].numpy(),
+            'player': parsed['player'].numpy(),
+            'game_id': parsed['game_id'].numpy(),
+            'move_num': parsed['move_num'].numpy(),
+            'iteration': parsed['iteration'].numpy(),
+            'model_version': parsed['model_version'].numpy()
+        }
+
+    # Les méthodes suivantes restent identiques à votre version actuelle
     def _update_gcs_index(self, force=False):
-        """
-        Met à jour l'index des fichiers disponibles sur GCS.
-        
-        Args:
-            force: Si True, force une mise à jour complète même si récemment mise à jour
-        
-        Returns:
-            bool: True si l'index a été mis à jour avec succès
-        """
+        """Met à jour l'index des fichiers disponibles sur GCS."""
         current_time = time.time()
         
-        # Vérifier si une mise à jour est nécessaire
         if not force and (current_time - self.last_index_update) < self.index_update_interval:
-            return True  # Pas besoin de mise à jour
+            return True
         
         try:
-            # Lister tous les blobs dans le dossier buffer
             prefix = f"{self.buffer_dir}/"
             if self.verbose:
                 logger.info(f"Mise à jour de l'index GCS pour {prefix}")
@@ -487,7 +541,6 @@ class GCSReplayBufferSync:
             blobs = list(self.bucket.list_blobs(prefix=prefix))
             
             if not blobs:
-                # Vérifier si le dossier existe
                 check_blob = self.bucket.blob(f"{prefix}.placeholder")
                 if not check_blob.exists() and self.verbose:
                     logger.warning(f"Le dossier {prefix} n'existe peut-être pas")
@@ -514,19 +567,15 @@ class GCSReplayBufferSync:
                     new_index[iteration].append(path)
                     
                     try:
-                        # Format attendu: {host_id}_{timestamp}.tfrecord
                         file_basename = os.path.basename(path)
                         timestamp_part = file_basename.split('_')[-1].split('.')[0]
                         timestamp = int(timestamp_part)
                     except (IndexError, ValueError):
-                        # Fallback si format non reconnu
                         timestamp = int(blob.time_created.timestamp()) if hasattr(blob, 'time_created') else 0
                     
-                    # Récupérer le nombre d'exemples depuis les métadonnées
                     if hasattr(blob, 'metadata') and blob.metadata and 'example_count' in blob.metadata:
                         example_count = int(blob.metadata['example_count'])
                     else:
-                        # Si pas de métadonnées, estimer (sera corrigé lors du chargement)
                         example_count = 1000
                     
                     total_examples += example_count
@@ -537,9 +586,7 @@ class GCSReplayBufferSync:
                         'iteration': iteration
                     }
             
-            # Mettre à jour l'index uniquement s'il contient des données
             if tfrecord_files_found > 0:
-                # Remplacer l'index et les métadonnées
                 self.gcs_index = new_index
                 self.gcs_file_metadata = new_metadata
                 self.total_size = total_examples + self.local_size
@@ -563,37 +610,26 @@ class GCSReplayBufferSync:
         """Met à jour la taille totale du buffer en comptant les exemples dans les métadonnées"""
         total = 0
         
-        # Compter à partir des métadonnées des fichiers
         for file_path, metadata in self.gcs_file_metadata.items():
             total += metadata['size']
         
-        # Ajouter le buffer local
         total += self.local_size
-        
-        # Mettre à jour le total
         self.total_size = total
         
         return total
     
     def _cleanup_buffer(self):
-        """
-        Nettoie le buffer lorsqu'il dépasse sa taille maximale.
-        Utilise une distribution de probabilité décroissante basée sur l'âge
-        pour décider quels fichiers supprimer.
-        """
-        # Si le buffer est vide ou sous la limite, ne rien faire
+        """Nettoie le buffer lorsqu'il dépasse sa taille maximale."""
         if self.total_size <= self.max_buffer_size:
             return
         
-        # Calculer combien d'exemples doivent être supprimés
-        overflow = self.total_size - int(self.max_buffer_size * 0.8)  # Viser 80% de remplissage
+        overflow = self.total_size - int(self.max_buffer_size * 0.8)
         if overflow <= 0:
             return
         
         self.metrics["cleanup_operations"] += 1
         logger.info(f"Nettoyage du buffer: besoin de supprimer {overflow}/{self.total_size} positions")
         
-        # Collecter tous les fichiers avec leurs métadonnées
         all_files = []
         
         for iteration, files in self.gcs_index.items():
@@ -602,14 +638,11 @@ class GCSReplayBufferSync:
                     metadata = self.gcs_file_metadata[file_path]
                     all_files.append((file_path, metadata))
         
-        # Sortir si pas de fichiers
         if not all_files:
             return
         
-        # Trier par timestamp (du plus ancien au plus récent)
         all_files.sort(key=lambda x: x[1]['timestamp'])
         
-        # Normaliser les âges (0 = le plus ancien, 1 = le plus récent)
         if len(all_files) > 1:
             oldest_time = all_files[0][1]['timestamp']
             newest_time = all_files[-1][1]['timestamp']
@@ -618,17 +651,15 @@ class GCSReplayBufferSync:
             for i in range(len(all_files)):
                 file_path, metadata = all_files[i]
                 timestamp = metadata['timestamp']
-                age_normalized = 1.0 - ((timestamp - oldest_time) / time_range)  # 1 = oldest, 0 = newest
+                age_normalized = 1.0 - ((timestamp - oldest_time) / time_range)
                 all_files[i] = (file_path, metadata, age_normalized)
         else:
-            # Un seul fichier, lui donner un âge de 0.5
             file_path, metadata = all_files[0]
             all_files[0] = (file_path, metadata, 0.5)
         
         # Calculer les probabilités de suppression avec température
         probabilities = []
         for _, _, age in all_files:
-            # Plus l'âge est grand (plus ancien), plus la probabilité est élevée
             prob = math.exp(age * self.cleanup_temperature)
             probabilities.append(prob)
         
@@ -637,36 +668,30 @@ class GCSReplayBufferSync:
         if total_prob > 0:
             probabilities = [p / total_prob for p in probabilities]
         else:
-            # Fallback vers distribution uniforme
             probabilities = [1.0 / len(all_files)] * len(all_files)
         
         # Sélectionner des fichiers à supprimer jusqu'à atteindre la limite
         examples_removed = 0
         files_to_remove = []
         
-        # Créer une copie pour l'échantillonnage sans remplacement
         remaining_files = list(range(len(all_files)))
         remaining_probs = probabilities.copy()
         
         while examples_removed < overflow and remaining_files:
-            # Normaliser les probabilités restantes
             total_prob = sum(remaining_probs)
             if total_prob <= 0:
                 break
             
             norm_probs = [p / total_prob for p in remaining_probs]
             
-            # Sélectionner un fichier selon la distribution
             idx = np.random.choice(len(remaining_files), p=norm_probs)
             file_idx = remaining_files[idx]
             file_path, metadata, _ = all_files[file_idx]
             file_size = metadata['size']
             
-            # Ajouter à la liste de suppression
             files_to_remove.append(file_path)
             examples_removed += file_size
             
-            # Supprimer de la liste des candidats restants
             del remaining_files[idx]
             del remaining_probs[idx]
         
@@ -677,16 +702,13 @@ class GCSReplayBufferSync:
                 blob = self.bucket.blob(file_path)
                 blob.delete()
                 
-                # Mettre à jour l'index
                 iteration = self.gcs_file_metadata[file_path]['iteration']
                 if iteration in self.gcs_index and file_path in self.gcs_index[iteration]:
                     self.gcs_index[iteration].remove(file_path)
                     
-                    # Si cette itération n'a plus de fichiers, la supprimer de l'index
                     if not self.gcs_index[iteration]:
                         del self.gcs_index[iteration]
                 
-                # Nettoyer les métadonnées
                 if file_path in self.gcs_file_metadata:
                     del self.gcs_file_metadata[file_path]
                 
@@ -696,39 +718,8 @@ class GCSReplayBufferSync:
             except Exception as e:
                 logger.warning(f"Erreur lors de la suppression de {file_path}: {e}")
         
-        # Mettre à jour la taille totale
         self._update_total_size()
-        
         logger.info(f"Nettoyage terminé: {removed_count} fichiers supprimés, nouvelle taille: {self.total_size}")
-    
-    def _parse_tfrecord(self, example):
-        """Parse un exemple TFRecord en dictionnaire numpy"""
-        # Définir le schéma de fonctionnalités
-        feature_description = {
-            'board': tf.io.FixedLenFeature([], tf.string),
-            'marbles_out': tf.io.FixedLenFeature([], tf.string),
-            'policy': tf.io.FixedLenFeature([], tf.string),
-            'outcome': tf.io.FixedLenFeature([], tf.int64),
-            'player': tf.io.FixedLenFeature([], tf.int64),
-            'game_id': tf.io.FixedLenFeature([], tf.int64),
-            'move_num': tf.io.FixedLenFeature([], tf.int64),
-            'iteration': tf.io.FixedLenFeature([], tf.int64),
-            'model_version': tf.io.FixedLenFeature([], tf.int64)
-        }
-        
-        parsed = tf.io.parse_single_example(example, feature_description)
-        
-        return {
-            'board': tf.io.decode_raw(parsed['board'], tf.int8).numpy().reshape(self.board_size, self.board_size),
-            'marbles_out': tf.io.decode_raw(parsed['marbles_out'], tf.int8).numpy().reshape(2),
-            'policy': tf.io.decode_raw(parsed['policy'], tf.float32).numpy().reshape(self.action_space),
-            'outcome': parsed['outcome'].numpy(),
-            'player': parsed['player'].numpy(),
-            'game_id': parsed['game_id'].numpy(),
-            'move_num': parsed['move_num'].numpy(),
-            'iteration': parsed['iteration'].numpy(),
-            'model_version': parsed['model_version'].numpy()
-        }
     
     def sample(self, batch_size, rng_key=None):
         """
@@ -741,19 +732,16 @@ class GCSReplayBufferSync:
         Returns:
             Dict contenant les données échantillonnées
         """
-        # Vérifier si l'index a besoin d'être mis à jour
         current_time = time.time()
         if current_time - self.last_index_update > self.index_update_interval:
             self._update_gcs_index()
         
         has_valid_data = bool(self.gcs_index)
         
-        # Si pas de données GCS ou elles sont inaccessibles, utiliser le buffer local
         if not has_valid_data:
             if self.local_size == 0:
                 raise ValueError("Buffer vide (aucune donnée locale ni sur GCS)")
             
-            # Échantillonnage depuis le buffer local
             if rng_key is None:
                 local_indices = np.random.randint(0, self.local_size, size=batch_size)
             else:
@@ -769,7 +757,6 @@ class GCSReplayBufferSync:
             self.metrics["samples_served"] += batch_size
             return result
         
-        # Échantillonnage depuis GCS
         try:
             result = self._sample_from_gcs(batch_size, rng_key)
             self.metrics["samples_served"] += batch_size
@@ -777,7 +764,6 @@ class GCSReplayBufferSync:
         except Exception as e:
             logger.warning(f"Erreur lors de l'échantillonnage depuis GCS, fallback sur le buffer local: {e}")
             
-            # Fallback sur le buffer local si disponible
             if self.local_size > 0:
                 if rng_key is None:
                     local_indices = np.random.randint(0, self.local_size, size=batch_size)
@@ -797,28 +783,22 @@ class GCSReplayBufferSync:
             
     def _sample_from_gcs(self, n_samples, rng_key=None):
         """Échantillonne des exemples depuis GCS avec biais de récence."""
-        # Construire une distribution pour l'échantillonnage des itérations
         iterations = sorted(list(self.gcs_index.keys()))
         if not iterations:
             return {}
         
-        # Appliquer un biais de récence si activé
         if self.recency_enabled and len(iterations) > 1:
-            # Normaliser les itérations entre 0 et 1
             min_iter = min(iterations)
             max_iter = max(iterations)
             range_iter = max(1, max_iter - min_iter)
             
-            # Calculer les poids avec température
             weights = [(iter_num - min_iter) / range_iter for iter_num in iterations]
             weights = [np.exp(w * self.recency_temperature) for w in weights]
             total_weight = sum(weights)
             probs = [w / total_weight for w in weights]
         else:
-            # Distribution uniforme
             probs = [1.0 / len(iterations)] * len(iterations)
         
-        # Sélectionner les itérations
         if rng_key is None:
             selected_iters = np.random.choice(
                 iterations, 
@@ -837,7 +817,6 @@ class GCSReplayBufferSync:
             )
             selected_iters = np.array(selected_iters)
         
-        # Collecter des exemples de chaque itération sélectionnée
         all_examples = []
         examples_per_iter = n_samples // len(selected_iters) + 1
         
@@ -846,7 +825,6 @@ class GCSReplayBufferSync:
             if not files:
                 continue
             
-            # Sélectionner aléatoirement quelques fichiers pour diversité
             num_files_to_sample = min(2, len(files))
             if rng_key is None:
                 file_indices = np.random.choice(len(files), size=num_files_to_sample, replace=False)
@@ -860,33 +838,27 @@ class GCSReplayBufferSync:
                 )
                 file_indices = np.array(file_indices)
             
-            # Répartir les exemples entre les fichiers sélectionnés
             examples_per_file = examples_per_iter // num_files_to_sample + 1
             
             for file_idx in file_indices:
                 file_path = files[int(file_idx)]
                 
-                # Charger et échantillonner des exemples de ce fichier
                 try:
                     examples = self._load_examples_from_gcs(file_path, examples_per_file)
                     all_examples.extend(examples)
                     
-                    # Si nous avons assez d'exemples, arrêter l'échantillonnage
                     if len(all_examples) >= n_samples:
                         break
                 except Exception as e:
                     logger.warning(f"Erreur lors du chargement des exemples de {file_path}: {e}")
             
-            # Si nous avons assez d'exemples, arrêter l'échantillonnage
             if len(all_examples) >= n_samples:
                 break
         
-        # Gérer le cas où nous n'avons pas assez d'exemples
         if not all_examples:
             raise ValueError("Aucun exemple n'a pu être chargé depuis GCS")
             
         if len(all_examples) < n_samples:
-            # Dupliquer des exemples existants pour atteindre la taille demandée
             if all_examples:  
                 indices_to_duplicate = np.random.choice(
                     len(all_examples), size=n_samples-len(all_examples), replace=True)
@@ -894,10 +866,8 @@ class GCSReplayBufferSync:
                 for idx in indices_to_duplicate:
                     all_examples.append(all_examples[idx])
         elif len(all_examples) > n_samples:
-            # Tronquer si trop d'exemples
             all_examples = all_examples[:n_samples]
         
-        # Consolider les exemples en un seul dict
         result = {}
         for k in all_examples[0].keys():
             result[k] = np.array([ex[k] for ex in all_examples])
@@ -983,3 +953,112 @@ class GCSReplayBufferSync:
         except:
             pass
 
+def _update_buffer(self, games_data):
+    """
+    Met à jour le buffer d'expérience avec les nouvelles parties générées.
+    Version mise à jour pour supporter l'historique.
+    
+    Args:
+        games_data: Données des parties générées (contient maintenant boards_2d avec historique)
+        
+    Returns:
+        int: Nombre de positions ajoutées au buffer
+    """
+    logger.info(f"Début entrée update buffer")
+    positions_added = 0
+    
+    # Identifier si nous utilisons un buffer GCS
+    using_gcs_buffer = hasattr(self.buffer, 'flush_to_gcs')
+    
+    # Pour chaque dispositif
+    for device_idx in range(self.num_devices):
+        device_data = jax.tree_util.tree_map(
+            lambda x: x[device_idx],
+            games_data
+        )
+        
+        # Pour chaque partie générée sur ce dispositif
+        games_per_device = len(device_data['moves_per_game'])
+        for game_idx in range(games_per_device):
+            game_length = int(device_data['moves_per_game'][game_idx])
+            if game_length == 0:
+                continue
+                
+            # Extraire les données pour cette partie
+            # boards_2d contient maintenant l'historique : shape (max_moves, 9, 9, 5)
+            boards_2d_with_history = device_data['boards_2d'][game_idx][:game_length+1]
+            policies = device_data['policies'][game_idx][:game_length+1]
+            actual_players = device_data['actual_players'][game_idx][:game_length+1]
+            black_outs = device_data['black_outs'][game_idx][:game_length+1]
+            white_outs = device_data['white_outs'][game_idx][:game_length+1]
+            
+            # Déterminer le résultat final
+            final_black_out = device_data['final_black_out'][game_idx]
+            final_white_out = device_data['final_white_out'][game_idx]
+            
+            if final_black_out >= 6:
+                outcome = -1  # White wins
+            elif final_white_out >= 6:
+                outcome = 1   # Black wins
+            else:
+                outcome = 0   # Draw
+            
+            # Générer un identifiant unique pour cette partie
+            if using_gcs_buffer:
+                # Pour GCS, commencer une nouvelle partie
+                game_id = self.buffer.start_new_game()
+            else:
+                # Pour le buffer local, utiliser un nombre séquentiel
+                game_id = self.total_games + game_idx
+                
+            # Ajouter chaque position au buffer
+            for move_idx in range(game_length):
+                # Calculer les billes sorties pour le joueur courant
+                player = actual_players[move_idx]
+                our_marbles = np.where(player == 1,
+                                    black_outs[move_idx],
+                                    white_outs[move_idx])
+                opp_marbles = np.where(player == 1,
+                                    white_outs[move_idx],
+                                    black_outs[move_idx])
+                marbles_out = np.array([our_marbles, opp_marbles], dtype=np.int8)
+                
+                # Ajuster pour la perspective du joueur courant
+                outcome_for_player = outcome * player
+                
+                # Utiliser directement boards_2d_with_history qui contient déjà l'historique
+                # Shape attendue : (9, 9, 5) avec [position_actuelle, hist_t-1, hist_t-2, hist_t-3, hist_t-4]
+                board_with_history = boards_2d_with_history[move_idx]
+                
+                # Vérifier la forme attendue
+                if board_with_history.shape != (9, 9, 5):
+                    logger.warning(f"Forme inattendue pour board_with_history: {board_with_history.shape}, attendu (9, 9, 5)")
+                    continue
+                
+                # Stocker dans le buffer avec métadonnées
+                self.buffer.add(
+                    board_with_history,  # Maintenant avec historique
+                    marbles_out,
+                    policies[move_idx],
+                    outcome_for_player,
+                    player,
+                    game_id=game_id,
+                    move_num=move_idx,
+                    iteration=self.iteration,
+                    model_version=self.total_games
+                )
+                
+                positions_added += 1
+    
+    # Si buffer GCS, effectuer le flush
+    if using_gcs_buffer:
+        positions_flushed = self.buffer.flush_to_gcs()
+        if self.verbose:
+            stats = self.buffer.get_stats()
+            fill_percentage = stats["fill_percentage"]
+            logger.info(f"  {positions_flushed} positions écrites sur GCS, buffer à {fill_percentage:.1f}% de capacité")
+            
+            if stats.get("cleanup_operations", 0) > 0:
+                logger.info(f"  Nettoyage effectué: {stats['files_removed']} fichiers supprimés")
+    
+    return positions_added

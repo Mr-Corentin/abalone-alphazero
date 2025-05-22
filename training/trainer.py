@@ -1221,11 +1221,11 @@ class AbaloneTrainerSync:
                     logger.info(f"  Nettoyage effectué: {stats['files_removed']} fichiers supprimés")
         
         return positions_added
-
+    
     def _train_network(self, rng_key, num_steps):
         """
         Entraîne le réseau sur des batchs depuis le buffer.
-        Compatible avec les deux types de buffer (local et GCS).
+        Compatible avec les deux types de buffer (local et GCS) et l'historique.
 
         Args:
             rng_key: Clé aléatoire JAX
@@ -1248,9 +1248,7 @@ class AbaloneTrainerSync:
         using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
 
         # Réplication des paramètres et état d'optimisation sur les dispositifs
-        #params_sharded = jax.device_put_replicated(self.params, self.devices)
         model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
-        
         opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
 
         # Cumul des métriques pour ce processus
@@ -1284,21 +1282,30 @@ class AbaloneTrainerSync:
             rng_key = jax.random.fold_in(rng_key, step)
 
             # Préparation des données
-            boards = jnp.array(batch_data['board'])
+            # IMPORTANT: board contient maintenant l'historique avec shape (batch_size, 9, 9, 5)
+            boards_with_history = jnp.array(batch_data['board'])
             marbles = jnp.array(batch_data['marbles_out'])
             policies = jnp.array(batch_data['policy'])
             values = jnp.array(batch_data['outcome'])
 
+            # Vérifier les dimensions
+            expected_board_shape = (total_batch_size, 9, 9, 5)  # 5 canaux pour l'historique
+            if boards_with_history.shape != expected_board_shape:
+                if self.verbose:
+                    logger.warning(f"Forme inattendue pour les boards: {boards_with_history.shape}, attendu {expected_board_shape}")
+                continue
+
             # Reshaping pour distribution sur les dispositifs
-            boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
+            boards_with_history = boards_with_history.reshape(
+                self.num_devices, -1, *boards_with_history.shape[1:])
             marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
             policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
 
             # Exécution de l'étape d'entraînement
-  
+            # Le réseau attend maintenant des boards avec historique (shape: batch, 9, 9, 5)
             metrics_sharded, grads_averaged, updated_batch_stats_sharded = self.train_step_pmap(
-                model_variables_sharded, (boards, marbles), policies, values
+                model_variables_sharded, (boards_with_history, marbles), policies, values
             )
 
             # Application des mises à jour
@@ -1325,8 +1332,6 @@ class AbaloneTrainerSync:
             steps_completed += 1
 
         # Récupérer les paramètres mis à jour
-        #self.params = jax.tree.map(lambda x: x[0], params_sharded)
-        #self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
         self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
         self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
 
