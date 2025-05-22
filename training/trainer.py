@@ -185,7 +185,8 @@ class AbaloneTrainerSync:
 
         # Initialisation des paramètres et de l'état d'optimisation
         rng = jax.random.PRNGKey(42)
-        sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
+        #sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
+        sample_board = jnp.zeros((1, 9, 9, 5), dtype=jnp.int8) 
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
         # self.params = network.init(rng, sample_board, sample_marbles)
         # self.opt_state = self.optimizer.init(self.params)
