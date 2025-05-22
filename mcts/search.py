@@ -7,7 +7,7 @@ from typing import Tuple, Dict, Any
 # Importations locales
 from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel
-from core.coord_conversion import cube_to_2d
+from core.coord_conversion import cube_to_2d, prepare_input  # Import unifié
 from mcts.core import AbaloneMCTSRecurrentFn, get_root_output_batch
 
 
@@ -34,15 +34,14 @@ def run_search_batch(states: AbaloneState,
         env: Environnement du jeu
         num_simulations: Nombre de simulations MCTS
         max_num_considered_actions: Nombre maximum d'actions à considérer
-        current_iteration: Itération actuelle de l'entraînement  # AJOUT
-        total_iterations: Nombre total d'itérations prévues      # AJOUT
+        current_iteration: Itération actuelle de l'entraînement
+        total_iterations: Nombre total d'itérations prévues
         
     Returns:
         policy_output pour chaque état du batch
     """
     # Obtenir root pour le batch (maintenant avec les paramètres d'itération)
     root = get_root_output_batch(states, network, model_variables, env, current_iteration, total_iterations)
-
 
     # Obtenir les masques de mouvements légaux pour le batch
     legal_moves = jax.vmap(env.get_legal_moves)(states)
@@ -77,7 +76,7 @@ def generate_game_mcts_batch(rng_key,
                              env: AbaloneEnv,
                              batch_size: int,
                              num_simulations: int = 500,
-                             current_iteration: int = 0,      # REMPLACE shaping_factor
+                             current_iteration: int = 0,
                              total_iterations: int = 1000):   
     """
     Génère un batch de parties en utilisant MCTS pour la sélection des actions
@@ -89,7 +88,8 @@ def generate_game_mcts_batch(rng_key,
         env: Environnement du jeu
         batch_size: Nombre de parties à générer en parallèle
         num_simulations: Nombre de simulations MCTS par action
-        shaping_factor: Facteur de shaping pour les récompenses intermédiaires  # NOUVEAU
+        current_iteration: Itération actuelle de l'entraînement
+        total_iterations: Nombre total d'itérations prévues
         
     Returns:
         Données des parties générées
@@ -97,12 +97,11 @@ def generate_game_mcts_batch(rng_key,
     max_moves = 200
 
     init_states = env.reset_batch(rng_key, batch_size)
-    # MODIFIÉ: Créer l'instance avec le facteur de shaping
     recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network)
 
-    # ... (pré-allocation des buffers reste identique) ...
+    # Pré-allocation des buffers avec historique
     boards_3d = jnp.zeros((batch_size, max_moves + 1) + init_states.board.shape[1:], dtype=jnp.int8)
-    boards_2d = jnp.zeros((batch_size, max_moves + 1, 9, 9), dtype=jnp.int8)
+    boards_2d = jnp.zeros((batch_size, max_moves + 1, 9, 9, 5), dtype=jnp.int8)  # 5 canaux pour historique
     actual_players = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
     black_outs = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
     white_outs = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
@@ -110,7 +109,6 @@ def generate_game_mcts_batch(rng_key,
     policies = jnp.zeros((batch_size, max_moves + 1, env.moves_index['positions'].shape[0]), dtype=jnp.float32)
     is_terminal_states = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.bool_)
     moves_per_game = jnp.zeros(batch_size, dtype=jnp.int32)
-    batch_cube_to_2d = jax.vmap(cube_to_2d)
 
     def game_step(carry):
         states, rng, arrays, current_moves_per_game, active = carry
@@ -125,17 +123,30 @@ def generate_game_mcts_batch(rng_key,
         )
 
         rng, search_rng = jax.random.split(rng)
-        search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations, current_iteration= current_iteration, total_iterations = total_iterations)
+        search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations, current_iteration=current_iteration, total_iterations=total_iterations)
         next_states = jax.vmap(env.step)(states, search_outputs.action)
 
-        # ... (logique de stockage reste identique mais utilise les variables renommées pour la clarté) ...
+        # Stockage des données avec historique
         new_boards_3d_arr = boards_3d_arr.at[jnp.arange(batch_size), current_moves_per_game].set(
              jnp.where(active[:, None, None, None], states.board, boards_3d_arr[jnp.arange(batch_size), current_moves_per_game])
         )
-        current_boards_2d = batch_cube_to_2d(states.board)
+        
+        # Calculer les billes sorties pour prepare_input
+        our_marbles = jnp.where(states.actual_player == 1,
+                                states.black_out,
+                                states.white_out)
+        opp_marbles = jnp.where(states.actual_player == 1,
+                                states.white_out,
+                                states.black_out)
+
+        # Utiliser prepare_input avec l'historique (résultat: batch, 9, 9, 5)
+        current_boards_2d, _ = prepare_input(states.board, states.history , states.actual_player,states.actual_player, our_marbles, opp_marbles)
+        
+        # CORRECTION: Masque avec 4 dimensions pour boards_2d (batch, 9, 9, 5)
         new_boards_2d_arr = boards_2d_arr.at[jnp.arange(batch_size), current_moves_per_game].set(
-            jnp.where(active[:, None, None], current_boards_2d, boards_2d_arr[jnp.arange(batch_size), current_moves_per_game])
+            jnp.where(active[:, None, None, None], current_boards_2d, boards_2d_arr[jnp.arange(batch_size), current_moves_per_game])
         )
+        
         new_actual_players_arr = actual_players_arr.at[jnp.arange(batch_size), current_moves_per_game].set(
             jnp.where(active, states.actual_player, actual_players_arr[jnp.arange(batch_size), current_moves_per_game])
         )
@@ -154,8 +165,10 @@ def generate_game_mcts_batch(rng_key,
                                 policies_arr[jnp.arange(batch_size), current_moves_per_game]))
         )
 
+        # Construction du prochain état avec historique
         final_next_states = AbaloneState(
             board=jnp.where(active_games[:, None, None, None], next_states.board, states.board),
+            history=jnp.where(active_games[:, None, None, None, None], next_states.history, states.history),
             actual_player=jnp.where(active_games, next_states.actual_player, states.actual_player),
             black_out=jnp.where(active_games, next_states.black_out, states.black_out),
             white_out=jnp.where(active_games, next_states.white_out, states.white_out),
@@ -181,7 +194,7 @@ def generate_game_mcts_batch(rng_key,
         (init_states, rng_key, arrays_init, moves_per_game, initial_active)
     )
     
-    # ... (extraction et essential_data reste identique) ...
+    # Extraction et préparation des données essentielles
     _, final_boards_2d, final_actual_players, final_black_outs, final_white_outs, final_moves_counts, final_policies, final_terminal_states = final_arrays_loop
     
     essential_data = {
@@ -210,9 +223,8 @@ def generate_parallel_games_pmap(rngs,
     """
     Version pmappée de generate_game_mcts_batch pour paralléliser sur plusieurs devices
     """
-    # MODIFIÉ: Passer shaping_factor ET model_variables
     return generate_game_mcts_batch(rngs, model_variables, network, env, batch_size_per_device, 
-                                   num_simulations=500,  current_iteration=current_iteration,   
+                                   num_simulations=500, current_iteration=current_iteration,   
                                    total_iterations=total_iterations)
 
 
@@ -222,7 +234,6 @@ def create_optimized_game_generator(num_simulations: int = 500):
     
     Args:
         num_simulations: Nombre de simulations MCTS par action
-        initial_shaping_factor: Facteur initial pour le reward shaping  # NOUVEAU
     """
     
     @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
@@ -235,7 +246,6 @@ def create_optimized_game_generator(num_simulations: int = 500):
                                       total_iterations: int = 1000): 
         """Version optimisée avec lax.scan et filtrage des parties terminées"""
 
-        # MODIFIÉ: Créer l'instance avec le facteur de shaping
         recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network)
 
         def game_step(carry, _):
@@ -247,7 +257,17 @@ def create_optimized_game_generator(num_simulations: int = 500):
 
             search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations, current_iteration=current_iteration, total_iterations=total_iterations)
             next_states = jax.vmap(env.step)(states, search_outputs.action)
-            current_boards_2d = jax.vmap(cube_to_2d)(states.board)
+            
+            # Calculer les billes sorties pour prepare_input
+            our_marbles = jnp.where(states.actual_player == 1,
+                                    states.black_out,
+                                    states.white_out)
+            opp_marbles = jnp.where(states.actual_player == 1,
+                                    states.white_out,
+                                    states.black_out)
+
+            # Utiliser prepare_input avec l'historique
+            current_boards_2d, _ = prepare_input(states.board, states.history,states.actual_player, our_marbles, opp_marbles)
             
             batch_indices = jnp.arange(batch_size_per_device)
             move_indices = current_moves_per_game
@@ -279,6 +299,7 @@ def create_optimized_game_generator(num_simulations: int = 500):
             # Mettre à jour states pour le prochain tour seulement pour les parties actives
             final_next_states = AbaloneState(
                 board=jnp.where(active_games[:, None, None, None], next_states.board, states.board),
+                history=jnp.where(active_games[:, None, None, None, None], next_states.history, states.history),
                 actual_player=jnp.where(active_games, next_states.actual_player, states.actual_player),
                 black_out=jnp.where(active_games, next_states.black_out, states.black_out),
                 white_out=jnp.where(active_games, next_states.white_out, states.white_out),
@@ -290,7 +311,7 @@ def create_optimized_game_generator(num_simulations: int = 500):
         init_states = env.reset_batch(rng_key, batch_size_per_device)
         max_moves = 200
         game_data_init = {
-            'boards_2d': jnp.zeros((batch_size_per_device, max_moves, 9, 9), dtype=jnp.int8),
+            'boards_2d': jnp.zeros((batch_size_per_device, max_moves, 9, 9, 5), dtype=jnp.int8),  # 5 canaux
             'policies': jnp.zeros((batch_size_per_device, max_moves, env.moves_index['positions'].shape[0]), dtype=jnp.float32),
             'actual_players': jnp.zeros((batch_size_per_device, max_moves), dtype=jnp.int32),
             'black_outs': jnp.zeros((batch_size_per_device, max_moves), dtype=jnp.int32),
