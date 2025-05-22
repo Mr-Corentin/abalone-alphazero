@@ -9,7 +9,7 @@ DEFAULT_CONFIG = {
     },
     
     "mcts": {
-        "num_simulations": 800,
+        "num_simulations": 8,
         "max_num_considered_actions": 16,
     },
     
@@ -19,19 +19,24 @@ DEFAULT_CONFIG = {
         "value_weight": 1.0,
         "games_per_device": 8,
         "games_per_iteration": 64,
-        "training_steps_per_iteration": 100,
+        "training_steps_per_iteration": 1,
         "num_iterations": 100,
     },
     
+    # "optimizer": {
+    #     "initial_lr": 0.2,
+    #     "momentum": 0.9,
+    #     "lr_schedule": [
+    #         (0.0, 0.2),      
+    #         (0.3, 0.02),     
+    #         (0.6, 0.002),   
+    #         (0.85, 0.0002)   
+    #     ]
+    # },
     "optimizer": {
-        "initial_lr": 0.2,
+        "initial_lr": 0.001,
         "momentum": 0.9,
-        "lr_schedule": [
-            (0.0, 0.2),      
-            (0.3, 0.02),     
-            (0.6, 0.002),   
-            (0.85, 0.0002)   
-        ]
+        "lr_schedule": None 
     },
 
     "buffer": {

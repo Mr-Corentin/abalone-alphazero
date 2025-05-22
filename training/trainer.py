@@ -45,7 +45,7 @@ class AbaloneTrainerSync:
             num_simulations=500,
             recency_bias=True,
             recency_temperature=0.8,
-            initial_lr=0.2,
+            initial_lr=0.001,
             momentum=0.9,
             lr_schedule=None,
             checkpoint_path="checkpoints/model",
@@ -120,30 +120,44 @@ class AbaloneTrainerSync:
         self.eval_games = eval_games
 
         # Configuration du taux d'apprentissage et de l'optimiseur
+        # self.initial_lr = initial_lr
+        # self.current_lr = initial_lr
+        # self.momentum = momentum
+
         self.initial_lr = initial_lr
         self.current_lr = initial_lr
         self.momentum = momentum
+        self.lr_schedule = lr_schedule 
 
 
         # Planning AlphaZero par défaut si non spécifié
-        if lr_schedule is None:
-            self.lr_schedule = [
-                (0.0, initial_lr),      # Début
-                (0.3, initial_lr/10),   # Premier palier: 0.2 -> 0.02
-                (0.6, initial_lr/100),  # Deuxième palier: 0.02 -> 0.002
-                (0.85, initial_lr/1000) # Troisième palier: 0.002 -> 0.0002
-            ]
-        else:
-            self.lr_schedule = lr_schedule
+        # if lr_schedule is None:
+        #     self.lr_schedule = [
+        #         (0.0, initial_lr),      # Début
+        #         (0.3, initial_lr/10),   # Premier palier: 0.2 -> 0.02
+        #         (0.6, initial_lr/100),  # Deuxième palier: 0.02 -> 0.002
+        #         (0.85, initial_lr/1000) # Troisième palier: 0.002 -> 0.0002
+        #     ]
+        # else:
+        #     self.lr_schedule = lr_schedule
             
+        # if self.verbose:
+        #     logger.info(f"Optimizer: SGD+momentum")
+        #     logger.info(f"Initial learning rate: {self.initial_lr}, Momentum: {self.momentum}")
+        #     logger.info(f"Learning rate schedule: {self.lr_schedule}")
+        #     if self.recency_bias:
+        #         logger.info(f"Using recency bias with temperature {self.recency_temperature}")
+        #     else:
+        #         logger.info("Using uniform sampling")
+
         if self.verbose:
             logger.info(f"Optimizer: SGD+momentum")
-            logger.info(f"Initial learning rate: {self.initial_lr}, Momentum: {self.momentum}")
-            logger.info(f"Learning rate schedule: {self.lr_schedule}")
-            if self.recency_bias:
-                logger.info(f"Using recency bias with temperature {self.recency_temperature}")
+            logger.info(f"Learning rate: {self.initial_lr} (fixe)")
+            logger.info(f"Momentum: {self.momentum}")
+            if self.lr_schedule:
+                logger.info(f"Learning rate schedule: {self.lr_schedule}")
             else:
-                logger.info("Using uniform sampling")
+                logger.info("Pas de scheduling de learning rate")
 
         # Initialisation du buffer
         if use_gcs_buffer and gcs_bucket:
@@ -355,7 +369,8 @@ class AbaloneTrainerSync:
 
     def _update_learning_rate(self, iteration_percentage):
         """
-        Met à jour le taux d'apprentissage selon le planning défini
+        Met à jour le taux d'apprentissage selon le planning défini.
+        Version simplifiée qui peut être complètement désactivée.
 
         Args:
             iteration_percentage: Pourcentage de progression de l'entraînement [0.0, 1.0]
@@ -363,9 +378,12 @@ class AbaloneTrainerSync:
         Returns:
             Nouveau taux d'apprentissage
         """
-        # Trouver le taux d'apprentissage approprié pour le pourcentage d'itération actuel
-        new_lr = self.initial_lr  # Valeur par défaut
-
+        # Si pas de schedule, garder le LR fixe
+        if self.lr_schedule is None:
+            return self.current_lr
+        
+        # Sinon, utiliser l'ancien système de scheduling
+        new_lr = self.initial_lr
         for threshold, lr in self.lr_schedule:
             if iteration_percentage >= threshold:
                 new_lr = lr
@@ -374,6 +392,7 @@ class AbaloneTrainerSync:
             if self.verbose:
                 logger.info(f"Learning rate updated: {self.current_lr} -> {new_lr}")
             self.current_lr = new_lr
+            
             # Log GCS : changement learning rate
             if self.gcs_logger:
                 self.gcs_logger.log_learning_rate_update(self.iteration, self.current_lr, new_lr)
@@ -395,6 +414,7 @@ class AbaloneTrainerSync:
             )
 
         return new_lr
+
     
 
     def _setup_jax_functions(self):
