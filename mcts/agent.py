@@ -11,15 +11,17 @@ from mcts.search import run_search_batch
 
 
 
+
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
 def get_best_move(state: AbaloneState,
-                  model_variables: dict, # MODIFIÉ: params -> model_variables
+                  model_variables: dict,
                   network: AbaloneModel,
                   env: AbaloneEnv,
                   num_simulations: int = 600,
-                  rng_key: jax.random.PRNGKey = None): # Bonne pratique: type hint pour rng_key
+                  rng_key: jax.random.PRNGKey = None):
     """
     Obtient le meilleur coup à jouer dans un état donné selon MCTS+réseau.
+    Version corrigée pour l'historique.
     """
 
     if rng_key is None:
@@ -27,7 +29,8 @@ def get_best_move(state: AbaloneState,
     recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network)
 
     batch_state = AbaloneState(
-        board=state.board[None, ...],
+        board=state.board[None, ...],           # Shape: (1, x, y, z)
+        history=state.history[None, ...],       # ← AJOUT: Shape: (1, 4, x, y, z)
         actual_player=jnp.array([state.actual_player]),
         black_out=jnp.array([state.black_out]),
         white_out=jnp.array([state.white_out]),
@@ -59,25 +62,14 @@ def get_move_probabilities(state: AbaloneState,
                            temperature: float = 1.0):
     """
     Retourne les probabilités des coups selon MCTS+réseau.
-    Utile pour l'apprentissage ou pour sélectionner un coup de manière stochastique.
-    
-    Args:
-        state: État actuel du jeu
-        model_variables: Dictionnaire {'params': ..., 'batch_stats': ...}
-        network: Modèle réseau
-        env: Environnement du jeu
-        rng_key: Clé aléatoire JAX pour la recherche MCTS
-        num_simulations: Nombre de simulations MCTS
-        temperature: Température pour contrôler l'exploration
-        
-    Returns:
-        Distribution de probabilité sur les coups possibles
+    Version corrigée pour l'historique.
     """
 
     recurrent_fn_instance = AbaloneMCTSRecurrentFn(env, network)
     
     batch_state = AbaloneState(
-        board=state.board[None, ...],
+        board=state.board[None, ...],          
+        history=state.history[None, ...],       
         actual_player=jnp.array([state.actual_player]),
         black_out=jnp.array([state.black_out]),
         white_out=jnp.array([state.white_out]),
@@ -106,7 +98,6 @@ def get_move_probabilities(state: AbaloneState,
     
     return move_probs
 
-
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations', 'temperature'])
 def sample_move(state: AbaloneState,
                 model_variables: dict,
@@ -117,19 +108,6 @@ def sample_move(state: AbaloneState,
                 temperature: float = 1.0):
     """
     Échantillonne un coup selon la distribution de probabilité MCTS.
-    Cette fonction est maintenant JIT-compilée.
-
-    Args:
-        state: État actuel du jeu (Pytree, tracé par JIT)
-        model_variables: Dictionnaire {'params': ..., 'batch_stats': ...} (Pytree de JAX arrays, tracé)
-        network: Modèle réseau (statique)
-        env: Environnement du jeu (statique)
-        rng_key: Clé aléatoire JAX (JAX array, tracé)
-        num_simulations: Nombre de simulations MCTS (statique)
-        temperature: Température pour contrôler l'exploration (statique)
-
-    Returns:
-        Index du coup échantillonné
     """
 
     mcts_rng_key, choice_rng_key = jax.random.split(rng_key)
