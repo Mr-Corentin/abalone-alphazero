@@ -427,8 +427,8 @@ class AbaloneTrainerSync:
             model_variables_sharded['batch_stats']  # tiled=False par défaut
         )
         
-        synced_params = jax.tree_map(lambda x: jnp.mean(x, axis=0), all_params)
-        synced_batch_stats = jax.tree_map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
+        synced_params = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_params)
+        synced_batch_stats = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
         
         model_variables_sharded['params'] = synced_params
         model_variables_sharded['batch_stats'] = synced_batch_stats
