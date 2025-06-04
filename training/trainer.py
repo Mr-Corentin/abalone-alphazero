@@ -415,6 +415,27 @@ class AbaloneTrainerSync:
             )
 
         return new_lr
+    
+    def _sync_model_across_workers(self, model_variables_sharded):
+        """
+        Synchronise les paramètres du modèle entre tous les workers.
+        Version simplifiée avec les vraies fonctions JAX.
+        """
+        all_params = jax.experimental.multihost_utils.process_allgather(
+            model_variables_sharded['params'], tiled=True
+        )
+        all_batch_stats = jax.experimental.multihost_utils.process_allgather(
+            model_variables_sharded['batch_stats'], tiled=True
+        )
+   
+        synced_params = jax.tree_map(lambda x: jnp.mean(x, axis=0), all_params)
+        synced_batch_stats = jax.tree_map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
+        
+        model_variables_sharded['params'] = synced_params
+        model_variables_sharded['batch_stats'] = synced_batch_stats
+        
+        if self.verbose:
+            logger.info(f"Processus {self.process_id}: Modèle synchronisé avec tous les workers")
 
     
 
@@ -453,319 +474,6 @@ class AbaloneTrainerSync:
             axis_name='devices',
             devices=self.devices
         )
-
-    # def train(self, num_iterations=100, games_per_iteration=64,
-    #         training_steps_per_iteration=100, save_frequency=10):
-    #     """
-    #     Démarre l'entraînement avec approche synchronisée par étapes.
-    #     L'évaluation est maintenant déclenchée par les checkpoints de référence.
-
-    #     Args:
-    #         num_iterations: Nombre total d'itérations
-    #         games_per_iteration: Nombre de parties à générer par itération
-    #         training_steps_per_iteration: Nombre d'étapes d'entraînement par itération
-    #         save_frequency: Fréquence de sauvegarde régulière (en itérations)
-    #     """
-    #     # Initialiser le timer global
-    #     start_time_global = time.time()
-
-    #     # Initialiser la clé aléatoire spécifique au processus
-    #     seed_base = 42
-    #     process_specific_seed = seed_base + (self.process_id * 1000)
-    #     rng_key = jax.random.PRNGKey(process_specific_seed)
-
-    #     # Déterminer les itérations de référence pour tout l'entraînement
-    #     from evaluation.models_evaluator import generate_evaluation_checkpoints
-    #     self.reference_iterations = generate_evaluation_checkpoints(num_iterations)
-        
-    #     if self.verbose:
-    #         logger.info(f"Itérations de référence planifiées: {self.reference_iterations}")
-    #         logger.info(f"Évaluation {'activée' if self.eval_enabled else 'désactivée'}")
-        
-    #     # Log initial pour chaque processus
-    #     logger.info(f"Processus {self.process_id}: Démarrage de l'entraînement")
-
-    #     try:
-    #         for iteration in range(num_iterations):
-    #             self.iteration = iteration
-    #             iter_start_time = time.time()
-                
-    #             logger.info(f"Processus {self.process_id}: Début itération {iteration+1}")
-
-    #             # Mettre à jour le taux d'apprentissage selon le planning
-    #             iteration_percentage = iteration / num_iterations
-    #             self._update_learning_rate(iteration_percentage)
-    #             self._update_shaping_factor(iteration, num_iterations)
-                
-    #             if self.verbose:
-    #                 logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
-                
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_iteration_start(iteration, num_iterations)
-
-    #             # Synchronisation au début de l'itération
-    #             jax.experimental.multihost_utils.sync_global_devices(f"iter_{iteration}_start")
-    #             logger.info(f"Processus {self.process_id}: Synchronisé au début de l'itération {iteration+1}")
-
-    #             # 1. Phase de génération
-    #             gen_start_time = time.time()
-    #             logger.info(f"Processus {self.process_id}: Début génération pour itération {iteration+1}")
-
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_generation_start(iteration, games_per_iteration)
-                
-    #             rng_key, gen_key = jax.random.split(rng_key)
-    #             t_start = time.time()
-    #             games_data = self._generate_games(gen_key, games_per_iteration)
-    #             t_gen = time.time() - t_start
-
-    #             logger.info(f"Processus {self.process_id}: Fin génération pour itération {iteration+1} en {t_gen:.2f}s")
-                
-    #             if self.verbose:
-    #                 logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
-
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_generation_end(iteration, t_gen, games_per_iteration)
-
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_worker_generation(
-    #                     iteration, self.process_id, t_gen, 
-    #                     games_per_iteration, 
-    #                     0  # On mettra le vrai nombre après update_buffer
-    #                 )
-    #                 self.gcs_logger.log_generation_end(iteration, t_gen, games_per_iteration)
-    #             # 2. Mise à jour du buffer
-    #             logger.info(f"Processus {self.process_id}: En attente de synchronisation post-génération")
-    #             jax.experimental.multihost_utils.sync_global_devices(f"post_generation_iter_{iteration}")
-    #             logger.info(f"Processus {self.process_id}: Synchronisation post-génération terminée")
-                
-    #             buffer_start_time = time.time()
-    #             logger.info(f"Processus {self.process_id}: Début mise à jour buffer pour itération {iteration+1}")
-                
-    #             t_start = time.time()
-    #             positions_added = self._update_buffer(games_data)
-    #             t_buffer = time.time() - t_start
-    #             self.total_positions += positions_added
-
-    #             logger.info(f"Processus {self.process_id}: Fin mise à jour buffer pour itération {iteration+1} en {t_buffer:.2f}s")
-
-    #             # Afficher les infos du buffer
-    #             if self.verbose:
-    #                 if hasattr(self.buffer, 'gcs_index'):
-    #                     # Buffer GCS
-    #                     logger.info(f"Buffer mis à jour: +{positions_added} positions")
-    #                     logger.info(f"  - Cache local: {self.buffer.local_size} positions")
-    #                     logger.info(f"  - Total estimé: {self.buffer.total_size} positions")
-    #                 else:
-    #                     # Buffer local
-    #                     logger.info(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
-                        
-    #             # COLLECTE DES MÉTRIQUES DE GÉNÉRATION DE TOUS LES WORKERS
-    #             generation_metrics = {
-    #                 'duration': t_gen,
-    #                 'games_generated': games_per_iteration,
-    #                 'positions_added': positions_added
-    #             }
-
-    #             # Synchroniser et collecter
-    #             jax.experimental.multihost_utils.sync_global_devices(f"collect_generation_metrics_iter_{iteration}")
-    #             all_generation_info = self._collect_worker_metrics("generation", generation_metrics)
-
-    #             # LOG CENTRALISÉ (seulement le processus principal)
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_generation_start(iteration, games_per_iteration * self.num_processes)
-    #                 self._log_all_workers_generation(iteration, all_generation_info)
-                    
-    #                 # Log global
-    #                 total_games = sum(w['games_generated'] for w in all_generation_info) if all_generation_info else 0
-    #                 total_duration = max(w['duration'] for w in all_generation_info) if all_generation_info else t_gen
-    #                 self.gcs_logger.log_generation_end(iteration, total_duration, total_games)
-
-
-    #             # Synchronisation après la mise à jour du buffer
-    #             jax.experimental.multihost_utils.sync_global_devices(f"post_buffer_update_iter_{iteration}")
-    #             logger.info(f"Processus {self.process_id}: Synchronisé après mise à jour buffer")
-
-    #             # 3. Phase d'entraînement
-    #             train_start_time = time.time()
-    #             logger.info(f"Processus {self.process_id}: Début entraînement pour itération {iteration+1}")
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_training_start(iteration, training_steps_per_iteration)
-                
-    #             rng_key, train_key = jax.random.split(rng_key)
-    #             t_start = time.time()
-    #             metrics = self._train_network(train_key, training_steps_per_iteration)
-    #             t_train = time.time() - t_start
-
-    #             training_metrics = {
-    #                 'duration': t_train,
-    #                 'steps_completed': training_steps_per_iteration,
-    #                 'total_loss': metrics.get('total_loss', 0.0)
-    #             }
-
-    #             # Synchroniser et collecter
-    #             jax.experimental.multihost_utils.sync_global_devices(f"collect_training_metrics_iter_{iteration}")
-    #             all_training_info = self._collect_worker_metrics("training", training_metrics)
-
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_training_start(iteration, training_steps_per_iteration)
-    #                 self._log_all_workers_training(iteration, all_training_info)
-                    
-    #                 # Log global (utiliser les métriques du processus principal)
-    #                 self.gcs_logger.log_training_end(iteration, t_train, metrics)
-                
-    #             logger.info(f"Processus {self.process_id}: Fin entraînement pour itération {iteration+1} en {t_train:.2f}s")
-                
-    #             if self.verbose:
-    #                 logger.info(f"Entraînement: {training_steps_per_iteration} étapes en {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} étapes/s)")
-    #                 logger.info(f"  Perte totale: {metrics['total_loss']:.4f}")
-    #                 logger.info(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
-    #                 logger.info(f"  Précision politique: {metrics['policy_accuracy']}%")
-    #             # Synchronisation après l'entraînement
-    #             jax.experimental.multihost_utils.sync_global_devices(f"post_training_iter_{iteration}")
-    #             logger.info(f"Processus {self.process_id}: Synchronisé après entraînement")
-
-    #             # 4. Gestion des checkpoints de référence
-    #             if iteration in self.reference_iterations:
-    #                 # TOUS les processus entrent dans ce bloc
-    #                 logger.info(f"Processus {self.process_id}: Traitement checkpoint de référence pour itération {iteration+1}")
-                    
-    #                 if self.is_main_process:
-    #                     if self.verbose:
-    #                         logger.info(f"\nItération {iteration}: Checkpoint de référence détecté")
-                        
-    #                     # Sauvegarder le modèle de référence (seulement le processus principal)
-    #                     self._save_checkpoint(is_reference=True)
-    #                     logger.info(f"Processus {self.process_id}: Sauvegarde checkpoint de référence terminée")
-                    
-    #                 # Synchroniser TOUS les processus après la sauvegarde
-    #                 logger.info(f"Processus {self.process_id}: En attente de synchronisation post-checkpoint")
-    #                 jax.experimental.multihost_utils.sync_global_devices(f"post_checkpoint_save_iter_{iteration}")
-    #                 logger.info(f"Processus {self.process_id}: Synchronisé après sauvegarde checkpoint")
-                    
-    #                 # Évaluer si activé et pas à l'itération 0
-    #                 if self.eval_enabled and iteration > 0:
-    #                     # TOUS les processus participent à l'évaluation
-    #                     eval_start = time.time()
-    #                     if self.verbose:
-    #                         logger.info("Évaluation déclenchée par nouveau modèle de référence...")
-                        
-    #                     logger.info(f"Processus {self.process_id}: Début évaluation pour itération {iteration+1}")
-                        
-    #                     # Appeler l'évaluation pour TOUS les processus
-    #                     self.evaluate_against_previous_models(num_iterations)
-                        
-    #                     eval_time = time.time() - eval_start
-    #                     logger.info(f"Processus {self.process_id}: Fin évaluation pour itération {iteration+1} en {eval_time:.2f}s")
-                        
-    #                     if self.verbose:
-    #                         logger.info(f"Évaluation terminée en {eval_time:.2f}s")
-                
-    #             # 5. Sauvegarde périodique standard (non-référence)
-    #             elif save_frequency > 0 and (iteration + 1) % save_frequency == 0:
-    #                 logger.info(f"Processus {self.process_id}: Traitement sauvegarde périodique pour itération {iteration+1}")
-                    
-    #                 if self.is_main_process:
-    #                     # Sauvegarde normale (pas un checkpoint de référence)
-    #                     if self.verbose:
-    #                         logger.info("\nSauvegarde périodique du checkpoint...")
-    #                     self._save_checkpoint(is_reference=False)
-    #                     logger.info(f"Processus {self.process_id}: Sauvegarde périodique terminée")
-                    
-    #                 # Synchroniser tous les processus après la sauvegarde
-    #                 logger.info(f"Processus {self.process_id}: En attente de synchronisation post-sauvegarde")
-    #                 jax.experimental.multihost_utils.sync_global_devices(f"post_regular_checkpoint_iter_{iteration}")
-    #                 logger.info(f"Processus {self.process_id}: Synchronisé après sauvegarde périodique")
-
-    #             # IMPORTANT: Synchronisation à la fin de chaque itération
-    #             iter_time = time.time() - iter_start_time
-    #             logger.info(f"Processus {self.process_id}: Itération {iteration+1} terminée en {iter_time:.2f}s")
-    #             if self.gcs_logger:
-    #                 self.gcs_logger.log_iteration_end(iteration, iter_time)
-
-    #             logger.info(f"Processus {self.process_id}: En attente de synchronisation fin d'itération")
-    #             jax.experimental.multihost_utils.sync_global_devices(f"end_of_iteration_{iteration}")
-    #             logger.info(f"Processus {self.process_id}: Synchronisé à la fin de l'itération {iteration+1}")
-
-    #         # Sauvegarde finale
-    #         final_is_reference = (num_iterations - 1) in self.reference_iterations
-    #         logger.info(f"Processus {self.process_id}: Préparation de la fin de l'entraînement")
-            
-    #         if self.is_main_process:
-    #             self._save_checkpoint(is_final=True, is_reference=final_is_reference)
-    #             logger.info(f"Processus {self.process_id}: Sauvegarde finale terminée")
-            
-    #         # Synchroniser avant la fin
-    #         logger.info(f"Processus {self.process_id}: En attente de synchronisation finale")
-    #         jax.experimental.multihost_utils.sync_global_devices("post_final_save")
-    #         logger.info(f"Processus {self.process_id}: Synchronisation finale terminée")
-                
-    #         if self.metrics_history and self.is_main_process:
-    #             final_metrics = self.metrics_history[-1]
-                
-    #             # Métriques d'entraînement
-    #             training_metrics = {k: v for k, v in final_metrics.items() 
-    #                             if k in ['total_loss', 'policy_loss', 'value_loss', 
-    #                                     'policy_accuracy', 'value_sign_match']}
-    #             self._log_metrics_to_tensorboard(training_metrics, "training")
-                
-    #             # Taux d'apprentissage
-    #             self._log_metrics_to_tensorboard({"learning_rate": self.current_lr}, "training")
-                
-    #             # Statistiques du buffer et des parties
-    #             buffer_stats = {}
-    #             if hasattr(self.buffer, 'gcs_index'):
-    #                 buffer_stats["buffer_size_total"] = self.buffer.total_size
-    #                 buffer_stats["buffer_size_local"] = self.buffer.local_size
-    #             else:
-    #                 buffer_stats["buffer_size"] = self.buffer.size
-                
-    #             buffer_stats["total_games_local"] = self.total_games
-    #             buffer_stats["total_games_global"] = self.total_games * self.num_processes
-    #             self._log_metrics_to_tensorboard(buffer_stats, "stats")
-                
-    #             eval_metrics = {k: v for k, v in final_metrics.items() 
-    #                         if k.startswith('win_rate_vs_iter_') or k == 'avg_win_rate_vs_prev'}
-    #             if eval_metrics:
-    #                 self._log_metrics_to_tensorboard(eval_metrics, "eval_vs_prev")
-
-    #     finally:
-    #         logger.info(f"Processus {self.process_id}: Finalisation des ressources")
-    #         jax.experimental.multihost_utils.sync_global_devices("pre_close_resources")
-    #         logger.info(f"Processus {self.process_id}: Synchronisation finale des ressources terminée")
-            
-    #         if self.is_main_process:
-    #             self.writer.close()
-    #             logger.info(f"Processus {self.process_id}: TensorBoard writer fermé")
-
-    #         if self.gcs_logger:
-    #             final_stats = {
-    #                 "total_iterations": num_iterations,
-    #                 "total_games": self.total_games,
-    #                 "total_positions": self.total_positions,
-    #                 "final_metrics": self.metrics_history[-1] if self.metrics_history else {},
-    #                 "training_duration": time.time() - start_time_global
-    #             }
-    #             self.gcs_logger.create_summary(final_stats)
-    #             self.gcs_logger.close()
-
-    #         if self.save_games and hasattr(self, 'game_logger'):
-    #             self.game_logger.stop()
-    #             logger.info(f"Processus {self.process_id}: Game logger arrêté")
-
-    #         if hasattr(self.buffer, 'close'):
-    #             logger.info(f"Processus {self.process_id}: Fermeture du buffer")
-    #             self.buffer.close()
-    #             logger.info(f"Processus {self.process_id}: Buffer fermé")
-
-    #         total_time = time.time() - start_time_global
-    #         logger.info(f"Processus {self.process_id}: Entraînement terminé en {total_time:.2f}s")
-            
-    #         if self.verbose:
-    #             logger.info(f"\n=== Entraînement terminé ===")
-    #             logger.info(f"Parties générées: {self.total_games}")
-    #             logger.info(f"Positions totales: {self.total_positions}")
-    #             logger.info(f"Durée totale: {total_time:.1f}s ({num_iterations/total_time:.2f} itérations/s)")
 
     def train(self, num_iterations=100, games_per_iteration=64,
             training_steps_per_iteration=100, save_frequency=10):
@@ -1352,7 +1060,17 @@ class AbaloneTrainerSync:
                 
             steps_completed += 1
 
-        # Récupérer les paramètres mis à jour
+
+        logger.info(f"Processus {self.process_id}: Synchronisation du modèle après entraînement")
+        jax.experimental.multihost_utils.sync_global_devices(f"pre_model_sync_iter_{self.iteration}")
+
+        # Synchroniser les paramètres du modèle
+        self._sync_model_across_workers(model_variables_sharded)
+
+        jax.experimental.multihost_utils.sync_global_devices(f"post_model_sync_iter_{self.iteration}")
+        logger.info(f"Processus {self.process_id}: Synchronisation terminée")
+
+        # Récupérer les paramètres mis à jour (maintenant synchronisés)
         self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
         self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
 
