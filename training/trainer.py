@@ -418,24 +418,23 @@ class AbaloneTrainerSync:
     
     def _sync_model_across_workers(self, model_variables_sharded):
         """
-        Synchronise les paramètres du modèle entre tous les workers.
-        Version simplifiée avec les vraies fonctions JAX.
+        Synchronise en moyennant CORRECTEMENT tous les workers.
         """
         all_params = jax.experimental.multihost_utils.process_allgather(
-            model_variables_sharded['params'], tiled=True
+            model_variables_sharded['params']  # tiled=False par défaut
         )
         all_batch_stats = jax.experimental.multihost_utils.process_allgather(
-            model_variables_sharded['batch_stats'], tiled=True
+            model_variables_sharded['batch_stats']  # tiled=False par défaut
         )
-   
-        synced_params = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_params)
-        synced_batch_stats = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
+        
+        synced_params = jax.tree_map(lambda x: jnp.mean(x, axis=0), all_params)
+        synced_batch_stats = jax.tree_map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
         
         model_variables_sharded['params'] = synced_params
         model_variables_sharded['batch_stats'] = synced_batch_stats
         
         if self.verbose:
-            logger.info(f"Processus {self.process_id}: Modèle synchronisé avec tous les workers")
+            logger.info(f"Processus {self.process_id}: Modèle moyenné avec tous les workers")
 
     
 
