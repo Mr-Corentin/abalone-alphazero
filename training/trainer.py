@@ -435,6 +435,21 @@ class AbaloneTrainerSync:
         
         if self.verbose:
             logger.info(f"Processus {self.process_id}: Modèle moyenné avec tous les workers")
+            
+            # Log batch stats synchronization for debugging
+            if hasattr(self, 'iteration') and self.iteration % 10 == 0:
+                # Sample a batch stat to monitor synchronization
+                first_batch_stat = jax.tree_util.tree_leaves(synced_batch_stats)[0]
+                if len(first_batch_stat.shape) > 0:
+                    logger.info(f"Batch stats sample après sync: mean={float(jnp.mean(first_batch_stat)):.4f}, std={float(jnp.std(first_batch_stat)):.4f}")
+
+    def _sync_optimizer_state(self, opt_state_sharded):
+        """
+        Synchronise l'état de l'optimiseur entre workers pour éviter la divergence.
+        """
+        all_opt_states = jax.experimental.multihost_utils.process_allgather(opt_state_sharded)
+        synced_opt_state = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_opt_states)
+        return synced_opt_state
 
     
 
@@ -542,6 +557,21 @@ class AbaloneTrainerSync:
                 # Synchronisation au début de l'itération
                 jax.experimental.multihost_utils.sync_global_devices(f"iter_{iteration}_start")
                 logger.info(f"Processus {self.process_id}: Synchronisé au début de l'itération {iteration+1}")
+
+                # CRITIQUE: Synchroniser les modèles AVANT la génération
+                if iteration > 0:  # Pas besoin pour la première itération
+                    logger.info(f"Processus {self.process_id}: Synchronisation des modèles avant génération")
+                    
+                    # Répliquer les paramètres actuels sur tous les devices
+                    model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
+                    
+                    # Synchroniser entre tous les workers
+                    self._sync_model_across_workers(model_variables_sharded)
+                    
+                    # Récupérer les paramètres synchronisés
+                    self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
+                    
+                    logger.info(f"Processus {self.process_id}: Modèles synchronisés avant génération")
 
                 # 1. Phase de génération
                 logger.info(f"Processus {self.process_id}: Début génération pour itération {iteration+1}")
@@ -1063,8 +1093,9 @@ class AbaloneTrainerSync:
         logger.info(f"Processus {self.process_id}: Synchronisation du modèle après entraînement")
         jax.experimental.multihost_utils.sync_global_devices(f"pre_model_sync_iter_{self.iteration}")
 
-        # Synchroniser les paramètres du modèle
+        # Synchroniser les paramètres du modèle ET l'état de l'optimiseur
         self._sync_model_across_workers(model_variables_sharded)
+        opt_state_sharded = self._sync_optimizer_state(opt_state_sharded)
 
         jax.experimental.multihost_utils.sync_global_devices(f"post_model_sync_iter_{self.iteration}")
         logger.info(f"Processus {self.process_id}: Synchronisation terminée")
