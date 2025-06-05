@@ -193,6 +193,23 @@ class AbaloneTrainerSync:
         self.model_variables = network.init(rng, sample_board, sample_marbles, train=True)
         self.opt_state = self.optimizer.init(self.model_variables['params'])
 
+        # NOUVEAU: Synchroniser les batch stats entre tous les workers après initialisation
+        # pour éviter la divergence initiale des statistiques BatchNorm
+        if self.num_processes > 1:
+            if self.verbose:
+                logger.info(f"Processus {self.process_id}: Synchronisation initiale des batch stats entre {self.num_processes} workers")
+            
+            # Attendre que tous les processus aient initialisé leur modèle
+            jax.experimental.multihost_utils.sync_global_devices("post_model_init")
+            
+            # Répliquer et synchroniser les model_variables (params + batch_stats)
+            model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
+            self._sync_model_across_workers(model_variables_sharded)
+            self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
+            
+            if self.verbose:
+                logger.info(f"Processus {self.process_id}: Batch stats synchronisés - tous les workers ont maintenant des statistiques identiques")
+
         # Statistiques
         self.iteration = 0
         self.total_games = 0
@@ -400,7 +417,7 @@ class AbaloneTrainerSync:
 
             # Créer un nouvel optimiseur avec écrêtage de gradient
             self.optimizer = optax.chain(
-                optax.clip_by_global_norm(1.0),
+                optax.clip_by_global_norm(10.0),  # Augmenté de 1.0 à 5.0 pour permettre des mises à jour plus importantes
                 optax.sgd(learning_rate=self.current_lr, momentum=self.momentum)
             )
 
@@ -463,7 +480,7 @@ class AbaloneTrainerSync:
 
         # Ajouter l'écrêtage de gradient à l'optimiseur
         self.optimizer = optax.chain(
-            optax.clip_by_global_norm(1.0),  # Limiter la norme du gradient à 1.0
+            optax.clip_by_global_norm(10.0),  # Augmenté de 1.0 à 5.0 pour permettre des mises à jour plus importantes
             optax.sgd(learning_rate=self.current_lr, momentum=self.momentum)
         )
 
@@ -899,7 +916,7 @@ class AbaloneTrainerSync:
         
         # Pour chaque dispositif
         for device_idx in range(self.num_devices):
-            device_data = jax.tree_util.tree_map(
+            device_data = jax.tree_util.tree.map(
                 lambda x: x[device_idx],
                 games_data
             )
