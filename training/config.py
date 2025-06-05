@@ -20,7 +20,7 @@ DEFAULT_CONFIG = {
         "games_per_device": 8,
         "games_per_iteration": 64,
         "training_steps_per_iteration": 100,
-        "num_iterations": 100,
+        "num_iterations": 200,
     },
     
     # "optimizer": {
