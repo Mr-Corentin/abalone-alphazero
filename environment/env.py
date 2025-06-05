@@ -22,7 +22,7 @@ from functools import partial
 class AbaloneState(NamedTuple):
     """État du jeu d'Abalone (version canonique)"""
     board: chex.Array  # Le plateau où le joueur courant est toujours 1
-    history: chex.Array  # 4 dernières positions (4, 9, 9, 9) - canoniques aussi
+    history: chex.Array  # 8 dernières positions (8, 9, 9, 9) - canoniques aussi
     actual_player: int  # Le joueur réel (1=noir, -1=blanc)
     black_out: int  # Nombre de billes noires sorties
     white_out: int  # Nombre de billes blanches sorties
@@ -41,12 +41,12 @@ class AbaloneEnv:
         
         # Initialiser l'historique avec la même structure que le board (y compris les NaN)
         # mais avec toutes les positions valides à 0
-        history_shape = (4,) + board.shape
+        history_shape = (8,) + board.shape
         valid_mask = create_board_mask(self.radius)
         
         # Créer l'historique : NaN pour positions invalides, 0 pour positions valides
         single_history_layer = jnp.where(valid_mask, 0.0, jnp.nan)
-        history = jnp.repeat(single_history_layer[None, ...], 4, axis=0)
+        history = jnp.repeat(single_history_layer[None, ...], 8, axis=0)
         
         return AbaloneState(
             board=board,
@@ -70,12 +70,12 @@ class AbaloneEnv:
         # Initialiser l'historique pour le batch avec la même logique
         valid_mask = create_board_mask(self.radius)
         single_history_layer = jnp.where(valid_mask, 0.0, jnp.nan)
-        single_history = jnp.repeat(single_history_layer[None, ...], 4, axis=0)
+        single_history = jnp.repeat(single_history_layer[None, ...], 8, axis=0)
         histories = jnp.repeat(single_history[None, ...], batch_size, axis=0)
 
         return AbaloneState(
             board=boards,  # shape: (batch_size, size, size, size)
-            history=histories,  # shape: (batch_size, 4, size, size, size)
+            history=histories,  # shape: (batch_size, 8, size, size, size)
             actual_player=jnp.ones(batch_size, dtype=jnp.int32),
             black_out=jnp.zeros(batch_size, dtype=jnp.int32),
             white_out=jnp.zeros(batch_size, dtype=jnp.int32),
@@ -262,7 +262,7 @@ class AbaloneEnvNonCanonical(AbaloneEnv):
         board = initialize_board()  # Noir=1, blanc=-1
         
         # Pour l'instant, historique vide pour la version non-canonique
-        history_shape = (4,) + board.shape
+        history_shape = (8,) + board.shape
         history = jnp.zeros(history_shape, dtype=board.dtype)
         
         return AbaloneStateNonCanonical(

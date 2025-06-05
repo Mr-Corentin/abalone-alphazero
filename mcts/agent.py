@@ -30,7 +30,7 @@ def get_best_move(state: AbaloneState,
 
     batch_state = AbaloneState(
         board=state.board[None, ...],           # Shape: (1, x, y, z)
-        history=state.history[None, ...],       # ← AJOUT: Shape: (1, 4, x, y, z)
+        history=state.history[None, ...],       # ← AJOUT: Shape: (1, 8, x, y, z)
         actual_player=jnp.array([state.actual_player]),
         black_out=jnp.array([state.black_out]),
         white_out=jnp.array([state.white_out]),

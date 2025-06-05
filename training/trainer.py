@@ -1040,14 +1040,14 @@ class AbaloneTrainerSync:
             rng_key = jax.random.fold_in(rng_key, step)
 
             # Préparation des données
-            # IMPORTANT: board contient maintenant l'historique avec shape (batch_size, 9, 9, 5)
+            # IMPORTANT: board contient maintenant l'historique avec shape (batch_size, 9, 9, 9)
             boards_with_history = jnp.array(batch_data['board'])
             marbles = jnp.array(batch_data['marbles_out'])
             policies = jnp.array(batch_data['policy'])
             values = jnp.array(batch_data['outcome'])
 
             # Vérifier les dimensions
-            expected_board_shape = (total_batch_size, 9, 9, 5)  # 5 canaux pour l'historique
+            expected_board_shape = (total_batch_size, 9, 9, 9)  # 9 canaux pour l'historique
             if boards_with_history.shape != expected_board_shape:
                 if self.verbose:
                     logger.warning(f"Forme inattendue pour les boards: {boards_with_history.shape}, attendu {expected_board_shape}")
@@ -1061,7 +1061,7 @@ class AbaloneTrainerSync:
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
 
             # Exécution de l'étape d'entraînement
-            # Le réseau attend maintenant des boards avec historique (shape: batch, 9, 9, 5)
+            # Le réseau attend maintenant des boards avec historique (shape: batch, 9, 9, 9)
             metrics_sharded, grads_averaged, updated_batch_stats_sharded = self.train_step_pmap(
                 model_variables_sharded, (boards_with_history, marbles), policies, values
             )

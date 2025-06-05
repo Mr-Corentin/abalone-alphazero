@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger("alphazero.buffer")
 
 class CPUReplayBuffer:
-    def __init__(self, capacity, board_size=9, history_size=4, action_space=1734):
+    def __init__(self, capacity, board_size=9, history_size=8, action_space=1734):
         self.capacity = capacity
         self.size = 0
         self.position = 0
@@ -43,7 +43,7 @@ class CPUReplayBuffer:
         Ajoute une transition individuelle au buffer
         
         Args:
-            board_with_history: Plateau avec historique, shape (9, 9, 5) - [actuel + 4 historiques]
+            board_with_history: Plateau avec historique, shape (9, 9, 9) - [actuel + 8 historiques]
             marbles_out: Billes sorties [2]
             policy: Politique [1734]
             outcome: Résultat de la partie
@@ -202,7 +202,7 @@ class GCSReplayBufferSync:
                 max_buffer_size: int = 20_000_000,
                 buffer_cleanup_threshold: float = 0.95,
                 board_size: int = 9,
-                history_size: int = 4,
+                history_size: int = 8,
                 action_space: int = 1734,
                 recency_enabled: bool = True,
                 recency_temperature: float = 0.8,
@@ -218,7 +218,7 @@ class GCSReplayBufferSync:
             max_buffer_size: Taille maximale du buffer global (en nombre de positions)
             buffer_cleanup_threshold: Seuil de remplissage déclenchant le nettoyage (entre 0 et 1)
             board_size: Taille du plateau (par défaut: 9 pour Abalone 2D)
-            history_size: Taille de l'historique (par défaut: 4)
+            history_size: Taille de l'historique (par défaut: 8)
             action_space: Nombre d'actions possibles
             recency_enabled: Activer l'échantillonnage avec biais de récence
             recency_temperature: Température pour le biais de récence pour l'échantillonnage
@@ -293,7 +293,7 @@ class GCSReplayBufferSync:
         Ajoute une transition individuelle au buffer
         
         Args:
-            board_with_history: Plateau avec historique, shape (9, 9, 5) - [actuel + 4 historiques]
+            board_with_history: Plateau avec historique, shape (9, 9, 9) - [actuel + 8 historiques]
             marbles_out: Billes sorties [2]
             policy: Politique [1734]
             outcome: Résultat de la partie
@@ -985,7 +985,7 @@ def _update_buffer(self, games_data):
                 continue
                 
             # Extraire les données pour cette partie
-            # boards_2d contient maintenant l'historique : shape (max_moves, 9, 9, 5)
+            # boards_2d contient maintenant l'historique : shape (max_moves, 9, 9, 9)
             boards_2d_with_history = device_data['boards_2d'][game_idx][:game_length+1]
             policies = device_data['policies'][game_idx][:game_length+1]
             actual_players = device_data['actual_players'][game_idx][:game_length+1]
@@ -1027,12 +1027,12 @@ def _update_buffer(self, games_data):
                 outcome_for_player = outcome * player
                 
                 # Utiliser directement boards_2d_with_history qui contient déjà l'historique
-                # Shape attendue : (9, 9, 5) avec [position_actuelle, hist_t-1, hist_t-2, hist_t-3, hist_t-4]
+                # Shape attendue : (9, 9, 9) avec [position_actuelle, hist_t-1, hist_t-2, ..., hist_t-8]
                 board_with_history = boards_2d_with_history[move_idx]
                 
                 # Vérifier la forme attendue
-                if board_with_history.shape != (9, 9, 5):
-                    logger.warning(f"Forme inattendue pour board_with_history: {board_with_history.shape}, attendu (9, 9, 5)")
+                if board_with_history.shape != (9, 9, 9):
+                    logger.warning(f"Forme inattendue pour board_with_history: {board_with_history.shape}, attendu (9, 9, 9)")
                     continue
                 
                 # Stocker dans le buffer avec métadonnées

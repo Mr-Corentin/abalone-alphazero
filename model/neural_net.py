@@ -32,21 +32,21 @@ class AbaloneModel(nn.Module):
         Forward pass du réseau avec support de l'historique
         
         Args:
-            board: Plateau avec historique, shape (batch, 9, 9, 5)
+            board: Plateau avec historique, shape (batch, 9, 9, 9)
                    Canal 0: Position actuelle
-                   Canaux 1-4: Historique (du plus récent au plus ancien)
+                   Canaux 1-8: Historique (du plus récent au plus ancien)
             marbles_out: Billes sorties, shape (batch, 2)
             train: Mode entraînement pour BatchNorm
         """
         # Normalisation et reshape des entrées
         marbles_out = marbles_out.reshape(-1, 2) / 6.0  # Normalise à [0,1]
         
-        # Board contient déjà l'historique avec 5 canaux : (batch, 9, 9, 5)
+        # Board contient déjà l'historique avec 9 canaux : (batch, 9, 9, 9)
         # Plus besoin d'ajouter une dimension avec [..., None]
         board = board.astype(jnp.float32)
-        x = board  # Shape: (batch, 9, 9, 5)
+        x = board  # Shape: (batch, 9, 9, 9)
 
-        # Tronc commun - la première convolution prend maintenant 5 canaux
+        # Tronc commun - la première convolution prend maintenant 9 canaux
         # Séquence : Conv -> BatchNorm -> ReLU
         x = nn.Conv(self.num_filters, (3, 3), padding='SAME', use_bias=False)(x)
         x = nn.BatchNorm(use_running_average=not train, momentum=0.9)(x)
