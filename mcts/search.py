@@ -101,7 +101,7 @@ def generate_game_mcts_batch(rng_key,
 
     # Pré-allocation des buffers avec historique
     boards_3d = jnp.zeros((batch_size, max_moves + 1) + init_states.board.shape[1:], dtype=jnp.int8)
-    boards_2d = jnp.zeros((batch_size, max_moves + 1, 9, 9, 5), dtype=jnp.int8)  # 5 canaux pour historique
+    boards_2d = jnp.zeros((batch_size, max_moves + 1, 9, 9, 9), dtype=jnp.int8)  # 9 canaux pour historique
     actual_players = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
     black_outs = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
     white_outs = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
@@ -311,7 +311,7 @@ def create_optimized_game_generator(num_simulations: int = 500):
         init_states = env.reset_batch(rng_key, batch_size_per_device)
         max_moves = 200
         game_data_init = {
-            'boards_2d': jnp.zeros((batch_size_per_device, max_moves, 9, 9, 5), dtype=jnp.int8),  # 5 canaux
+            'boards_2d': jnp.zeros((batch_size_per_device, max_moves, 9, 9, 9), dtype=jnp.int8),  # 9 canaux
             'policies': jnp.zeros((batch_size_per_device, max_moves, env.moves_index['positions'].shape[0]), dtype=jnp.float32),
             'actual_players': jnp.zeros((batch_size_per_device, max_moves), dtype=jnp.int32),
             'black_outs': jnp.zeros((batch_size_per_device, max_moves), dtype=jnp.int32),
