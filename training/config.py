@@ -9,7 +9,7 @@ DEFAULT_CONFIG = {
     },
     
     "mcts": {
-        "num_simulations": 800,
+        "num_simulations": 200,
         "max_num_considered_actions": 16,
     },
     
@@ -19,8 +19,8 @@ DEFAULT_CONFIG = {
         "value_weight": 1.0,
         "games_per_device": 8,
         "games_per_iteration": 64,
-        "training_steps_per_iteration": 100,
-        "num_iterations": 200,
+        "training_steps_per_iteration": 10,
+        "num_iterations": 60,
     },
     
     # "optimizer": {
