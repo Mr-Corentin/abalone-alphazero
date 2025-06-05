@@ -916,7 +916,7 @@ class AbaloneTrainerSync:
         
         # Pour chaque dispositif
         for device_idx in range(self.num_devices):
-            device_data = jax.tree_util.tree.map(
+            device_data = jax.tree_util.tree_map(
                 lambda x: x[device_idx],
                 games_data
             )
