@@ -436,29 +436,33 @@ class AbaloneTrainerSync:
     def _sync_model_across_workers(self, model_variables_sharded):
         """
         Synchronise en moyennant CORRECTEMENT tous les workers.
+        Gère les cas avec et sans BatchNorm.
         """
         all_params = jax.experimental.multihost_utils.process_allgather(
             model_variables_sharded['params']  # tiled=False par défaut
         )
-        all_batch_stats = jax.experimental.multihost_utils.process_allgather(
-            model_variables_sharded['batch_stats']  # tiled=False par défaut
-        )
-        
         synced_params = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_params)
-        synced_batch_stats = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
-        
         model_variables_sharded['params'] = synced_params
-        model_variables_sharded['batch_stats'] = synced_batch_stats
+        
+        # Synchroniser batch_stats seulement si elles existent (BatchNorm activé)
+        if 'batch_stats' in model_variables_sharded:
+            all_batch_stats = jax.experimental.multihost_utils.process_allgather(
+                model_variables_sharded['batch_stats']  # tiled=False par défaut
+            )
+            synced_batch_stats = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
+            model_variables_sharded['batch_stats'] = synced_batch_stats
         
         if self.verbose:
             logger.info(f"Processus {self.process_id}: Modèle moyenné avec tous les workers")
             
-            # Log batch stats synchronization for debugging
-            if hasattr(self, 'iteration') and self.iteration % 10 == 0:
+            # Log batch stats synchronization for debugging (only if BatchNorm is enabled)
+            if hasattr(self, 'iteration') and self.iteration % 10 == 0 and 'batch_stats' in model_variables_sharded:
                 # Sample a batch stat to monitor synchronization
-                first_batch_stat = jax.tree_util.tree_leaves(synced_batch_stats)[0]
+                first_batch_stat = jax.tree_util.tree_leaves(model_variables_sharded['batch_stats'])[0]
                 if len(first_batch_stat.shape) > 0:
                     logger.info(f"Batch stats sample après sync: mean={float(jnp.mean(first_batch_stat)):.4f}, std={float(jnp.std(first_batch_stat)):.4f}")
+            elif hasattr(self, 'iteration') and self.iteration % 10 == 0:
+                logger.info(f"BatchNorm désactivé - synchronisation des paramètres uniquement")
 
     def _sync_optimizer_state(self, opt_state_sharded):
         """
