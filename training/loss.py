@@ -68,22 +68,20 @@ def train_step_pmap_impl(model_variables: Dict[str, Any], # MODIFIÉ: Prend mode
 
     # La fonction de perte interne pour jax.value_and_grad.
     # Elle est différenciée par rapport à `current_params`.
-    # `model_variables['batch_stats']` est capturé par la closure.
     def loss_fn_for_grad(current_params: Dict[str, Any]):
-        # Préparer les variables pour l'appel à network.apply
-        variables_for_apply = {'params': current_params, 'batch_stats': model_variables['batch_stats']}
+        # Préparer les variables pour l'appel à network.apply (sans batch_stats car BatchNorm désactivée)
+        variables_for_apply = {'params': current_params}
         board_states, marbles_states = inputs
 
-        # Appel au réseau avec train=True et gestion de la mutabilité des batch_stats
-        (predicted_policies, predicted_values), updated_model_state = network.apply(
+        # Appel au réseau avec train=True (pas de batch_stats à muter)
+        predicted_policies, predicted_values = network.apply(
             variables_for_apply,
             board_states,
             marbles_states,
-            train=True,           # Crucial pour l'entraînement
-            mutable=['batch_stats'] # Pour mettre à jour les batch_stats
+            train=True           # Crucial pour l'entraînement
         )
-        # Récupérer les batch_stats mises à jour
-        new_batch_stats = updated_model_state['batch_stats']
+        # Pas de batch_stats à récupérer (BatchNorm désactivée)
+        new_batch_stats = {}
 
         # Utiliser la fonction refactorée pour calculer les pertes et métriques
         total_loss, metrics_tuple = calculate_losses_and_metrics(
@@ -98,18 +96,18 @@ def train_step_pmap_impl(model_variables: Dict[str, Any], # MODIFIÉ: Prend mode
             'policy_accuracy': metrics_tuple[2],
             'value_sign_accuracy': metrics_tuple[3] # Nom corrigé pour correspondre à votre code original
         }
-        # Retourner la perte totale et, en auxiliaire, les nouvelles batch_stats et les métriques
-        return total_loss, (new_batch_stats, metrics_dict)
+        # Retourner la perte totale et les métriques (pas de batch_stats)
+        return total_loss, ({}, metrics_dict)
 
     # Calculer la perte, les gradients (par rapport à current_params, donc model_variables['params'])
-    # et les sorties auxiliaires (new_batch_stats, metrics_dict).
+    # et les sorties auxiliaires (metrics_dict).
     (loss_value, (updated_batch_stats, metrics)), grads = jax.value_and_grad(
         loss_fn_for_grad, has_aux=True
     )(model_variables['params']) # On passe seulement les params ici pour la différentiation
 
-    # Synchronisation (moyennage) des gradients, des métriques et des batch_stats sur les devices
+    # Synchronisation (moyennage) des gradients et des métriques sur les devices
     grads = jax.lax.pmean(grads, axis_name='devices')
     metrics = jax.lax.pmean(metrics, axis_name='devices') # Moyenner aussi les métriques
-    updated_batch_stats = jax.lax.pmean(updated_batch_stats, axis_name='devices')
+    updated_batch_stats = {} # Pas de batch_stats à moyenner
 
     return metrics, grads, updated_batch_stats # Retourner les batch_stats mises à jour

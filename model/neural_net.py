@@ -5,18 +5,18 @@ from functools import partial
 from typing import Tuple, Any 
 
 class ResBlock(nn.Module):
-    """Bloc résiduel avec Batch Normalization"""
+    """Bloc résiduel sans Batch Normalization"""
     filters: int
-    train: bool # Ajouter l'argument train pour contrôler la BatchNorm
+    train: bool # Gardé pour compatibilité
 
     @nn.compact
     def __call__(self, x):
-        # Séquence : Conv -> BatchNorm -> ReLU
-        y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=False)(x)
+        # Séquence : Conv -> ReLU (sans BatchNorm)
+        y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=True)(x)
         # y = nn.BatchNorm(use_running_average=not self.train, momentum=0.9)(y)  # TEMPORARILY DISABLED
         y = nn.relu(y)
 
-        y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=False)(y)
+        y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=True)(y)
         # y = nn.BatchNorm(use_running_average=not self.train, momentum=0.9)(y)  # TEMPORARILY DISABLED
         output = nn.relu(x + y)
         return output
@@ -47,8 +47,8 @@ class AbaloneModel(nn.Module):
         x = board  # Shape: (batch, 9, 9, 9)
 
         # Tronc commun - la première convolution prend maintenant 9 canaux
-        # Séquence : Conv -> BatchNorm -> ReLU
-        x = nn.Conv(self.num_filters, (3, 3), padding='SAME', use_bias=False)(x)
+        # Séquence : Conv -> ReLU (sans BatchNorm)
+        x = nn.Conv(self.num_filters, (3, 3), padding='SAME', use_bias=True)(x)
         # x = nn.BatchNorm(use_running_average=not train, momentum=0.9)(x)  # TEMPORARILY DISABLED
         x = nn.relu(x)
 

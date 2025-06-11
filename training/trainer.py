@@ -191,24 +191,36 @@ class AbaloneTrainerSync:
         # self.params = network.init(rng, sample_board, sample_marbles)
         # self.opt_state = self.optimizer.init(self.params)
         self.model_variables = network.init(rng, sample_board, sample_marbles, train=True)
+        
+        # Ensure model_variables has the correct structure for compatibility
+        # When BatchNorm is disabled, Flax might only return 'params'
+        if isinstance(self.model_variables, dict) and 'params' not in self.model_variables:
+            # If init returned params directly (old Flax behavior)
+            self.model_variables = {'params': self.model_variables}
+        elif not isinstance(self.model_variables, dict):
+            # If init returned something else, wrap it
+            self.model_variables = {'params': self.model_variables}
+        
+        # No need to add empty batch_stats since BatchNorm is disabled
+        
         self.opt_state = self.optimizer.init(self.model_variables['params'])
 
-        # NOUVEAU: Synchroniser les batch stats entre tous les workers après initialisation
-        # pour éviter la divergence initiale des statistiques BatchNorm
+        # NOUVEAU: Synchroniser les paramètres entre tous les workers après initialisation
+        # (plus de batch_stats car BatchNorm désactivée)
         if self.num_processes > 1:
             if self.verbose:
-                logger.info(f"Processus {self.process_id}: Synchronisation initiale des batch stats entre {self.num_processes} workers")
+                logger.info(f"Processus {self.process_id}: Synchronisation initiale des paramètres entre {self.num_processes} workers")
             
             # Attendre que tous les processus aient initialisé leur modèle
             jax.experimental.multihost_utils.sync_global_devices("post_model_init")
             
-            # Répliquer et synchroniser les model_variables (params + batch_stats)
+            # Répliquer et synchroniser les model_variables (params seulement)
             model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
             self._sync_model_across_workers(model_variables_sharded)
             self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
             
             if self.verbose:
-                logger.info(f"Processus {self.process_id}: Batch stats synchronisés - tous les workers ont maintenant des statistiques identiques")
+                logger.info(f"Processus {self.process_id}: Paramètres synchronisés - tous les workers ont maintenant des paramètres identiques")
 
         # Statistiques
         self.iteration = 0
@@ -455,13 +467,8 @@ class AbaloneTrainerSync:
         if self.verbose:
             logger.info(f"Processus {self.process_id}: Modèle moyenné avec tous les workers")
             
-            # Log batch stats synchronization for debugging (only if BatchNorm is enabled)
-            if hasattr(self, 'iteration') and self.iteration % 10 == 0 and 'batch_stats' in model_variables_sharded:
-                # Sample a batch stat to monitor synchronization
-                first_batch_stat = jax.tree_util.tree_leaves(model_variables_sharded['batch_stats'])[0]
-                if len(first_batch_stat.shape) > 0:
-                    logger.info(f"Batch stats sample après sync: mean={float(jnp.mean(first_batch_stat)):.4f}, std={float(jnp.std(first_batch_stat)):.4f}")
-            elif hasattr(self, 'iteration') and self.iteration % 10 == 0:
+            # BatchNorm désactivée - pas de batch stats à monitorer
+            if hasattr(self, 'iteration') and self.iteration % 10 == 0:
                 logger.info(f"BatchNorm désactivé - synchronisation des paramètres uniquement")
 
     def _sync_optimizer_state(self, opt_state_sharded):
@@ -1094,11 +1101,11 @@ class AbaloneTrainerSync:
             )
             params_sharded = jax.tree.map(lambda p, u: p + u, params_sharded, updates)
 
-            # Reconstruire model_variables_sharded
+            # Reconstruire model_variables_sharded (sans batch_stats car BatchNorm désactivée)
             model_variables_sharded = {
-                'params': params_sharded,
-                'batch_stats': updated_batch_stats_sharded
+                'params': params_sharded
             }
+            # BatchNorm désactivée - pas de batch_stats à gérer
 
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
@@ -1290,9 +1297,11 @@ class AbaloneTrainerSync:
         else:
             # Ancien format avec params seulement - créer la structure model_variables
             self.model_variables = {
-                'params': checkpoint['params'],
-                'batch_stats': checkpoint.get('batch_stats', {})
+                'params': checkpoint['params']
             }
+            # Ajouter batch_stats seulement si elles existent dans le checkpoint
+            if 'batch_stats' in checkpoint:
+                self.model_variables['batch_stats'] = checkpoint['batch_stats']
         
         self.opt_state = checkpoint['opt_state']
         self.iteration = checkpoint['iteration']
