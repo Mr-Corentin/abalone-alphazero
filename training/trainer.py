@@ -185,28 +185,12 @@ class AbaloneTrainerSync:
 
         # Initialisation des paramètres et de l'état d'optimisation
         rng = jax.random.PRNGKey(42)
-        #sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_board = jnp.zeros((1, 9, 9, 9), dtype=jnp.int8) 
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
-        # self.params = network.init(rng, sample_board, sample_marbles)
-        # self.opt_state = self.optimizer.init(self.params)
-        self.model_variables = network.init(rng, sample_board, sample_marbles, train=True)
-        
-        # Ensure model_variables has the correct structure for compatibility
-        # When BatchNorm is disabled, Flax might only return 'params'
-        if isinstance(self.model_variables, dict) and 'params' not in self.model_variables:
-            # If init returned params directly (old Flax behavior)
-            self.model_variables = {'params': self.model_variables}
-        elif not isinstance(self.model_variables, dict):
-            # If init returned something else, wrap it
-            self.model_variables = {'params': self.model_variables}
-        
-        # No need to add empty batch_stats since BatchNorm is disabled
-        
-        self.opt_state = self.optimizer.init(self.model_variables['params'])
+        self.params = network.init(rng, sample_board, sample_marbles)
+        self.opt_state = self.optimizer.init(self.params)
 
-        # NOUVEAU: Synchroniser les paramètres entre tous les workers après initialisation
-        # (plus de batch_stats car BatchNorm désactivée)
+        # Synchroniser les paramètres entre tous les workers après initialisation
         if self.num_processes > 1:
             if self.verbose:
                 logger.info(f"Processus {self.process_id}: Synchronisation initiale des paramètres entre {self.num_processes} workers")
@@ -214,10 +198,10 @@ class AbaloneTrainerSync:
             # Attendre que tous les processus aient initialisé leur modèle
             jax.experimental.multihost_utils.sync_global_devices("post_model_init")
             
-            # Répliquer et synchroniser les model_variables (params seulement)
-            model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
-            self._sync_model_across_workers(model_variables_sharded)
-            self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
+            # Répliquer et synchroniser les paramètres
+            params_sharded = jax.device_put_replicated(self.params, self.devices)
+            self._sync_params_across_workers(params_sharded)
+            self.params = jax.tree.map(lambda x: x[0], params_sharded)
             
             if self.verbose:
                 logger.info(f"Processus {self.process_id}: Paramètres synchronisés - tous les workers ont maintenant des paramètres identiques")
@@ -437,7 +421,7 @@ class AbaloneTrainerSync:
             )
 
             # Réinitialiser l'état de l'optimiseur
-            self.opt_state = self.optimizer.init(self.model_variables['params'])
+            self.opt_state = self.optimizer.init(self.params)
 
             # Mettre à jour les fonctions JAX qui utilisent l'optimiseur
             self.optimizer_update_pmap = jax.pmap(
@@ -448,31 +432,18 @@ class AbaloneTrainerSync:
 
         return new_lr
     
-    def _sync_model_across_workers(self, model_variables_sharded):
+    def _sync_params_across_workers(self, params_sharded):
         """
-        Synchronise en moyennant CORRECTEMENT tous les workers.
-        Gère les cas avec et sans BatchNorm.
+        Synchronise en moyennant les paramètres de tous les workers.
         """
         all_params = jax.experimental.multihost_utils.process_allgather(
-            model_variables_sharded['params']  # tiled=False par défaut
+            params_sharded  # tiled=False par défaut
         )
         synced_params = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_params)
-        model_variables_sharded['params'] = synced_params
-        
-        # Synchroniser batch_stats seulement si elles existent (BatchNorm activé)
-        if 'batch_stats' in model_variables_sharded:
-            all_batch_stats = jax.experimental.multihost_utils.process_allgather(
-                model_variables_sharded['batch_stats']  # tiled=False par défaut
-            )
-            synced_batch_stats = jax.tree.map(lambda x: jnp.mean(x, axis=0), all_batch_stats)
-            model_variables_sharded['batch_stats'] = synced_batch_stats
+        params_sharded = synced_params
         
         if self.verbose:
-            logger.info(f"Processus {self.process_id}: Modèle moyenné avec tous les workers")
-            
-            # BatchNorm désactivée - pas de batch stats à monitorer
-            if hasattr(self, 'iteration') and self.iteration % 10 == 0:
-                logger.info(f"BatchNorm désactivé - synchronisation des paramètres uniquement")
+            logger.info(f"Processus {self.process_id}: Paramètres moyennés avec tous les workers")
 
     def _sync_optimizer_state(self, opt_state_sharded):
         """
@@ -499,7 +470,7 @@ class AbaloneTrainerSync:
         )
 
         # Réinitialiser l'état de l'optimiseur
-        self.opt_state = self.optimizer.init(self.model_variables['params'])
+        self.opt_state = self.optimizer.init(self.params)
 
         # Configurer les fonctions de traitement parallèle
         self.train_step_pmap = jax.pmap(
@@ -594,13 +565,13 @@ class AbaloneTrainerSync:
                     logger.info(f"Processus {self.process_id}: Synchronisation des modèles avant génération")
                     
                     # Répliquer les paramètres actuels sur tous les devices
-                    model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
+                    params_sharded = jax.device_put_replicated(self.params, self.devices)
                     
                     # Synchroniser entre tous les workers
-                    self._sync_model_across_workers(model_variables_sharded)
+                    self._sync_params_across_workers(params_sharded)
                     
                     # Récupérer les paramètres synchronisés
-                    self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
+                    self.params = jax.tree.map(lambda x: x[0], params_sharded)
                     
                     logger.info(f"Processus {self.process_id}: Modèles synchronisés avant génération")
 
@@ -880,7 +851,7 @@ class AbaloneTrainerSync:
         sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
 
         # Répliquer les paramètres sur les dispositifs locaux
-        sharded_model_variables = jax.device_put_replicated(self.model_variables, self.devices)
+        sharded_params = jax.device_put_replicated(self.params, self.devices)
         
         # NOUVEAU: Répliquer l'itération actuelle et totale
         sharded_current_iteration = jax.device_put_replicated(self.iteration, self.devices)
@@ -889,7 +860,7 @@ class AbaloneTrainerSync:
         # Génération des parties avec les paramètres d'itération
         games_data_pmap = self.generate_games_pmap(
             sharded_rngs,
-            sharded_model_variables,
+            sharded_params,
             self.network,
             self.env,
             batch_size_per_device,
@@ -1075,7 +1046,7 @@ class AbaloneTrainerSync:
         using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
 
         # Réplication des paramètres et état d'optimisation sur les dispositifs
-        model_variables_sharded = jax.device_put_replicated(self.model_variables, self.devices)
+        params_sharded = jax.device_put_replicated(self.params, self.devices)
         opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
 
         # Cumul des métriques pour ce processus
@@ -1131,22 +1102,15 @@ class AbaloneTrainerSync:
 
             # Exécution de l'étape d'entraînement
             # Le réseau attend maintenant des boards avec historique (shape: batch, 9, 9, 9)
-            metrics_sharded, grads_averaged, updated_batch_stats_sharded = self.train_step_pmap(
-                model_variables_sharded, (boards_with_history, marbles), policies, values
+            metrics_sharded, grads_averaged = self.train_step_pmap(
+                params_sharded, (boards_with_history, marbles), policies, values
             )
 
             # Application des mises à jour
-            params_sharded = model_variables_sharded['params']  
             updates, opt_state_sharded = self.optimizer_update_pmap(
                 grads_averaged, opt_state_sharded, params_sharded
             )
             params_sharded = jax.tree.map(lambda p, u: p + u, params_sharded, updates)
-
-            # Reconstruire model_variables_sharded (sans batch_stats car BatchNorm désactivée)
-            model_variables_sharded = {
-                'params': params_sharded
-            }
-            # BatchNorm désactivée - pas de batch_stats à gérer
 
             # Agréger les métriques localement pour cette étape
             step_metrics = {k: float(jnp.mean(v)) for k, v in metrics_sharded.items()}
@@ -1163,14 +1127,14 @@ class AbaloneTrainerSync:
         jax.experimental.multihost_utils.sync_global_devices(f"pre_model_sync_iter_{self.iteration}")
 
         # Synchroniser les paramètres du modèle ET l'état de l'optimiseur
-        self._sync_model_across_workers(model_variables_sharded)
+        self._sync_params_across_workers(params_sharded)
         opt_state_sharded = self._sync_optimizer_state(opt_state_sharded)
 
         jax.experimental.multihost_utils.sync_global_devices(f"post_model_sync_iter_{self.iteration}")
         logger.info(f"Processus {self.process_id}: Synchronisation terminée")
 
         # Récupérer les paramètres mis à jour (maintenant synchronisés)
-        self.model_variables = jax.tree.map(lambda x: x[0], model_variables_sharded)
+        self.params = jax.tree.map(lambda x: x[0], params_sharded)
         self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
 
         # Si aucune étape d'entraînement n'a été effectuée
@@ -1229,7 +1193,7 @@ class AbaloneTrainerSync:
             prefix = f"iter{self.iteration}"
 
         checkpoint = {
-            'model_variables': self.model_variables,  # ← Changé de 'params' à 'model_variables'
+            'params': self.params,
             'opt_state': self.opt_state,
             'iteration': self.iteration,
             'current_lr': self.current_lr,
@@ -1332,17 +1296,14 @@ class AbaloneTrainerSync:
                 checkpoint = pickle.load(f)
 
         # Restaurer l'état avec support des anciens checkpoints
-        if 'model_variables' in checkpoint:
-            # Nouveau format avec model_variables
-            self.model_variables = checkpoint['model_variables']
-        else:
-            # Ancien format avec params seulement - créer la structure model_variables
-            self.model_variables = {
-                'params': checkpoint['params']
-            }
-            # Ajouter batch_stats seulement si elles existent dans le checkpoint
-            if 'batch_stats' in checkpoint:
-                self.model_variables['batch_stats'] = checkpoint['batch_stats']
+        if 'params' in checkpoint:
+            self.params = checkpoint['params']
+        elif 'model_variables' in checkpoint:
+            # Support pour les anciens checkpoints avec model_variables
+            if isinstance(checkpoint['model_variables'], dict) and 'params' in checkpoint['model_variables']:
+                self.params = checkpoint['model_variables']['params']
+            else:
+                self.params = checkpoint['model_variables']
         
         self.opt_state = checkpoint['opt_state']
         self.iteration = checkpoint['iteration']
@@ -1420,7 +1381,7 @@ class AbaloneTrainerSync:
             games_per_model=games_per_model
         )
 
-        current_model_variables = self.model_variables
+        current_params = self.params
         local_results = {}
 
         if self.gcs_logger:
@@ -1447,8 +1408,8 @@ class AbaloneTrainerSync:
             else:
                 local_path = ref_path
 
-            ref_model_variables = load_checkpoint_model_variables(local_path)  # Fonction mise à jour
-            if ref_model_variables is None:
+            ref_params = load_checkpoint_model_variables(local_path)  # Fonction mise à jour
+            if ref_params is None:
                 if self.verbose:
                     logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
                 # Synchroniser même en cas d'échec
@@ -1456,8 +1417,8 @@ class AbaloneTrainerSync:
                 continue
             
             eval_results = evaluator.evaluate_model_pair(
-                current_model_variables,
-                ref_model_variables,
+                current_params,
+                ref_params,
                 games_to_play=local_games_per_model
             )
 

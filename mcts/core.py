@@ -60,7 +60,7 @@ class AbaloneMCTSRecurrentFn:
         self.network = network
 
     @partial(jax.jit, static_argnums=(0,))
-    def recurrent_fn(self, model_variables: Dict[str, Any], rng_key, action, embedding):
+    def recurrent_fn(self, params: Dict[str, Any], rng_key, action, embedding):
         """
         Fonction récurrente pour MCTS qui gère un batch d'états
         """
@@ -101,10 +101,9 @@ class AbaloneMCTSRecurrentFn:
         board_2d, marbles_out = prepare_input(next_states.board, next_states.history, next_states.actual_player, our_marbles, opp_marbles)
 
         prior_logits, value = self.network.apply(
-            model_variables,
+            params,
             board_2d,
-            marbles_out,
-            train=False 
+            marbles_out
         )
 
         # 5. Embedding suivant AVEC l'historique
@@ -126,9 +125,8 @@ class AbaloneMCTSRecurrentFn:
             value=value
         ), next_embedding
 
-# Modifier la signature pour accepter model_variables
 @partial(jax.jit, static_argnames=['network', 'env'])
-def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_variables: Dict[str, Any], env: AbaloneEnv, current_iteration: int = 0, total_iterations: int = 1000):
+def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params: Dict[str, Any], env: AbaloneEnv, current_iteration: int = 0, total_iterations: int = 1000):
     """
     Version vectorisée de get_root_output pour traiter un batch d'états
     """
@@ -146,10 +144,9 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, model_var
 
     # Obtenir les prédictions du réseau
     prior_logits, value = network.apply(
-        model_variables,
+        params,
         board_2d,
-        marbles_out,
-        train=False 
+        marbles_out
     )
 
     batch_size = states.board.shape[0]

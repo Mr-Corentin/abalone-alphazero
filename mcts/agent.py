@@ -14,7 +14,7 @@ from mcts.search import run_search_batch
 
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
 def get_best_move(state: AbaloneState,
-                  model_variables: dict,
+                  params: dict,
                   network: AbaloneModel,
                   env: AbaloneEnv,
                   num_simulations: int = 600,
@@ -42,7 +42,7 @@ def get_best_move(state: AbaloneState,
         states=batch_state, 
         recurrent_fn_instance=recurrent_fn_instance, 
         network=network,
-        model_variables=model_variables, 
+        params=params, 
         rng_key=rng_key,
         env=env,
         num_simulations=num_simulations
@@ -54,7 +54,7 @@ def get_best_move(state: AbaloneState,
 
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations', 'temperature']) 
 def get_move_probabilities(state: AbaloneState,
-                           model_variables: dict, 
+                           params: dict, 
                            network: AbaloneModel,
                            env: AbaloneEnv,
                            rng_key: jax.random.PRNGKey, 
@@ -80,7 +80,7 @@ def get_move_probabilities(state: AbaloneState,
         states=batch_state,
         recurrent_fn_instance=recurrent_fn_instance,
         network=network,
-        model_variables=model_variables, 
+        params=params, 
         rng_key=rng_key, 
         env=env,
         num_simulations=num_simulations
@@ -100,7 +100,7 @@ def get_move_probabilities(state: AbaloneState,
 
 @partial(jax.jit, static_argnames=['network', 'env', 'num_simulations', 'temperature'])
 def sample_move(state: AbaloneState,
-                model_variables: dict,
+                params: dict,
                 network: AbaloneModel,
                 env: AbaloneEnv,
                 rng_key: jax.random.PRNGKey, 
@@ -113,7 +113,7 @@ def sample_move(state: AbaloneState,
     mcts_rng_key, choice_rng_key = jax.random.split(rng_key)
 
     move_probs = get_move_probabilities(
-        state, model_variables, network, env, mcts_rng_key, num_simulations, temperature
+        state, params, network, env, mcts_rng_key, num_simulations, temperature
     )
 
     move_idx = jax.random.choice(choice_rng_key, jnp.arange(move_probs.shape[-1]), p=move_probs)

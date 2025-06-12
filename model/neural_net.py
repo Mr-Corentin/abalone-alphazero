@@ -2,24 +2,18 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from functools import partial
-from typing import Tuple, Any 
+from typing import Tuple
 
 class ResBlock(nn.Module):
-    """Bloc résiduel sans Batch Normalization"""
+    """Bloc résiduel"""
     filters: int
-    train: bool # Gardé pour compatibilité
 
     @nn.compact
     def __call__(self, x):
-        # Séquence : Conv -> ReLU (sans BatchNorm)
-        y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=True)(x)
-        # y = nn.BatchNorm(use_running_average=not self.train, momentum=0.9)(y)  # TEMPORARILY DISABLED
+        y = nn.Conv(self.filters, (3, 3), padding='SAME')(x)
         y = nn.relu(y)
-
-        y = nn.Conv(self.filters, (3, 3), padding='SAME', use_bias=True)(y)
-        # y = nn.BatchNorm(use_running_average=not self.train, momentum=0.9)(y)  # TEMPORARILY DISABLED
-        output = nn.relu(x + y)
-        return output
+        y = nn.Conv(self.filters, (3, 3), padding='SAME')(y)
+        return nn.relu(x + y)
 
 class AbaloneModel(nn.Module):
     num_actions: int = 1734
@@ -27,7 +21,7 @@ class AbaloneModel(nn.Module):
     num_blocks: int = 8
 
     @nn.compact
-    def __call__(self, board, marbles_out, train: bool):
+    def __call__(self, board, marbles_out):
         """
         Forward pass du réseau avec support de l'historique
         
@@ -36,25 +30,21 @@ class AbaloneModel(nn.Module):
                    Canal 0: Position actuelle
                    Canaux 1-8: Historique (du plus récent au plus ancien)
             marbles_out: Billes sorties, shape (batch, 2)
-            train: Mode entraînement pour BatchNorm
         """
         # Normalisation et reshape des entrées
         marbles_out = marbles_out.reshape(-1, 2) / 6.0  # Normalise à [0,1]
         
         # Board contient déjà l'historique avec 9 canaux : (batch, 9, 9, 9)
-        # Plus besoin d'ajouter une dimension avec [..., None]
         board = board.astype(jnp.float32)
         x = board  # Shape: (batch, 9, 9, 9)
 
         # Tronc commun - la première convolution prend maintenant 9 canaux
-        # Séquence : Conv -> ReLU (sans BatchNorm)
-        x = nn.Conv(self.num_filters, (3, 3), padding='SAME', use_bias=True)(x)
-        # x = nn.BatchNorm(use_running_average=not train, momentum=0.9)(x)  # TEMPORARILY DISABLED
+        x = nn.Conv(self.num_filters, (3, 3), padding='SAME')(x)
         x = nn.relu(x)
 
-        # Blocs résiduels - inchangés
+        # Blocs résiduels
         for _ in range(self.num_blocks):
-            x = ResBlock(self.num_filters, train=train)(x)
+            x = ResBlock(self.num_filters)(x)
 
         # Aplatir les features spatiales
         x_flat = x.reshape((x.shape[0], -1))
@@ -62,12 +52,12 @@ class AbaloneModel(nn.Module):
         # Concaténer avec l'information des billes sorties
         combined = jnp.concatenate([x_flat, marbles_out], axis=1)
 
-        # Tête de politique - inchangée
+        # Tête de politique
         policy = nn.Dense(1024)(combined)
         policy = nn.relu(policy)
         prior_logits = nn.Dense(self.num_actions)(policy)
 
-        # Tête de valeur - inchangée
+        # Tête de valeur
         value = nn.Dense(256)(combined)
         value = nn.relu(value)
         value = nn.Dense(1)(value)

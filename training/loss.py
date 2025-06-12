@@ -43,17 +43,17 @@ def calculate_losses_and_metrics(predicted_policies,
 
 
 @partial(jax.jit, static_argnames=['network', 'value_weight'])
-def train_step_pmap_impl(model_variables: Dict[str, Any], # MODIFIÉ: Prend model_variables
+def train_step_pmap_impl(params: Dict[str, Any],
                          inputs: Tuple[jnp.ndarray, jnp.ndarray], # (board_states, marbles_states)
                          target_policies: jnp.ndarray,
                          target_values: jnp.ndarray,
                          network: Any, # Type de votre modèle Flax
                          value_weight: float = 1.0):
     """
-    Effectue une étape d'entraînement, gère la BN et la synchronisation pmap.
+    Effectue une étape d'entraînement avec params seulement.
     
     Args:
-        model_variables: Dictionnaire contenant 'params' et 'batch_stats'.
+        params: Paramètres du modèle.
         inputs: Tuple (board_states, marbles_states).
         target_policies: Politiques cibles.
         target_values: Valeurs cibles.
@@ -63,25 +63,18 @@ def train_step_pmap_impl(model_variables: Dict[str, Any], # MODIFIÉ: Prend mode
     Returns:
         metrics_dict: Dictionnaire des métriques.
         grads: Gradients moyennés.
-        updated_batch_stats: batch_stats mises à jour et moyennées.
     """
 
     # La fonction de perte interne pour jax.value_and_grad.
-    # Elle est différenciée par rapport à `current_params`.
     def loss_fn_for_grad(current_params: Dict[str, Any]):
-        # Préparer les variables pour l'appel à network.apply (sans batch_stats car BatchNorm désactivée)
-        variables_for_apply = {'params': current_params}
         board_states, marbles_states = inputs
 
-        # Appel au réseau avec train=True (pas de batch_stats à muter)
+        # Appel au réseau
         predicted_policies, predicted_values = network.apply(
-            variables_for_apply,
+            current_params,
             board_states,
-            marbles_states,
-            train=True           # Crucial pour l'entraînement
+            marbles_states
         )
-        # Pas de batch_stats à récupérer (BatchNorm désactivée)
-        new_batch_stats = {}
 
         # Utiliser la fonction refactorée pour calculer les pertes et métriques
         total_loss, metrics_tuple = calculate_losses_and_metrics(
@@ -94,20 +87,18 @@ def train_step_pmap_impl(model_variables: Dict[str, Any], # MODIFIÉ: Prend mode
             'policy_loss': metrics_tuple[0],
             'value_loss': metrics_tuple[1],
             'policy_accuracy': metrics_tuple[2],
-            'value_sign_accuracy': metrics_tuple[3] # Nom corrigé pour correspondre à votre code original
+            'value_sign_accuracy': metrics_tuple[3]
         }
-        # Retourner la perte totale et les métriques (pas de batch_stats)
-        return total_loss, ({}, metrics_dict)
+        
+        return total_loss, metrics_dict
 
-    # Calculer la perte, les gradients (par rapport à current_params, donc model_variables['params'])
-    # et les sorties auxiliaires (metrics_dict).
-    (loss_value, (updated_batch_stats, metrics)), grads = jax.value_and_grad(
+    # Calculer la perte, les gradients et les métriques
+    (loss_value, metrics), grads = jax.value_and_grad(
         loss_fn_for_grad, has_aux=True
-    )(model_variables['params']) # On passe seulement les params ici pour la différentiation
+    )(params)
 
     # Synchronisation (moyennage) des gradients et des métriques sur les devices
     grads = jax.lax.pmean(grads, axis_name='devices')
-    metrics = jax.lax.pmean(metrics, axis_name='devices') # Moyenner aussi les métriques
-    updated_batch_stats = {} # Pas de batch_stats à moyenner
+    metrics = jax.lax.pmean(metrics, axis_name='devices')
 
-    return metrics, grads, updated_batch_stats # Retourner les batch_stats mises à jour
+    return metrics, grads

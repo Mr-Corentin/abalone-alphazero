@@ -123,16 +123,23 @@ def download_checkpoint(gcs_pattern, local_path):
         return False
 
 def load_checkpoint_model_variables(checkpoint_path):
+    """Charge les paramètres depuis un checkpoint (support ancien et nouveau format)"""
     try:
         with open(checkpoint_path, 'rb') as f:
             checkpoint = pickle.load(f)
-        if 'model_variables' in checkpoint:
-            return checkpoint['model_variables']
+        
+        # Nouveau format: params directement
+        if 'params' in checkpoint:
+            return checkpoint['params']
+        # Ancien format: model_variables contenant params
+        elif 'model_variables' in checkpoint:
+            if isinstance(checkpoint['model_variables'], dict) and 'params' in checkpoint['model_variables']:
+                return checkpoint['model_variables']['params']
+            else:
+                return checkpoint['model_variables']
         else:
-            return {
-                'params': checkpoint['params'],
-                'batch_stats': checkpoint.get('batch_stats', {})
-            }
+            logger.error(f"Format de checkpoint non reconnu: {checkpoint_path}")
+            return None
     except Exception as e:
         logger.info(f"Erreur lors du chargement du checkpoint {checkpoint_path}: {e}")
         return None
@@ -170,7 +177,7 @@ class ModelsEvaluator:
         from mcts.agent import get_best_move
         
         @partial(jax.pmap, axis_name='devices', static_broadcasted_argnums=(3))
-        def play_evaluation_games(rng_keys, black_model_variables, white_model_variables, games_per_device):
+        def play_evaluation_games(rng_keys, black_params, white_params, games_per_device):
             """
             Joue des parties d'évaluation entre deux versions du modèle.
             """
@@ -197,9 +204,9 @@ class ModelsEvaluator:
                     
                     action = jax.lax.cond(
                         is_black,
-                        lambda: get_best_move(state, black_model_variables, self.network, self.env, 
+                        lambda: get_best_move(state, black_params, self.network, self.env, 
                                             self.num_simulations, action_key),
-                        lambda: get_best_move(state, white_model_variables, self.network, self.env, 
+                        lambda: get_best_move(state, white_params, self.network, self.env, 
                                             self.num_simulations, action_key)
                     )
                     
@@ -251,13 +258,13 @@ class ModelsEvaluator:
         
 
         
-    def evaluate_model_pair(self, current_model_variables, reference_model_variables, games_to_play=None):
+    def evaluate_model_pair(self, current_params, reference_params, games_to_play=None):
         """
         Évalue le modèle actuel contre un modèle de référence.
         
         Args:
-            current_model_variables: Variables du modèle actuel (params + batch_stats)
-            reference_model_variables: Variables du modèle de référence
+            current_params: Paramètres du modèle actuel
+            reference_params: Paramètres du modèle de référence
             games_to_play: Nombre de parties à jouer (si None, utilise self.games_per_model)
                 
         Returns:
@@ -266,9 +273,9 @@ class ModelsEvaluator:
         # Utiliser le nombre spécifié ou la valeur par défaut
         num_games = games_to_play if games_to_play is not None else self.games_per_model
         
-        # Préparer les variables pour distribution aux dispositifs
-        current_vars_replicated = jax.device_put_replicated(current_model_variables, self.devices)
-        reference_vars_replicated = jax.device_put_replicated(reference_model_variables, self.devices)
+        # Préparer les paramètres pour distribution aux dispositifs
+        current_params_replicated = jax.device_put_replicated(current_params, self.devices)
+        reference_params_replicated = jax.device_put_replicated(reference_params, self.devices)
         
         # Nombre de parties par dispositif
         games_per_device = math.ceil(num_games / self.num_devices)
@@ -282,8 +289,8 @@ class ModelsEvaluator:
         logger.info("Parties d'évaluation (modèle actuel en tant que Noir)...")
         results_current_black = self.play_evaluation_games(
             sharded_rngs, 
-            current_vars_replicated,      
-            reference_vars_replicated,    
+            current_params_replicated,      
+            reference_params_replicated,    
             games_per_device
         )
         
@@ -295,8 +302,8 @@ class ModelsEvaluator:
         
         results_current_white = self.play_evaluation_games(
             sharded_rngs, 
-            reference_vars_replicated,    
-            current_vars_replicated,     
+            reference_params_replicated,    
+            current_params_replicated,     
             games_per_device
         )
         

@@ -15,7 +15,7 @@ from mcts.core import AbaloneMCTSRecurrentFn, get_root_output_batch
 def run_search_batch(states: AbaloneState,
                      recurrent_fn_instance: AbaloneMCTSRecurrentFn,
                      network: AbaloneModel,
-                     model_variables: Dict[str, Any],
+                     params: Dict[str, Any],
                      rng_key,
                      env: AbaloneEnv,
                      num_simulations: int = 600,
@@ -29,7 +29,7 @@ def run_search_batch(states: AbaloneState,
         states: Batch d'états AbaloneState
         recurrent_fn_instance: Instance de la classe AbaloneMCTSRecurrentFn
         network: Modèle réseau
-        model_variables: Dictionnaire contenant les 'params' et 'batch_stats' du modèle
+        params: Paramètres du modèle
         rng_key: Clé aléatoire JAX
         env: Environnement du jeu
         num_simulations: Nombre de simulations MCTS
@@ -41,7 +41,7 @@ def run_search_batch(states: AbaloneState,
         policy_output pour chaque état du batch
     """
     # Obtenir root pour le batch (maintenant avec les paramètres d'itération)
-    root = get_root_output_batch(states, network, model_variables, env, current_iteration, total_iterations)
+    root = get_root_output_batch(states, network, params, env, current_iteration, total_iterations)
 
     # Obtenir les masques de mouvements légaux pour le batch
     legal_moves = jax.vmap(env.get_legal_moves)(states)
@@ -49,7 +49,7 @@ def run_search_batch(states: AbaloneState,
 
     # Lancer la recherche MCTS
     policy_output = mctx.gumbel_muzero_policy(
-        params=model_variables,
+        params=params,
         rng_key=rng_key,
         root=root,
         recurrent_fn=recurrent_fn_instance.recurrent_fn,
@@ -71,7 +71,7 @@ def run_search_batch(states: AbaloneState,
 
 @partial(jax.jit, static_argnames=['env', 'network', 'num_simulations', 'batch_size'])
 def generate_game_mcts_batch(rng_key,
-                             model_variables: Dict[str, Any],
+                             params: Dict[str, Any],
                              network: AbaloneModel,
                              env: AbaloneEnv,
                              batch_size: int,
@@ -83,7 +83,7 @@ def generate_game_mcts_batch(rng_key,
     
     Args:
         rng_key: Clé aléatoire JAX
-        model_variables: Dictionnaire contenant les 'params' et 'batch_stats' du modèle
+        params: Paramètres du modèle
         network: Modèle réseau (instance nn.Module)
         env: Environnement du jeu
         batch_size: Nombre de parties à générer en parallèle
@@ -123,7 +123,7 @@ def generate_game_mcts_batch(rng_key,
         )
 
         rng, search_rng = jax.random.split(rng)
-        search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations, current_iteration=current_iteration, total_iterations=total_iterations)
+        search_outputs = run_search_batch(states, recurrent_fn_instance, network, params, search_rng, env, num_simulations, current_iteration=current_iteration, total_iterations=total_iterations)
         next_states = jax.vmap(env.step)(states, search_outputs.action)
 
         # Stockage des données avec historique
@@ -214,7 +214,7 @@ def generate_game_mcts_batch(rng_key,
 
 @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
 def generate_parallel_games_pmap(rngs,
-                                 model_variables: Dict[str, Any],
+                                 params: Dict[str, Any],
                                  network: AbaloneModel,
                                  env: AbaloneEnv,
                                  batch_size_per_device: int,
@@ -223,7 +223,7 @@ def generate_parallel_games_pmap(rngs,
     """
     Version pmappée de generate_game_mcts_batch pour paralléliser sur plusieurs devices
     """
-    return generate_game_mcts_batch(rngs, model_variables, network, env, batch_size_per_device, 
+    return generate_game_mcts_batch(rngs, params, network, env, batch_size_per_device, 
                                    num_simulations=500, current_iteration=current_iteration,   
                                    total_iterations=total_iterations)
 
@@ -238,7 +238,7 @@ def create_optimized_game_generator(num_simulations: int = 500):
     
     @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
     def generate_optimized_games_pmap(rng_key,
-                                      model_variables: Dict[str, Any],
+                                      params: Dict[str, Any],
                                       network: AbaloneModel,
                                       env: AbaloneEnv,
                                       batch_size_per_device: int,
@@ -255,7 +255,7 @@ def create_optimized_game_generator(num_simulations: int = 500):
             active_games = active & ~terminal_states
             rng, search_rng = jax.random.split(rng)
 
-            search_outputs = run_search_batch(states, recurrent_fn_instance, network, model_variables, search_rng, env, num_simulations, current_iteration=current_iteration, total_iterations=total_iterations)
+            search_outputs = run_search_batch(states, recurrent_fn_instance, network, params, search_rng, env, num_simulations, current_iteration=current_iteration, total_iterations=total_iterations)
             next_states = jax.vmap(env.step)(states, search_outputs.action)
             
             # Calculer les billes sorties pour prepare_input
