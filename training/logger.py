@@ -43,18 +43,26 @@ class GCSLogger:
             "message": f"Début génération de {num_games} parties"
         })
     
-    def log_generation_end(self, iteration: int, duration: float, games_generated: int):
+    def log_generation_end(self, iteration: int, duration: float, games_generated: int, mean_moves_per_game: float = None):
         """Log la fin de la génération de parties"""
         games_per_sec = games_generated / duration if duration > 0 else 0
-        txt_msg = f"GÉNÉRATION: {games_generated} parties en {duration:.2f}s ({games_per_sec:.1f} parties/s)"
+        if mean_moves_per_game is not None:
+            txt_msg = f"GÉNÉRATION: {games_generated} parties en {duration:.6f}s ({games_per_sec:.1f} parties/s, {mean_moves_per_game:.2f} coups/partie en moyenne)"
+        else:
+            txt_msg = f"GÉNÉRATION: {games_generated} parties en {duration:.6f}s ({games_per_sec:.1f} parties/s)"
         
-        self._write_log("generation_end", {
+        log_data = {
             "iteration": iteration,
             "duration_seconds": duration,
             "games_generated": games_generated,
             "games_per_second": games_per_sec,
             "message": txt_msg
-        }, txt_msg)
+        }
+        
+        if mean_moves_per_game is not None:
+            log_data["mean_moves_per_game"] = mean_moves_per_game
+        
+        self._write_log("generation_end", log_data, txt_msg)
     
     def log_training_start(self, iteration: int, num_steps: int):
         """Log le début de l'entraînement"""
@@ -71,7 +79,7 @@ class GCSLogger:
             f"    Loss total: {metrics.get('total_loss', 0):.4f}",
             f"    Loss politique: {metrics.get('policy_loss', 0):.4f}",
             f"    Loss valeur: {metrics.get('value_loss', 0):.4f}",
-            f"    Précision politique: {metrics.get('policy_accuracy', 0):.2f}%"
+            f"    Précision politique: {metrics.get('policy_accuracy', 0):.6f}%"
         ]
         
         self._write_log("training_end", {
@@ -180,14 +188,20 @@ class GCSLogger:
         }, txt_msg)
 
     def log_worker_generation(self, iteration: int, process_id: int, duration: float, 
-                            games_generated: int, positions_added: int):
+                            games_generated: int, positions_added: int, mean_moves_per_game: float = None):
         """Log les détails de génération pour un worker spécifique"""
         games_per_sec = games_generated / duration if duration > 0 else 0
-        txt_msg = (f"Worker {process_id}: Génération terminée en {duration:.2f}s "
-                f"({games_generated} parties, {games_per_sec:.1f} parties/s, "
-                f"{positions_added} positions)")
         
-        self._write_log("worker_generation", {
+        if mean_moves_per_game is not None:
+            txt_msg = (f"Worker {process_id}: Génération terminée en {duration:.6f}s "
+                    f"({games_generated} parties, {games_per_sec:.1f} parties/s, "
+                    f"{positions_added} positions, {mean_moves_per_game:.2f} coups/partie)")
+        else:
+            txt_msg = (f"Worker {process_id}: Génération terminée en {duration:.6f}s "
+                    f"({games_generated} parties, {games_per_sec:.1f} parties/s, "
+                    f"{positions_added} positions)")
+        
+        log_data = {
             "iteration": iteration,
             "process_id": process_id,
             "duration_seconds": duration,
@@ -195,7 +209,12 @@ class GCSLogger:
             "positions_added": positions_added,
             "games_per_second": games_per_sec,
             "message": txt_msg
-        }, txt_msg)
+        }
+        
+        if mean_moves_per_game is not None:
+            log_data["mean_moves_per_game"] = mean_moves_per_game
+            
+        self._write_log("worker_generation", log_data, txt_msg)
 
     def log_worker_buffer_update(self, iteration: int, process_id: int, 
                                 positions_added: int, buffer_stats: dict = None):

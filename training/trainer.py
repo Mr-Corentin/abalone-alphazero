@@ -322,7 +322,8 @@ class AbaloneTrainerSync:
             float(local_data.get('games_generated', 0)),
             float(local_data.get('positions_added', 0)),
             float(local_data.get('steps_completed', 0)),
-            local_data.get('total_loss', 0.0)
+            local_data.get('total_loss', 0.0),
+            local_data.get('mean_moves_per_game', 0.0)
         ], dtype=jnp.float32)
         
         # Répliquer sur tous les devices locaux
@@ -341,14 +342,14 @@ class AbaloneTrainerSync:
             all_data = jax.device_get(all_workers_data)
             
             # Prendre seulement le premier device de chaque processus
-            # Shape devrait être [num_processes * num_devices, 6]
+            # Shape devrait être [num_processes * num_devices, 7]
             print(f"DEBUG: all_data shape = {all_data.shape}")  # Pour débugger
             
-            # Reshape pour obtenir [num_processes, num_devices, 6]
+            # Reshape pour obtenir [num_processes, num_devices, 7]
             reshaped_data = all_data.reshape(self.num_processes, self.num_devices, -1)
             
             # Prendre seulement le premier device de chaque processus
-            process_data = reshaped_data[:, 0, :]  # Shape: [num_processes, 6]
+            process_data = reshaped_data[:, 0, :]  # Shape: [num_processes, 7]
             
             workers_info = []
             for i in range(self.num_processes):
@@ -358,7 +359,8 @@ class AbaloneTrainerSync:
                     'games_generated': int(process_data[i, 2]),
                     'positions_added': int(process_data[i, 3]),
                     'steps_completed': int(process_data[i, 4]),
-                    'total_loss': float(process_data[i, 5])
+                    'total_loss': float(process_data[i, 5]),
+                    'mean_moves_per_game': float(process_data[i, 6])
                 })
             
             return workers_info
@@ -373,9 +375,10 @@ class AbaloneTrainerSync:
         for worker in workers_info:
             if worker['games_generated'] > 0:  # Éviter la division par zéro
                 games_per_sec = worker['games_generated'] / worker['duration'] if worker['duration'] > 0 else 0
+                mean_moves = worker.get('mean_moves_per_game')
                 self.gcs_logger.log_worker_generation(
                     iteration, worker['process_id'], worker['duration'],
-                    worker['games_generated'], worker['positions_added']
+                    worker['games_generated'], worker['positions_added'], mean_moves
                 )
 
     def _log_all_workers_training(self, iteration: int, workers_info: list):
@@ -612,7 +615,7 @@ class AbaloneTrainerSync:
                 logger.info(f"Processus {self.process_id}: Fin génération pour itération {iteration+1} en {t_gen:.2f}s")
                 
                 if self.verbose:
-                    logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} parties/s)")
+                    logger.info(f"Génération: {games_per_iteration} parties en {t_gen:.6f}s ({games_per_iteration/t_gen:.1f} parties/s, {mean_moves_per_game:.2f} coups/partie)")
 
                 # 2. Mise à jour du buffer
                 logger.info(f"Processus {self.process_id}: En attente de synchronisation post-génération")
@@ -639,11 +642,15 @@ class AbaloneTrainerSync:
                         # Buffer local
                         logger.info(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
                         
+                # Calculer le nombre moyen de coups par partie
+                mean_moves_per_game = self._calculate_mean_moves_per_game(games_data)
+                        
                 # COLLECTE DES MÉTRIQUES DE GÉNÉRATION DE TOUS LES WORKERS
                 generation_metrics = {
                     'duration': t_gen,
                     'games_generated': games_per_iteration,
-                    'positions_added': positions_added
+                    'positions_added': positions_added,
+                    'mean_moves_per_game': mean_moves_per_game
                 }
 
                 # Synchroniser et collecter
@@ -660,7 +667,10 @@ class AbaloneTrainerSync:
                     if all_generation_info:
                         total_games = sum(w['games_generated'] for w in all_generation_info)
                         total_duration = max(w['duration'] for w in all_generation_info)
-                        self.gcs_logger.log_generation_end(iteration, total_duration, total_games)
+                        # Calculer la moyenne pondérée des coups par partie
+                        total_moves = sum(w['games_generated'] * w.get('mean_moves_per_game', 0) for w in all_generation_info)
+                        global_mean_moves = total_moves / total_games if total_games > 0 else 0
+                        self.gcs_logger.log_generation_end(iteration, total_duration, total_games, global_mean_moves)
 
                 # Synchronisation après la mise à jour du buffer
                 jax.experimental.multihost_utils.sync_global_devices(f"post_buffer_update_iter_{iteration}")
@@ -894,6 +904,37 @@ class AbaloneTrainerSync:
         self.total_games += local_total_games
 
         return games_data
+    
+    def _calculate_mean_moves_per_game(self, games_data):
+        """
+        Calcule le nombre moyen de coups par partie à partir des données de génération.
+        
+        Args:
+            games_data: Données des parties générées
+            
+        Returns:
+            float: Nombre moyen de coups par partie
+        """
+        total_moves = 0
+        valid_games = 0
+        
+        # Pour chaque dispositif
+        for device_idx in range(self.num_devices):
+            device_data = jax.tree_util.tree_map(
+                lambda x: x[device_idx],
+                games_data
+            )
+            
+            # Pour chaque partie générée sur ce dispositif
+            games_per_device = len(device_data['moves_per_game'])
+            for game_idx in range(games_per_device):
+                game_length = int(device_data['moves_per_game'][game_idx])
+                if game_length > 0:  # Seulement les parties valides
+                    total_moves += game_length
+                    valid_games += 1
+        
+        return total_moves / valid_games if valid_games > 0 else 0.0
+        
     def _log_metrics_to_tensorboard(self, metrics_dict, prefix="training"):
         """
         Centralise l'écriture des métriques dans TensorBoard
