@@ -47,7 +47,6 @@ def create_board_mask(radius: int = 4) -> chex.Array:
         mask = mask.at[array_x, array_y, array_z].set(True)
     
     return mask
-
 def initialize_board(radius: int = 4) -> chex.Array:
     """
     Initialise le plateau avec les positions de départ
@@ -61,24 +60,56 @@ def initialize_board(radius: int = 4) -> chex.Array:
     valid_mask = create_board_mask(radius)
     board = jnp.where(valid_mask, 0., board)
     
-    # Position initiale des billes noires (haut du plateau)
+    # # Position initiale des billes noires (haut du plateau)
+    # black_coords = [
+    #     # Première rangée
+    #     (0,4,-4), (1,3,-4), (2,2,-4), (3,1,-4), (4,0,-4),
+    #     # Deuxième rangée
+    #     (-1,4,-3), (0,3,-3), (1,2,-3), (2,1,-3), (3,0,-3), (4,-1,-3),
+    #     # Troisième rangée
+    #     (0,2,-2), (1,1,-2), (2,0,-2)
+    # ]
+    
+    # # Position initiale des billes blanches (bas du plateau)
+    # white_coords = [
+    #     # Première rangée
+    #     (-4,0,4), (-3,-1,4), (-2,-2,4), (-1,-3,4), (0,-4,4),
+    #     # Deuxième rangée
+    #     (-4,1,3), (-3,0,3), (-2,-1,3), (-1,-2,3), (0,-3,3), (1,-4,3),
+    #     # Troisième rangée
+    #     (-2,0,2), (-1,-1,2), (0,-2,2)
+    # ]
+
+    #Belgian Daisy config
     black_coords = [
         # Première rangée
-        (0,4,-4), (1,3,-4), (2,2,-4), (3,1,-4), (4,0,-4),
+        (3,1,-4), (4,0,-4),
         # Deuxième rangée
-        (-1,4,-3), (0,3,-3), (1,2,-3), (2,1,-3), (3,0,-3), (4,-1,-3),
+        (2,1,-3), (3,0,-3), (4,-1,-3),
         # Troisième rangée
-        (0,2,-2), (1,1,-2), (2,0,-2)
+        (2,0,-2), (3,-1,-2),
+        # Septième rangée
+        (-3,1,2), (-2,0,2),
+        # Huitième rangée
+        (-4,1,3), (-3,0,3), (-2,-1,3),
+        # Neuvième rangée
+        (-4,0,4), (-3,-1,4)
     ]
     
     # Position initiale des billes blanches (bas du plateau)
     white_coords = [
         # Première rangée
-        (-4,0,4), (-3,-1,4), (-2,-2,4), (-1,-3,4), (0,-4,4),
+        (0,4,-4), (1,3,-4),
         # Deuxième rangée
-        (-4,1,3), (-3,0,3), (-2,-1,3), (-1,-2,3), (0,-3,3), (1,-4,3),
+        (-1,4,-3), (0,3,-3), (1,2,-3),
         # Troisième rangée
-        (-2,0,2), (-1,-1,2), (0,-2,2)
+        (-1,3,-2), (0,2,-2),
+        # Septième rangée
+        (0,-2,2), (1,-3,2),
+        # Huitième rangée
+        (-1,-2,3), (0,-3,3), (1,-4,3),
+        # Neuvième rangée
+        (-1,-3,4), (0,-4,4)
     ]
     
     # Placer les billes noires (1) et blanches (-1)
@@ -91,6 +122,8 @@ def initialize_board(radius: int = 4) -> chex.Array:
         board = board.at[array_x, array_y, array_z].set(-1.)
     
     return board
+
+    
 def display_board(board: chex.Array, radius: int = 4):
     """
     Affiche le plateau Abalone en 2D en suivant les coordonnées cubiques
