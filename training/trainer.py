@@ -612,6 +612,9 @@ class AbaloneTrainerSync:
                 games_data = self._generate_games(gen_key, games_per_iteration, num_iterations)
                 t_gen = time.time() - t_start
 
+                # Calculer le nombre moyen de coups par partie
+                mean_moves_per_game = self._calculate_mean_moves_per_game(games_data)
+
                 logger.info(f"Processus {self.process_id}: Fin génération pour itération {iteration+1} en {t_gen:.2f}s")
                 
                 if self.verbose:
@@ -641,9 +644,6 @@ class AbaloneTrainerSync:
                     else:
                         # Buffer local
                         logger.info(f"Buffer mis à jour: +{positions_added} positions (total: {self.buffer.size})")
-                        
-                # Calculer le nombre moyen de coups par partie
-                mean_moves_per_game = self._calculate_mean_moves_per_game(games_data)
                         
                 # COLLECTE DES MÉTRIQUES DE GÉNÉRATION DE TOUS LES WORKERS
                 generation_metrics = {

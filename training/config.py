@@ -19,7 +19,7 @@ DEFAULT_CONFIG = {
         "value_weight": 1.0,
         "games_per_device": 8,
         "games_per_iteration": 1536,
-        "training_steps_per_iteration": 100,#200,
+        "training_steps_per_iteration": 200,#200,
         "num_iterations": 200,
     },
     
