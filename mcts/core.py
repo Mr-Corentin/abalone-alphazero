@@ -14,15 +14,25 @@ from core.coord_conversion import prepare_input
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
     """
     Calcule la récompense d'une transition en version canonique
+    - 1.0 pour gagner la partie
+    - 0.1 pour chaque bille adverse sortie
     """
     black_diff = next_state.black_out - current_state.black_out
     white_diff = next_state.white_out - current_state.white_out
 
+    # Billes sorties par le joueur courant
     billes_sorties = jnp.where(current_state.actual_player == 1,
-                              white_diff,
-                              black_diff)
+                              white_diff,  # Noir sort des blanches
+                              black_diff)  # Blanc sort des noires
 
-    return billes_sorties
+    # Récompense pour les billes sorties
+    marble_reward = billes_sorties * 0.1
+
+    # Récompense pour gagner la partie (6 billes sorties)
+    game_won = (next_state.black_out >= 6) | (next_state.white_out >= 6)
+    winning_reward = jnp.where(game_won, 1.0, 0.0)
+
+    return marble_reward + winning_reward
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
