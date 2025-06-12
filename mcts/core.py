@@ -13,10 +13,10 @@ from core.coord_conversion import prepare_input
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, current_iteration: int, total_iterations: int) -> float:
     """
-    Calcule la récompense avec reward shaping par paliers basé sur l'itération actuelle.
-    Reward shaping réduit progressivement et s'arrête à 60% de l'entraînement.
+    Calcule la récompense simplifiée: +1 pour chaque bille adverse éjectée.
+    Test pour améliorer l'apprentissage de la policy avec des rewards plus fréquents.
     """
-    # 1. Reward intermédiaire pour billes sorties (avec paliers)
+    # 1. Reward simple pour billes sorties: +1 par bille adverse éjectée
     black_diff = next_state.black_out - current_state.black_out
     white_diff = next_state.white_out - current_state.white_out
 
@@ -24,21 +24,8 @@ def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, curr
                                    white_diff,
                                    black_diff)
 
-    # Calcul du facteur de shaping par paliers
-    progress = current_iteration / total_iterations
-    
-    shaping_factor = jnp.where(
-        progress < 0.2, 0.1,          # 0-20% : facteur 0.1
-        jnp.where(
-            progress < 0.4, 0.05,     # 20-40% : facteur 0.05  
-            jnp.where(
-                progress < 0.6, 0.02, # 40-60% : facteur 0.02
-                0.0                   # 60%+ : pas de reward shaping
-            )
-        )
-    )
-
-    intermediate_reward = billes_sorties_adv * shaping_factor
+    # Reward simple: 1 point par bille éjectée
+    intermediate_reward = billes_sorties_adv * 1.0
 
     # 2. Reward finale (victoire/défaite) - reste identique
     is_terminal = (next_state.black_out >= 6) | (next_state.white_out >= 6) | (next_state.moves_count >= 200)
