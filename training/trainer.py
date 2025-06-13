@@ -195,8 +195,11 @@ class AbaloneTrainerSync:
         if self.save_games:
             self._setup_game_logger(gcs_bucket, games_buffer_size, games_flush_interval)
 
+        # Generate a single session_id for all workers to ensure consistency
+        self.session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
         # Initialisation du logger de métriques
-        self._setup_metrics_logger(gcs_bucket, enable_comprehensive_logging)
+        self._setup_metrics_logger(gcs_bucket, enable_comprehensive_logging, self.session_id)
 
         # Initialisation de l'agrégateur de métriques (seulement pour le processus principal)
         self._setup_metrics_aggregator(gcs_bucket, enable_comprehensive_logging)
@@ -250,7 +253,7 @@ class AbaloneTrainerSync:
                 flush_interval=flush_interval
             )
 
-    def _setup_metrics_logger(self, gcs_bucket, enable_comprehensive_logging):
+    def _setup_metrics_logger(self, gcs_bucket, enable_comprehensive_logging, session_id):
         """Configure le logger de métriques pour un suivi détaillé"""
         if not enable_comprehensive_logging:
             self.metrics_logger = None
@@ -263,7 +266,8 @@ class AbaloneTrainerSync:
                 logger.info(f"Comprehensive metrics logging to GCS bucket: {gcs_bucket}")
             self.metrics_logger = SimpleGCSLogger(
                 bucket_name=gcs_bucket,
-                process_id=self.process_id
+                process_id=self.process_id,
+                session_id=session_id
             )
         else:
             metrics_dir = os.path.join(self.log_dir, "metrics")
@@ -271,7 +275,8 @@ class AbaloneTrainerSync:
                 logger.info(f"Comprehensive metrics logging locally: {metrics_dir}")
             self.metrics_logger = LocalMetricsLogger(
                 log_dir=metrics_dir,
-                process_id=self.process_id
+                process_id=self.process_id,
+                session_id=session_id
             )
 
     def _setup_metrics_aggregator(self, gcs_bucket, enable_comprehensive_logging):
