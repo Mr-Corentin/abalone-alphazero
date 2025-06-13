@@ -17,10 +17,11 @@ logging.basicConfig(
 logger = logging.getLogger("alphazero.buffer")
 
 class CPUReplayBuffer:
-    def __init__(self, capacity, board_size=9, action_space=1734):
+    def __init__(self, capacity, board_size=9, action_space=1734, history_length=8):
         self.capacity = capacity
         self.size = 0
         self.position = 0
+        self.history_length = history_length
 
         self.buffer = {
             'board': np.zeros((capacity, board_size, board_size), dtype=np.int8),
@@ -28,6 +29,7 @@ class CPUReplayBuffer:
             'policy': np.zeros((capacity, action_space), dtype=np.float32),
             'outcome': np.zeros(capacity, dtype=np.int8),
             'player': np.zeros(capacity, dtype=np.int8),
+            'history': np.zeros((capacity, history_length, board_size, board_size), dtype=np.int8),  # Historique 2D
             'game_id': np.zeros(capacity, dtype=np.int32),  # ID unique de partie
             'move_num': np.zeros(capacity, dtype=np.int16),  # Numéro du coup dans la partie
             'iteration': np.zeros(capacity, dtype=np.int32),  # Itération d'entraînement
@@ -36,7 +38,7 @@ class CPUReplayBuffer:
 
         self.current_game_id = 0  
 
-    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
+    def add(self, board, marbles_out, policy, outcome, player, history=None, game_id=None, move_num=0, 
             iteration=0, model_version=0):
         """Ajoute une transition individuelle au buffer"""
         idx = self.position
@@ -48,6 +50,8 @@ class CPUReplayBuffer:
             marbles_out = np.array(marbles_out)
         if hasattr(policy, 'device'):
             policy = np.array(policy)
+        if hasattr(history, 'device') and history is not None:
+            history = np.array(history)
 
         # Si game_id n'est pas fourni, incrémenter le compteur interne
         if game_id is None:
@@ -63,6 +67,13 @@ class CPUReplayBuffer:
         self.buffer['move_num'][idx] = move_num
         self.buffer['iteration'][idx] = iteration
         self.buffer['model_version'][idx] = model_version
+        
+        # Stocker l'historique si fourni
+        if history is not None:
+            self.buffer['history'][idx] = history
+        else:
+            # Historique vide par défaut
+            self.buffer['history'][idx] = np.zeros((self.history_length, board.shape[0], board.shape[1]), dtype=np.int8)
 
         # Mettre à jour les compteurs
         self.position = (self.position + 1) % self.capacity
@@ -77,12 +88,14 @@ class CPUReplayBuffer:
         has_move_num = 'move_num' in batch
         has_iteration = 'iteration' in batch
         has_model_version = 'model_version' in batch
+        has_history = 'history' in batch
 
         for i in range(batch_size):
             game_id = batch['game_id'][i] if has_game_id else None
             move_num = batch['move_num'][i] if has_move_num else 0
             iteration = batch['iteration'][i] if has_iteration else 0
             model_version = batch['model_version'][i] if has_model_version else 0
+            history = batch['history'][i] if has_history else None
 
             self.add(
                 batch['board'][i],
@@ -90,6 +103,7 @@ class CPUReplayBuffer:
                 batch['policy'][i],
                 batch['outcome'][i],
                 batch['player'][i],
+                history=history,
                 game_id=game_id,
                 move_num=move_num,
                 iteration=iteration,
@@ -118,6 +132,7 @@ class CPUReplayBuffer:
             'board': self.buffer['board'][indices],
             'marbles_out': self.buffer['marbles_out'][indices],
             'policy': self.buffer['policy'][indices],
+            'history': self.buffer['history'][indices],
             'outcome': self.buffer['outcome'][indices],
             'player': self.buffer['player'][indices],
             'iteration': self.buffer['iteration'][indices],
@@ -162,6 +177,7 @@ class CPUReplayBuffer:
             'board': self.buffer['board'][actual_indices],
             'marbles_out': self.buffer['marbles_out'][actual_indices],
             'policy': self.buffer['policy'][actual_indices],
+            'history': self.buffer['history'][actual_indices],
             'outcome': self.buffer['outcome'][actual_indices],
             'player': self.buffer['player'][actual_indices],
             'iteration': self.buffer['iteration'][actual_indices],
@@ -187,6 +203,7 @@ class GCSReplayBufferSync:
                 buffer_cleanup_threshold: float = 0.95,
                 board_size: int = 9,
                 action_space: int = 1734,
+                history_length: int = 8,
                 recency_enabled: bool = True,
                 recency_temperature: float = 0.8,
                 cleanup_temperature: float = 2.0,
@@ -214,6 +231,7 @@ class GCSReplayBufferSync:
         self.buffer_cleanup_threshold = buffer_cleanup_threshold
         self.board_size = board_size
         self.action_space = action_space
+        self.history_length = history_length
         self.recency_enabled = recency_enabled
         self.recency_temperature = recency_temperature
         self.cleanup_temperature = cleanup_temperature
@@ -233,6 +251,7 @@ class GCSReplayBufferSync:
             'policy': np.zeros((max_local_size, action_space), dtype=np.float32),
             'outcome': np.zeros(max_local_size, dtype=np.int8),
             'player': np.zeros(max_local_size, dtype=np.int8),
+            'history': np.zeros((max_local_size, history_length, board_size, board_size), dtype=np.int8),
             'game_id': np.zeros(max_local_size, dtype=np.int32),
             'move_num': np.zeros(max_local_size, dtype=np.int16),
             'iteration': np.zeros(max_local_size, dtype=np.int32),
@@ -268,7 +287,7 @@ class GCSReplayBufferSync:
         
         logger.info(f"GCSReplayBufferSync initialisé - Max buffer size: {self.max_buffer_size} positions")
     
-    def add(self, board, marbles_out, policy, outcome, player, game_id=None, move_num=0, 
+    def add(self, board, marbles_out, policy, outcome, player, history=None, game_id=None, move_num=0, 
             iteration=0, model_version=0):
         """Ajoute une transition individuelle au buffer"""
         # Convertir en numpy si nécessaire
@@ -278,6 +297,8 @@ class GCSReplayBufferSync:
             marbles_out = np.array(marbles_out)
         if hasattr(policy, 'device'):
             policy = np.array(policy)
+        if hasattr(history, 'device') and history is not None:
+            history = np.array(history)
         
         # Si game_id n'est pas fourni, incrémenter le compteur interne
         if game_id is None:
@@ -295,6 +316,13 @@ class GCSReplayBufferSync:
         self.local_buffer['iteration'][idx] = iteration
         self.local_buffer['model_version'][idx] = model_version
         
+        # Stocker l'historique si fourni
+        if history is not None:
+            self.local_buffer['history'][idx] = history
+        else:
+            # Historique vide par défaut
+            self.local_buffer['history'][idx] = np.zeros((self.history_length, board.shape[0], board.shape[1]), dtype=np.int8)
+        
         # Mettre à jour les compteurs
         self.position = (self.position + 1) % self.max_local_size
         self.local_size = min(self.local_size + 1, self.max_local_size)
@@ -309,12 +337,14 @@ class GCSReplayBufferSync:
         has_move_num = 'move_num' in batch
         has_iteration = 'iteration' in batch
         has_model_version = 'model_version' in batch
+        has_history = 'history' in batch
         
         for i in range(batch_size):
             game_id = batch['game_id'][i] if has_game_id else None
             move_num = batch['move_num'][i] if has_move_num else 0
             iteration = batch['iteration'][i] if has_iteration else 0
             model_version = batch['model_version'][i] if has_model_version else 0
+            history = batch['history'][i] if has_history else None
             
             self.add(
                 batch['board'][i],
@@ -322,6 +352,7 @@ class GCSReplayBufferSync:
                 batch['policy'][i],
                 batch['outcome'][i],
                 batch['player'][i],
+                history=history,
                 game_id=game_id,
                 move_num=move_num,
                 iteration=iteration,
@@ -425,6 +456,8 @@ class GCSReplayBufferSync:
                         bytes_list=tf.train.BytesList(value=[data['marbles_out'][i].tobytes()])),
                     'policy': tf.train.Feature(
                         bytes_list=tf.train.BytesList(value=[data['policy'][i].tobytes()])),
+                    'history': tf.train.Feature(
+                        bytes_list=tf.train.BytesList(value=[data['history'][i].tobytes()])),
                     'outcome': tf.train.Feature(
                         int64_list=tf.train.Int64List(value=[data['outcome'][i]])),
                     'player': tf.train.Feature(
@@ -708,6 +741,7 @@ class GCSReplayBufferSync:
             'board': tf.io.FixedLenFeature([], tf.string),
             'marbles_out': tf.io.FixedLenFeature([], tf.string),
             'policy': tf.io.FixedLenFeature([], tf.string),
+            'history': tf.io.FixedLenFeature([], tf.string),
             'outcome': tf.io.FixedLenFeature([], tf.int64),
             'player': tf.io.FixedLenFeature([], tf.int64),
             'game_id': tf.io.FixedLenFeature([], tf.int64),
@@ -722,6 +756,7 @@ class GCSReplayBufferSync:
             'board': tf.io.decode_raw(parsed['board'], tf.int8).numpy().reshape(self.board_size, self.board_size),
             'marbles_out': tf.io.decode_raw(parsed['marbles_out'], tf.int8).numpy().reshape(2),
             'policy': tf.io.decode_raw(parsed['policy'], tf.float32).numpy().reshape(self.action_space),
+            'history': tf.io.decode_raw(parsed['history'], tf.int8).numpy().reshape(self.history_length, self.board_size, self.board_size),
             'outcome': parsed['outcome'].numpy(),
             'player': parsed['player'].numpy(),
             'game_id': parsed['game_id'].numpy(),
