@@ -196,7 +196,26 @@ class AbaloneTrainerSync:
             self._setup_game_logger(gcs_bucket, games_buffer_size, games_flush_interval)
 
         # Generate a single session_id for all workers to ensure consistency
-        self.session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Only the main process generates the session_id, then broadcasts it to all processes
+        if self.is_main_process:
+            session_id_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        else:
+            session_id_timestamp = None
+        
+        # Broadcast the session_id to all processes to ensure consistency
+        session_id_array = jnp.array([ord(c) for c in session_id_timestamp] if session_id_timestamp else [0] * 15)
+        session_id_array = jax.device_put(session_id_array, self.devices[0])
+        
+        # Use JAX collective communication to broadcast from process 0 to all processes
+        broadcasted_session_id = jax.experimental.multihost_utils.broadcast_one_to_all(session_id_array, is_source=self.is_main_process)
+        
+        # Convert back to string
+        broadcasted_chars = jax.device_get(broadcasted_session_id)
+        if broadcasted_chars[0] != 0:  # Check if we received valid data
+            self.session_id = ''.join(chr(int(c)) for c in broadcasted_chars if c != 0)
+        else:
+            # Fallback to process-specific timestamp if broadcast failed
+            self.session_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Initialisation du logger de métriques
         self._setup_metrics_logger(gcs_bucket, enable_comprehensive_logging, self.session_id)
