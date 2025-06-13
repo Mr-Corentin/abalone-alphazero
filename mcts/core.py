@@ -8,7 +8,7 @@ from functools import partial
 # Importations locales
 from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel
-from core.coord_conversion import prepare_input
+from core.coord_conversion import prepare_input, prepare_input_legacy, cube_to_2d
 
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
@@ -89,12 +89,14 @@ class AbaloneMCTSRecurrentFn:
                                next_states.white_out,
                                next_states.black_out)
 
-        # Pour MCTS, utiliser la version legacy sans historique pour l'instant
-        from core.coord_conversion import prepare_input_legacy
+        # Utiliser la version legacy pour MCTS (compatible avec le réseau initialisé avec history)
         board_2d, marbles_out = prepare_input_legacy(next_states.board, our_marbles, opp_marbles)
+        
+        # Convertir l'historique en 2D pour le réseau
+        history_2d = jax.vmap(cube_to_2d)(next_states.history)  # (batch, 8, 9, 9)
 
-        # 5. Évaluation par le réseau
-        prior_logits, value = self.network.apply(params, board_2d, marbles_out)
+        # 5. Évaluation par le réseau avec historique
+        prior_logits, value = self.network.apply(params, board_2d, marbles_out, history_2d)
 
         # 6. Préparation du prochain embedding
         next_embedding = {
@@ -134,11 +136,13 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, e
                            states.black_out)
 
     # Préparer les entrées du réseau - utiliser la version legacy pour MCTS
-    from core.coord_conversion import prepare_input_legacy
     board_2d, marbles_out = prepare_input_legacy(states.board, our_marbles, opp_marbles)
+    
+    # Convertir l'historique en 2D pour le réseau
+    history_2d = jax.vmap(cube_to_2d)(states.history)  # (batch, 8, 9, 9)
 
-    # Obtenir les prédictions du réseau
-    prior_logits, value = network.apply(params, board_2d, marbles_out)
+    # Obtenir les prédictions du réseau avec historique
+    prior_logits, value = network.apply(params, board_2d, marbles_out, history_2d)
 
     embedding = {
         'board_3d': states.board,  # shape: (batch_size, x, y, z)
