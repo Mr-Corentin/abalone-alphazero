@@ -46,6 +46,11 @@ DEFAULT_CONFIG = {
         "path": "checkpoints/model",
         "save_frequency": 2,
         "eval_frequency": 5,
+    },
+    
+    "logging": {
+        "enable_comprehensive_logging": True,
+        "metrics_logging_interval": 30
     }
 }
 
@@ -94,6 +99,11 @@ MINIMAL_CONFIG = {
         "path": "checkpoints/model",
         "save_frequency": 10,
         "eval_frequency": 2,
+    },
+    
+    "logging": {
+        "enable_comprehensive_logging": True,
+        "metrics_logging_interval": 30
     }
 }
 
@@ -117,6 +127,10 @@ CPU_CONFIG = {
     "optimizer": {
         "initial_lr": 0.01,
         "momentum": 0.9
+    },
+    "logging": {
+        "enable_comprehensive_logging": False,  # Disabled for CPU testing
+        "metrics_logging_interval": 30
     }
 }
 

@@ -18,6 +18,7 @@ from training.loss import train_step_pmap_impl
 from mcts.search import generate_parallel_games_pmap, create_optimized_game_generator
 from evaluation.evaluator import Evaluator
 from utils.game_storage import convert_games_batch, GameLogger, LocalGameLogger
+from utils.gcs_metrics_logger import SimpleGCSLogger, LocalMetricsLogger, IterationMetricsAggregator
 
 
 
@@ -57,7 +58,9 @@ class AbaloneTrainerSync:
             use_gcs_buffer=False,
             gcs_buffer_dir='buffer',
             eval_games=5,
-            verbose=True):
+            verbose=True,
+            enable_comprehensive_logging=True,
+            metrics_logging_interval=30):
 
         """
         Initialise le coordinateur d'entraînement avec approche synchronisée par étapes.
@@ -118,6 +121,9 @@ class AbaloneTrainerSync:
         self.recency_temperature = recency_temperature
         self.save_games = save_games
         self.eval_games = eval_games
+        self.enable_comprehensive_logging = enable_comprehensive_logging
+        self.metrics_logging_interval = metrics_logging_interval
+        self.gcs_bucket = gcs_bucket
 
         # Configuration du taux d'apprentissage et de l'optimiseur
         self.initial_lr = initial_lr
@@ -189,6 +195,12 @@ class AbaloneTrainerSync:
         if self.save_games:
             self._setup_game_logger(gcs_bucket, games_buffer_size, games_flush_interval)
 
+        # Initialisation du logger de métriques
+        self._setup_metrics_logger(gcs_bucket, enable_comprehensive_logging)
+
+        # Initialisation de l'agrégateur de métriques (seulement pour le processus principal)
+        self._setup_metrics_aggregator(gcs_bucket, enable_comprehensive_logging)
+
         # Configuration des fonctions JAX
         self._setup_jax_functions()
         
@@ -237,6 +249,46 @@ class AbaloneTrainerSync:
                 buffer_size=buffer_size,
                 flush_interval=flush_interval
             )
+
+    def _setup_metrics_logger(self, gcs_bucket, enable_comprehensive_logging):
+        """Configure le logger de métriques pour un suivi détaillé"""
+        if not enable_comprehensive_logging:
+            self.metrics_logger = None
+            if self.verbose:
+                logger.info("Comprehensive logging disabled")
+            return
+        
+        if gcs_bucket:
+            if self.verbose:
+                logger.info(f"Comprehensive metrics logging to GCS bucket: {gcs_bucket}")
+            self.metrics_logger = SimpleGCSLogger(
+                bucket_name=gcs_bucket,
+                process_id=self.process_id
+            )
+        else:
+            metrics_dir = os.path.join(self.log_dir, "metrics")
+            if self.verbose:
+                logger.info(f"Comprehensive metrics logging locally: {metrics_dir}")
+            self.metrics_logger = LocalMetricsLogger(
+                log_dir=metrics_dir,
+                process_id=self.process_id
+            )
+
+    def _setup_metrics_aggregator(self, gcs_bucket, enable_comprehensive_logging):
+        """Configure l'agrégateur de métriques pour consolider les logs par itération"""
+        if not enable_comprehensive_logging or not self.is_main_process:
+            self.metrics_aggregator = None
+            return
+        
+        if gcs_bucket:
+            if self.verbose:
+                logger.info(f"Metrics aggregator enabled for GCS bucket: {gcs_bucket}")
+            self.metrics_aggregator = IterationMetricsAggregator(bucket_name=gcs_bucket)
+        else:
+            metrics_dir = os.path.join(self.log_dir, "metrics")
+            if self.verbose:
+                logger.info(f"Metrics aggregator enabled for local directory: {metrics_dir}")
+            self.metrics_aggregator = IterationMetricsAggregator(log_dir=metrics_dir)
 
     def enable_evaluation(self, enable=True):
         """Active ou désactive l'évaluation"""
@@ -601,6 +653,19 @@ class AbaloneTrainerSync:
                     logger.info(f"  Perte politique: {metrics['policy_loss']:.4f}, Perte valeur: {metrics['value_loss']:.4f}")
                     logger.info(f"  Précision politique: {metrics['policy_accuracy']}%")
 
+                # Log timing metrics for this iteration
+                if self.metrics_logger:
+                    iter_total_time = time.time() - iter_start_time
+                    self.metrics_logger.log_timing_metrics(
+                        iteration=iteration,
+                        generation_time=t_gen,
+                        buffer_update_time=t_buffer,
+                        training_time=t_train,
+                        total_iteration_time=iter_total_time,
+                        games_per_sec=games_per_iteration / t_gen if t_gen > 0 else 0,
+                        steps_per_sec=training_steps_per_iteration / t_train if t_train > 0 else 0
+                    )
+
                 # Synchronisation après l'entraînement
                 jax.experimental.multihost_utils.sync_global_devices(f"post_training_iter_{iteration}")
                 logger.info(f"Processus {self.process_id}: Synchronisé après entraînement")
@@ -664,6 +729,23 @@ class AbaloneTrainerSync:
                 jax.experimental.multihost_utils.sync_global_devices(f"end_of_iteration_{iteration}")
                 logger.info(f"Processus {self.process_id}: Synchronisé à la fin de l'itération {iteration+1}")
 
+                # Agrégation des métriques à la fin de l'itération (seulement processus principal)
+                if self.metrics_aggregator and self.metrics_logger:
+                    try:
+                        # Laisser un peu de temps pour que tous les logs soient écrits
+                        import time
+                        time.sleep(1.0)
+                        
+                        # Use the new consolidated readable summary method instead of separate JSON files
+                        self.metrics_aggregator.write_consolidated_readable_summary(
+                            iteration=iteration,
+                            num_workers=self.num_processes,
+                            session_id=self.metrics_logger.session_id
+                        )
+                        logger.info(f"Processus {self.process_id}: Résumé consolidé écrit pour itération {iteration+1}")
+                    except Exception as e:
+                        logger.error(f"Erreur lors de l'agrégation des métriques pour itération {iteration+1}: {e}")
+
             # Sauvegarde finale
             final_is_reference = (num_iterations - 1) in self.reference_iterations
             logger.info(f"Processus {self.process_id}: Préparation de la fin de l'entraînement")
@@ -719,6 +801,24 @@ class AbaloneTrainerSync:
                 self.game_logger.stop()
                 logger.info(f"Processus {self.process_id}: Game logger arrêté")
 
+            # Write final summary and close metrics logger
+            if self.metrics_logger and self.is_main_process:
+                summary_data = {
+                    'session_completed': True,
+                    'total_iterations': num_iterations,
+                    'total_games': self.total_games,
+                    'total_positions': self.total_positions,
+                    'final_metrics': self.metrics_history[-1] if self.metrics_history else {},
+                    'device_info': {
+                        'process_id': self.process_id,
+                        'num_processes': self.num_processes,
+                        'device_type': self.device_type,
+                        'num_devices': self.num_devices
+                    }
+                }
+                self.metrics_logger.write_summary_log(summary_data)
+                logger.info(f"Processus {self.process_id}: Metrics logger summary written")
+
             if hasattr(self.buffer, 'close'):
                 logger.info(f"Processus {self.process_id}: Fermeture du buffer")
                 self.buffer.close()
@@ -773,6 +873,36 @@ class AbaloneTrainerSync:
 
         # Mettre à jour le compteur avec les jeux locaux
         self.total_games += local_total_games
+
+        # Log generation metrics
+        if self.metrics_logger:
+            # Calculate positions generated and mean plays per game
+            positions_generated = 0
+            total_game_lengths = 0
+            games_completed = 0
+            
+            for device_idx in range(self.num_devices):
+                device_data = jax.tree_util.tree_map(lambda x: x[device_idx], games_data)
+                games_per_device = len(device_data['moves_per_game'])
+                
+                for game_idx in range(games_per_device):
+                    game_length = int(device_data['moves_per_game'][game_idx])
+                    if game_length > 0:
+                        games_completed += 1
+                        total_game_lengths += game_length
+                        positions_generated += game_length + 1  # +1 for initial position
+            
+            mean_plays_per_game = total_game_lengths / games_completed if games_completed > 0 else 0
+            
+            self.metrics_logger.log_generation_metrics(
+                iteration=self.iteration,
+                positions_generated=positions_generated,
+                games_generated=games_completed,
+                games_requested=local_total_games,
+                mean_plays_per_game=mean_plays_per_game,
+                total_games_so_far=self.total_games,
+                total_positions_so_far=self.total_positions
+            )
 
         # Enregistrer les parties pour analyse si activé//Debug currently
         # if self.save_games and hasattr(self, 'game_logger'):
@@ -1055,6 +1185,29 @@ class AbaloneTrainerSync:
             
         local_metrics_record['total_games_local'] = self.total_games
         self.metrics_history.append(local_metrics_record)
+
+        # Log training metrics
+        if self.metrics_logger:
+            # Add buffer information
+            buffer_info = {}
+            if using_gcs_buffer:
+                buffer_info['buffer_size_total'] = self.buffer.total_size
+                buffer_info['buffer_size_local'] = self.buffer.local_size
+            else:
+                buffer_info['buffer_size'] = self.buffer.size
+            
+            self.metrics_logger.log_training_metrics(
+                iteration=self.iteration,
+                total_loss=avg_metrics.get('total_loss', 0.0),
+                policy_loss=avg_metrics.get('policy_loss', 0.0),
+                value_loss=avg_metrics.get('value_loss', 0.0),
+                policy_accuracy=avg_metrics.get('policy_accuracy', 0.0),
+                value_sign_match=avg_metrics.get('value_sign_match', 0.0),
+                learning_rate=self.current_lr,
+                training_steps_completed=steps_completed,
+                training_steps_requested=num_steps,
+                **buffer_info
+            )
 
         return avg_metrics
     

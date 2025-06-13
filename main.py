@@ -74,6 +74,10 @@ def parse_args():
                     help='Directory in the GCS bucket for the buffer')
     parser.add_argument('--verbose', action='store_true',
                    help='Enable verbose output')
+    parser.add_argument('--enable-comprehensive-logging', action='store_true', default=True,
+                   help='Enable comprehensive metrics logging to GCS/local files')
+    parser.add_argument('--disable-comprehensive-logging', action='store_true',
+                   help='Disable comprehensive metrics logging')
     
     # Model options
     parser.add_argument('--num-filters', type=int, default=None,
@@ -81,7 +85,7 @@ def parse_args():
     parser.add_argument('--num-blocks', type=int, default=None,
                        help='Number of residual blocks')
     
-    # MCTS options
+    # MCTS options  
     parser.add_argument('--num-simulations', type=int, default=None,
                        help='Number of MCTS simulations per action')
 
@@ -163,6 +167,13 @@ def display_config_summary(config):
     main_process_log(f"Batch: {config['training']['batch_size']}, {config['training']['training_steps_per_iteration']} steps/iter")
     main_process_log(f"MCTS: {config['mcts']['num_simulations']} simulations per action")
     main_process_log(f"Checkpoints: {config['checkpoint']['path']}")
+    
+    # Show logging configuration
+    logging_config = config.get('logging', {})
+    if logging_config.get('enable_comprehensive_logging', True):
+        main_process_log(f"Comprehensive logging: Enabled")
+    else:
+        main_process_log(f"Comprehensive logging: Disabled")
 
 
 def display_hardware_info():
@@ -233,7 +244,8 @@ def create_trainer(config, args):
         eval_games=eval_games,
         use_gcs_buffer=args.use_gcs_buffer,
         gcs_buffer_dir=args.gcs_buffer_dir,
-        verbose=args.verbose)
+        verbose=args.verbose,
+        enable_comprehensive_logging=(args.enable_comprehensive_logging and not args.disable_comprehensive_logging) if hasattr(args, 'enable_comprehensive_logging') else config.get('logging', {}).get('enable_comprehensive_logging', True))
 
     # Load checkpoint if specified
     if args.checkpoint:
