@@ -36,13 +36,36 @@ def get_valid_positions(radius: int = 4):
 def cube_to_2d(board_3d: chex.Array, radius: int = 4) -> chex.Array:
     """
     Convertit le plateau de la représentation cubique (3D) vers une grille 2D 9x9
+    Version vectorisée pour vmap
     """
     # Utiliser -2 pour les cases invalides (au lieu de NaN)
     board_2d = jnp.full((9, 9), -2, dtype=board_3d.dtype)
     
-    def convert_position(carry, position):
-        board, = carry
-        x, y, z = position
+    # Positions valides pré-calculées comme array JAX
+    valid_positions = jnp.array([
+        # Ligne 0 (z = -4)
+        [0,4,-4], [1,3,-4], [2,2,-4], [3,1,-4], [4,0,-4],
+        # Ligne 1 (z = -3)
+        [-1,4,-3], [0,3,-3], [1,2,-3], [2,1,-3], [3,0,-3], [4,-1,-3],
+        # Ligne 2
+        [-2,4,-2], [-1,3,-2], [0,2,-2], [1,1,-2], [2,0,-2], [3,-1,-2], [4,-2,-2],
+        # Ligne 3
+        [-3,4,-1], [-2,3,-1], [-1,2,-1], [0,1,-1], [1,0,-1], [2,-1,-1], [3,-2,-1], [4,-3,-1],
+        #Ligne 4
+        [-4,4,0], [-3,3,0], [-2,2,0], [-1,1,0], [0,0,0], [1,-1,0], [2,-2,0], [3,-3,0], [4,-4,0],
+        # Ligne 5
+        [-4,3,1], [-3,2,1], [-2,1,1], [-1,0,1], [0,-1,1], [1,-2,1], [2,-3,1], [3,-4,1],
+        # Ligne 6
+        [-4,2,2], [-3,1,2], [-2,0,2], [-1,-1,2], [0,-2,2], [1,-3,2], [2,-4,2],
+        # Ligne 7
+        [-4,1,3], [-3,0,3], [-2,-1,3], [-1,-2,3], [0,-3,3], [1,-4,3],
+        # Ligne 8
+        [-4,0,4], [-3,-1,4], [-2,-2,4], [-1,-3,4], [0,-4,4]
+    ])
+    
+    def convert_single_position(carry, position):
+        board = carry
+        x, y, z = position[0], position[1], position[2]
         
         # Convertir en indices de tableau 3D
         array_x = x + radius
@@ -58,10 +81,10 @@ def cube_to_2d(board_3d: chex.Array, radius: int = 4) -> chex.Array:
         
         # Mettre à jour le tableau
         new_board = board.at[row, col].set(value)
-        return (new_board,), None
+        return new_board, None
     
-    # Convertir toutes les positions valides
-    (final_board,), _ = jax.lax.scan(convert_position, (board_2d,), jnp.array(get_valid_positions()))
+    # Utiliser scan pour appliquer la conversion séquentiellement
+    final_board, _ = jax.lax.scan(convert_single_position, board_2d, valid_positions)
     
     return final_board
 
