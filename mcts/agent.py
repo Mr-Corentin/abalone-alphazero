@@ -79,6 +79,7 @@ def get_best_move(state: AbaloneState,
     # Transformer l'état en batch de taille 1
     batch_state = AbaloneState(
         board=state.board[None, ...],
+        history=state.history[None, ...],
         actual_player=jnp.array([state.actual_player]),
         black_out=jnp.array([state.black_out]),
         white_out=jnp.array([state.white_out]),
@@ -129,6 +130,7 @@ def get_move_probabilities(state: AbaloneState,
     # Transformer l'état en batch de taille 1
     batch_state = AbaloneState(
         board=state.board[None, ...],
+        history=state.history[None, ...],
         actual_player=jnp.array([state.actual_player]),
         black_out=jnp.array([state.black_out]),
         white_out=jnp.array([state.white_out]),
