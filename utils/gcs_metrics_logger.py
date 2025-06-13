@@ -408,7 +408,7 @@ class IterationMetricsAggregator:
             return os.path.join(self.log_dir, "training_metrics_summary.txt")
     
     def _initialize_consolidated_log(self):
-        """Initialize the consolidated log file with header if it doesn't exist."""
+        """Initialize the consolidated log file with header, cleaning any existing content."""
         if not self.enabled:
             return
         
@@ -422,13 +422,15 @@ Last updated: {datetime}
         try:
             if self.use_gcs:
                 blob = self.bucket.blob(self.consolidated_log_path)
-                if not blob.exists():
-                    blob.upload_from_string(header, content_type='text/plain')
+                # Always overwrite the file to clean previous training data
+                blob.upload_from_string(header, content_type='text/plain')
+                logger.info(f"Consolidated log file cleaned and initialized: {self.consolidated_log_path}")
             else:
                 import os
-                if not os.path.exists(self.consolidated_log_path):
-                    with open(self.consolidated_log_path, 'w') as f:
-                        f.write(header)
+                # Always overwrite the file to clean previous training data
+                with open(self.consolidated_log_path, 'w') as f:
+                    f.write(header)
+                logger.info(f"Consolidated log file cleaned and initialized: {self.consolidated_log_path}")
         except Exception as e:
             logger.error(f"Failed to initialize consolidated log: {e}")
     

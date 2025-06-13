@@ -729,11 +729,16 @@ class AbaloneTrainerSync:
                 jax.experimental.multihost_utils.sync_global_devices(f"end_of_iteration_{iteration}")
                 logger.info(f"Processus {self.process_id}: Synchronisé à la fin de l'itération {iteration+1}")
 
+                # Synchroniser avant l'agrégation des métriques pour s'assurer que tous les workers ont fini d'écrire leurs logs
+                logger.info(f"Processus {self.process_id}: En attente de synchronisation avant agrégation des métriques")
+                jax.experimental.multihost_utils.sync_global_devices(f"before_metrics_aggregation_{iteration}")
+                logger.info(f"Processus {self.process_id}: Synchronisé avant agrégation des métriques")
+
                 # Agrégation des métriques à la fin de l'itération (seulement processus principal)
                 if self.metrics_aggregator and self.metrics_logger:
                     try:
-                        # Laisser un peu de temps pour que tous les logs soient écrits
-                        time.sleep(1.0)
+                        # Laisser un peu de temps supplémentaire pour que tous les logs soient écrits
+                        time.sleep(2.0)
                         
                         # Use the new consolidated readable summary method instead of separate JSON files
                         self.metrics_aggregator.write_consolidated_readable_summary(
