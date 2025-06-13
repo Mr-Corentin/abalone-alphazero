@@ -733,7 +733,6 @@ class AbaloneTrainerSync:
                 if self.metrics_aggregator and self.metrics_logger:
                     try:
                         # Laisser un peu de temps pour que tous les logs soient écrits
-                        import time
                         time.sleep(1.0)
                         
                         # Use the new consolidated readable summary method instead of separate JSON files
