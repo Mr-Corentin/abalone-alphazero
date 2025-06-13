@@ -151,7 +151,7 @@ class AbaloneEnv:
         import os
         
         # Construire le chemin vers le fichier dans le dossier data/
-        data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'organized_move_map.npz')
+        data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'move_map.npz')
         
         # Charger les données
         moves_data = np.load(data_path)
