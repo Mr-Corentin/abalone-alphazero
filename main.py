@@ -80,6 +80,10 @@ def parse_args():
                        help='Number of filters in the network')
     parser.add_argument('--num-blocks', type=int, default=None,
                        help='Number of residual blocks')
+    
+    # MCTS options
+    parser.add_argument('--num-simulations', type=int, default=None,
+                       help='Number of MCTS simulations per action')
 
     return parser.parse_args()
 
@@ -122,6 +126,9 @@ def get_merged_config(args):
     
     if args.num_blocks:
         config['model']['num_blocks'] = args.num_blocks
+    
+    if args.num_simulations:
+        config['mcts']['num_simulations'] = args.num_simulations
     
     if args.checkpoint_path:
         config['checkpoint']['path'] = args.checkpoint_path
