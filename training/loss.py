@@ -44,6 +44,31 @@ from functools import partial
 
 #     return total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match)
 
+# @partial(jax.jit, static_argnames=['network', 'value_weight'])
+# def compute_loss(params, batch, network, value_weight=1.0):
+#     """
+#     Calcule la fonction de perte pour l'entraînement du réseau
+#     """
+#     (board_states, marbles_states), target_policies, target_values = batch
+
+#     predicted_policies, predicted_values = network.apply(params, board_states, marbles_states)
+    
+#     epsilon = 1e-7
+#     target_policies = target_policies * (1.0 - epsilon) + epsilon / target_policies.shape[-1]
+    
+#     policy_loss = optax.softmax_cross_entropy(predicted_policies, target_policies).mean()
+
+#     value_loss = jnp.mean((target_values - predicted_values.squeeze()) ** 2)
+
+#     policy_accuracy = jnp.mean(jnp.argmax(predicted_policies, axis=1) ==
+#                               jnp.argmax(target_policies, axis=1))
+#     value_sign_match = jnp.mean(jnp.sign(predicted_values.squeeze()) ==
+#                                jnp.sign(target_values))
+
+#     total_loss = policy_loss + value_weight * value_loss
+
+#     return total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match)
+
 @partial(jax.jit, static_argnames=['network', 'value_weight'])
 def compute_loss(params, batch, network, value_weight=1.0):
     """
@@ -58,17 +83,17 @@ def compute_loss(params, batch, network, value_weight=1.0):
     
     policy_loss = optax.softmax_cross_entropy(predicted_policies, target_policies).mean()
 
-    value_loss = jnp.mean((target_values - predicted_values.squeeze()) ** 2)
+    squeezed_predicted_values = predicted_values.squeeze()
+    value_loss = jnp.mean((target_values - squeezed_predicted_values) ** 2)
 
     policy_accuracy = jnp.mean(jnp.argmax(predicted_policies, axis=1) ==
                               jnp.argmax(target_policies, axis=1))
-    value_sign_match = jnp.mean(jnp.sign(predicted_values.squeeze()) ==
+    value_sign_match = jnp.mean(jnp.sign(squeezed_predicted_values) ==
                                jnp.sign(target_values))
 
     total_loss = policy_loss + value_weight * value_loss
 
     return total_loss, (policy_loss, value_loss, policy_accuracy, value_sign_match)
-
 
 @partial(jax.jit, static_argnames=['network', 'value_weight'])
 def train_step_pmap_impl(params, inputs, target_policies, target_values, network, value_weight=1.0):
