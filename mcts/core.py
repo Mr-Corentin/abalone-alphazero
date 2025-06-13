@@ -93,7 +93,7 @@ class AbaloneMCTSRecurrentFn:
         board_2d, marbles_out = prepare_input_legacy(next_states.board, our_marbles, opp_marbles)
         
         # Convertir l'historique en 2D pour le réseau
-        history_2d = jax.vmap(cube_to_2d)(next_states.history)  # (batch, 8, 9, 9)
+        history_2d = jax.vmap(jax.vmap(cube_to_2d))(next_states.history)  # (batch, 8, 9, 9)
 
         # 5. Évaluation par le réseau avec historique
         prior_logits, value = self.network.apply(params, board_2d, marbles_out, history_2d)
@@ -139,7 +139,7 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, e
     board_2d, marbles_out = prepare_input_legacy(states.board, our_marbles, opp_marbles)
     
     # Convertir l'historique en 2D pour le réseau
-    history_2d = jax.vmap(cube_to_2d)(states.history)  # (batch, 8, 9, 9)
+    history_2d = jax.vmap(jax.vmap(cube_to_2d))(states.history)  # (batch, 8, 9, 9)
 
     # Obtenir les prédictions du réseau avec historique
     prior_logits, value = network.apply(params, board_2d, marbles_out, history_2d)

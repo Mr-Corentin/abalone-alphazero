@@ -72,14 +72,14 @@ def cube_to_2d(board_3d: chex.Array, radius: int = 4) -> chex.Array:
         array_y = y + radius
         array_z = z + radius
         
-        # Obtenir la valeur
+        # Obtenir la valeur (assurer que c'est un scalaire)
         value = board_3d[array_x, array_y, array_z]
         
         # Calculer les coordonnées 2D
         row = z + radius
         col = x + 4
         
-        # Mettre à jour le tableau
+        # Mettre à jour le tableau 
         new_board = board.at[row, col].set(value)
         return new_board, None
     
