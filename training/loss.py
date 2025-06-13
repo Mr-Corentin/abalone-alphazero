@@ -74,9 +74,17 @@ def compute_loss(params, batch, network, value_weight=1.0):
     """
     Calcule la fonction de perte pour l'entraînement du réseau
     """
-    (board_states, marbles_states), target_policies, target_values = batch
-
-    predicted_policies, predicted_values = network.apply(params, board_states, marbles_states)
+    inputs, target_policies, target_values = batch
+    
+    # Gérer le format d'entrée avec ou sans historique
+    if len(inputs) == 3:
+        # Nouveau format avec historique: (board_states, marbles_states, history_states)
+        board_states, marbles_states, history_states = inputs
+        predicted_policies, predicted_values = network.apply(params, board_states, marbles_states, history_states)
+    else:
+        # Ancien format sans historique: (board_states, marbles_states)
+        board_states, marbles_states = inputs
+        predicted_policies, predicted_values = network.apply(params, board_states, marbles_states)
     
     epsilon = 1e-7
     target_policies = target_policies * (1.0 - epsilon) + epsilon / target_policies.shape[-1]

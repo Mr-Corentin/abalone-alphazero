@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import chex
 from typing import Tuple, Dict, NamedTuple
-from core.board import initialize_board, create_custom_board
+from core.board import initialize_board, create_custom_board, create_board_mask
 from core.legal_moves import get_legal_moves
 from core.moves import move_group_inline, move_group_parallel, move_single_marble
 import numpy as np
@@ -12,6 +12,7 @@ from functools import partial
 class AbaloneState(NamedTuple):
     """État du jeu d'Abalone (version canonique)"""
     board: chex.Array  # Le plateau où le joueur courant est toujours 1
+    history: chex.Array  # 8 dernières positions (8, 9, 9, 9) - canoniques aussi
     actual_player: int  # Le joueur réel (1=noir, -1=blanc)
     black_out: int  # Nombre de billes noires sorties
     white_out: int  # Nombre de billes blanches sorties
@@ -27,8 +28,19 @@ class AbaloneEnv:
     def reset(self, rng: chex.PRNGKey) -> AbaloneState:
         """Reset avec une clé RNG pour compatibilité batch."""
         board = initialize_board()  # Peut être randomisé avec rng plus tard
+        
+        # Initialiser l'historique avec la même structure que le board (y compris les NaN)
+        # mais avec toutes les positions valides à 0
+        history_shape = (8,) + board.shape
+        valid_mask = create_board_mask(self.radius)
+        
+        # Créer l'historique : NaN pour positions invalides, 0 pour positions valides
+        single_history_layer = jnp.where(valid_mask, 0.0, jnp.nan)
+        history = jnp.repeat(single_history_layer[None, ...], 8, axis=0)
+        
         return AbaloneState(
             board=board,
+            history=history,
             actual_player=1,
             black_out=0,
             white_out=0,
@@ -44,9 +56,16 @@ class AbaloneEnv:
         # Créer batch_size copies du plateau
         # On veut: (batch_size, size, size, size)
         boards = jnp.repeat(single_board[None, ...], batch_size, axis=0)
+        
+        # Initialiser l'historique pour le batch avec la même logique
+        valid_mask = create_board_mask(self.radius)
+        single_history_layer = jnp.where(valid_mask, 0.0, jnp.nan)
+        single_history = jnp.repeat(single_history_layer[None, ...], 8, axis=0)
+        histories = jnp.repeat(single_history[None, ...], batch_size, axis=0)
 
         return AbaloneState(
             board=boards,  # shape: (batch_size, size, size, size)
+            history=histories,  # shape: (batch_size, 8, size, size, size)
             actual_player=jnp.ones(batch_size, dtype=jnp.int32),
             black_out=jnp.zeros(batch_size, dtype=jnp.int32),
             white_out=jnp.zeros(batch_size, dtype=jnp.int32),
@@ -95,12 +114,18 @@ class AbaloneEnv:
         # S'assurer que actual_player est un scalaire
         actual_player = state.actual_player.reshape(())
 
+        # Mise à jour de l'historique AVANT la transformation canonique
+        # Décaler l'historique et ajouter l'ancienne position actuelle (RÉELLE, pas canonique)
+        new_history = jnp.roll(state.history, shift=1, axis=0)  # Décaler tout vers la droite
+        new_history = new_history.at[0].set(state.board)  # Sauvegarder l'ancienne position RÉELLE
+
         # Mise à jour des billes sorties
         black_out = state.black_out + billes_sorties * (actual_player == -1)
         white_out = state.white_out + billes_sorties * (actual_player == 1)
 
         return AbaloneState(
-            board=-new_board,
+            board=-new_board,  # Nouveau plateau canonique pour le nouveau joueur
+            history=new_history, 
             actual_player=-actual_player,
             black_out=black_out,
             white_out=white_out,
@@ -126,7 +151,7 @@ class AbaloneEnv:
         import os
         
         # Construire le chemin vers le fichier dans le dossier data/
-        data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'move_map.npz')
+        data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'organized_move_map.npz')
         
         # Charger les données
         moves_data = np.load(data_path)
@@ -225,6 +250,7 @@ class AbaloneEnv:
 class AbaloneStateNonCanonical(NamedTuple):
     """État du jeu d'Abalone (version non-canonique)"""
     board: chex.Array  # Le plateau où noir=1, blanc=-1 (fixe)
+    history: chex.Array  # 8 dernières positions - à ajouter plus tard si nécessaire
     current_player: int  # Le joueur qui doit jouer (1=noir, -1=blanc)
     black_out: int  # Nombre de billes noires sorties
     white_out: int  # Nombre de billes blanches sorties
@@ -234,8 +260,14 @@ class AbaloneEnvNonCanonical(AbaloneEnv):
     def reset(self, rng: chex.PRNGKey) -> AbaloneStateNonCanonical:
         """Reset avec une clé RNG pour compatibilité batch."""
         board = initialize_board()  # Noir=1, blanc=-1
+        
+        # Pour l'instant, historique vide pour la version non-canonique
+        history_shape = (8,) + board.shape
+        history = jnp.zeros(history_shape, dtype=board.dtype)
+        
         return AbaloneStateNonCanonical(
             board=board,
+            history=history,
             current_player=1,  # Noir commence
             black_out=0,
             white_out=0,
@@ -249,6 +281,7 @@ class AbaloneEnvNonCanonical(AbaloneEnv):
         canonical_board = self.get_canonical_state(state.board, state.current_player)
         canonical_state = AbaloneState(
             board=canonical_board,
+            history=state.history,
             actual_player=state.current_player,
             black_out=state.black_out,
             white_out=state.white_out,
@@ -295,6 +328,7 @@ class AbaloneEnvNonCanonical(AbaloneEnv):
         white_out = state.white_out + billes_sorties * (state.current_player == 1)
         return AbaloneStateNonCanonical(
             board=non_canonical_board,
+            history=state.history,
             current_player=-state.current_player,  # Changer de joueur
             black_out=black_out,
             white_out=white_out,

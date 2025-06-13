@@ -89,10 +89,11 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
     # Initialiser recurrent_fn pour MCTS
     recurrent_fn = AbaloneMCTSRecurrentFn(env, network)
 
-    # Pré-allouer les buffers - maintenant avec des plateaux 2D
+    # Pré-allouer les buffers - maintenant avec des plateaux 2D et historique
     # Supposons que la conversion 3D->2D donne un plateau 9x9
     boards_3d = jnp.zeros((batch_size, max_moves + 1) + init_states.board.shape[1:], dtype=jnp.int8)  # +1 pour l'état terminal
     boards_2d = jnp.zeros((batch_size, max_moves + 1, 9, 9), dtype=jnp.int8)  # Plateaux convertis en 2D, +1 pour l'état terminal
+    history_2d = jnp.zeros((batch_size, max_moves + 1, 8, 9, 9), dtype=jnp.int8)  # Historique 2D avec 8 positions
     actual_players = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
     black_outs = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
     white_outs = jnp.zeros((batch_size, max_moves + 1), dtype=jnp.int8)
@@ -108,7 +109,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
 
     def game_step(carry):
         states, rng, arrays, moves_per_game, active = carry
-        boards_3d, boards_2d, actual_players, black_outs, white_outs, moves_counts, policies, is_terminal_states = arrays
+        boards_3d, boards_2d, history_2d, actual_players, black_outs, white_outs, moves_counts, policies, is_terminal_states = arrays
 
         # Vérifier les terminaisons
         terminal_states = jax.vmap(env.is_terminal)(states)
@@ -143,6 +144,13 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
             jnp.where(active[:, None, None], current_boards_2d, boards_2d[jnp.arange(batch_size), moves_per_game])
         )
         
+        # Convertir et stocker l'historique 2D
+        # states.history shape: (batch_size, 8, x, y, z) -> (batch_size, 8, 9, 9)
+        current_history_2d = jax.vmap(batch_cube_to_2d)(states.history)
+        new_history_2d = history_2d.at[jnp.arange(batch_size), moves_per_game].set(
+            jnp.where(active[:, None, None, None], current_history_2d, history_2d[jnp.arange(batch_size), moves_per_game])
+        )
+        
         # Reste du code identique
         new_actual_players = actual_players.at[jnp.arange(batch_size), moves_per_game].set(
             jnp.where(active, states.actual_player, actual_players[jnp.arange(batch_size), moves_per_game])
@@ -165,6 +173,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
         # Mettre à jour l'état pour le prochain tour (seulement pour les parties actives non-terminales)
         final_states = AbaloneState(
             board=jnp.where(active_games[:, None, None, None], next_states.board, states.board),
+            history=jnp.where(active_games[:, None, None, None, None], next_states.history, states.history),
             actual_player=jnp.where(active_games, next_states.actual_player, states.actual_player),
             black_out=jnp.where(active_games, next_states.black_out, states.black_out),
             white_out=jnp.where(active_games, next_states.white_out, states.white_out),
@@ -174,7 +183,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
         # Incrémenter moves_per_game seulement pour les parties actives non-terminales
         new_moves_per_game = jnp.where(active_games, moves_per_game + 1, moves_per_game)
 
-        new_arrays = (new_boards_3d, new_boards_2d, new_actual_players, new_black_outs,
+        new_arrays = (new_boards_3d, new_boards_2d, new_history_2d, new_actual_players, new_black_outs,
                     new_white_outs, new_moves_counts, new_policies, is_terminal_states)
 
         return (final_states, rng, new_arrays, new_moves_per_game, active_games)
@@ -183,7 +192,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
         _, _, _, _, active = carry
         return jnp.any(active)
 
-    arrays = (boards_3d, boards_2d, actual_players, black_outs, white_outs, moves_counts, policies, is_terminal_states)
+    arrays = (boards_3d, boards_2d, history_2d, actual_players, black_outs, white_outs, moves_counts, policies, is_terminal_states)
     initial_active = jnp.ones(batch_size, dtype=jnp.bool_)
 
     final_states, _, final_arrays, final_moves_per_game, _ = jax.lax.while_loop(
@@ -193,11 +202,12 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
     )
     
     # Extraction des tableaux finaux
-    _, final_boards_2d, final_actual_players, final_black_outs, final_white_outs, final_moves_counts, final_policies, final_terminal_states = final_arrays
+    _, final_boards_2d, final_history_2d, final_actual_players, final_black_outs, final_white_outs, final_moves_counts, final_policies, final_terminal_states = final_arrays
     
     # Création d'un dictionnaire pytree pour optimiser le transfert
     essential_data = {
         'boards_2d': final_boards_2d,          # Plateaux 2D pour chaque mouvement
+        'history_2d': final_history_2d,        # Historique 2D pour chaque mouvement
         'policies': final_policies,            # Politiques MCTS pour chaque mouvement
         'moves_per_game': final_moves_per_game,  # Longueur réelle de chaque partie
         'actual_players': final_actual_players,  # Joueur actif à chaque mouvement

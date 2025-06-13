@@ -67,6 +67,7 @@ class AbaloneMCTSRecurrentFn:
         # 1. Construction des états en batch
         current_states = jax.vmap(lambda b: AbaloneState(
             board=embedding['board_3d'][b],
+            history=embedding.get('history_3d', jnp.zeros((8,) + embedding['board_3d'][b].shape))[b],
             actual_player=embedding['actual_player'][b],
             black_out=embedding['black_out'][b],
             white_out=embedding['white_out'][b],
@@ -88,7 +89,9 @@ class AbaloneMCTSRecurrentFn:
                                next_states.white_out,
                                next_states.black_out)
 
-        board_2d, marbles_out = prepare_input(next_states.board, our_marbles, opp_marbles)
+        # Pour MCTS, utiliser la version legacy sans historique pour l'instant
+        from core.coord_conversion import prepare_input_legacy
+        board_2d, marbles_out = prepare_input_legacy(next_states.board, our_marbles, opp_marbles)
 
         # 5. Évaluation par le réseau
         prior_logits, value = self.network.apply(params, board_2d, marbles_out)
@@ -96,6 +99,7 @@ class AbaloneMCTSRecurrentFn:
         # 6. Préparation du prochain embedding
         next_embedding = {
             'board_3d': next_states.board,
+            'history_3d': next_states.history,
             'actual_player': next_states.actual_player,
             'black_out': next_states.black_out,
             'white_out': next_states.white_out,
@@ -129,14 +133,16 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, e
                            states.white_out,
                            states.black_out)
 
-    # Préparer les entrées du réseau
-    board_2d, marbles_out = prepare_input(states.board, our_marbles, opp_marbles)
+    # Préparer les entrées du réseau - utiliser la version legacy pour MCTS
+    from core.coord_conversion import prepare_input_legacy
+    board_2d, marbles_out = prepare_input_legacy(states.board, our_marbles, opp_marbles)
 
     # Obtenir les prédictions du réseau
     prior_logits, value = network.apply(params, board_2d, marbles_out)
 
     embedding = {
         'board_3d': states.board,  # shape: (batch_size, x, y, z)
+        'history_3d': states.history,  # shape: (batch_size, 8, x, y, z)
         'actual_player': states.actual_player,  # shape: (batch_size,)
         'black_out': states.black_out,  # shape: (batch_size,)
         'white_out': states.white_out,  # shape: (batch_size,)

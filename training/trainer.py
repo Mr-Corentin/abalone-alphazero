@@ -172,7 +172,8 @@ class AbaloneTrainerSync:
         rng = jax.random.PRNGKey(42)
         sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
-        self.params = network.init(rng, sample_board, sample_marbles)
+        sample_history = jnp.zeros((1, 8, 9, 9), dtype=jnp.int8)  # 8 positions d'historique
+        self.params = network.init(rng, sample_board, sample_marbles, sample_history)
         self.opt_state = self.optimizer.init(self.params)
 
         # Statistiques
@@ -841,6 +842,12 @@ class AbaloneTrainerSync:
                 actual_players = device_data['actual_players'][game_idx][:game_length+1]
                 black_outs = device_data['black_outs'][game_idx][:game_length+1]
                 white_outs = device_data['white_outs'][game_idx][:game_length+1]
+                # Extraire l'historique si disponible
+                if 'history_2d' in device_data:
+                    history_2d = device_data['history_2d'][game_idx][:game_length+1]
+                else:
+                    # Créer un historique vide pour compatibilité rétroactive
+                    history_2d = np.zeros((game_length+1, 8, 9, 9), dtype=np.int8)
                 
                 # Déterminer le résultat final
                 final_black_out = device_data['final_black_out'][game_idx]
@@ -883,6 +890,7 @@ class AbaloneTrainerSync:
                         policies[move_idx],
                         outcome_for_player,
                         player,
+                        history=history_2d[move_idx],  # Ajouter l'historique
                         game_id=game_id,
                         move_num=move_idx,
                         iteration=self.iteration,
@@ -968,16 +976,23 @@ class AbaloneTrainerSync:
             marbles = jnp.array(batch_data['marbles_out'])
             policies = jnp.array(batch_data['policy'])
             values = jnp.array(batch_data['outcome'])
+            # Récupérer l'historique si disponible, sinon créer un historique vide
+            if 'history' in batch_data:
+                history = jnp.array(batch_data['history'])
+            else:
+                # Historique vide pour compatibilité rétroactive
+                history = jnp.zeros((boards.shape[0], 8, 9, 9), dtype=jnp.int8)
 
             # Reshaping pour distribution sur les dispositifs
             boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
             marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
+            history = history.reshape(self.num_devices, -1, *history.shape[1:])
             policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_devices, -1, *values.shape[1:])
 
             # Exécution de l'étape d'entraînement
             metrics_sharded, grads_averaged = self.train_step_pmap(
-                params_sharded, (boards, marbles), policies, values
+                params_sharded, (boards, marbles, history), policies, values
             )
 
             # Application des mises à jour

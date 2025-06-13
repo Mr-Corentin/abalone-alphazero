@@ -88,15 +88,79 @@ def compute_coord_map(radius: int = 4):
 
 
 @partial(jax.jit, static_argnames=['radius'])
-def prepare_input(board_3d: jnp.ndarray, our_marbles_out: jnp.ndarray, opponent_marbles_out: jnp.ndarray, radius: int = 4):
+def prepare_input(board_3d: jnp.ndarray, 
+                  history_3d: jnp.ndarray,
+                  actual_player: jnp.ndarray,
+                  our_marbles_out: jnp.ndarray, 
+                  opponent_marbles_out: jnp.ndarray, 
+                  radius: int = 4):
     """
-    Prépare les entrées pour le réseau avec support du batching.
+    Prépare les entrées pour le réseau avec support du batching et historique canonique.
 
     Args:
         board_3d: Shape (batch_size, x, y, z) en batch ou (x, y, z) sans batch
+        history_3d: Shape (batch_size, 8, x, y, z) en batch ou (8, x, y, z) sans batch
+        actual_player: Shape (batch_size,) ou scalaire - joueur actuel (1 ou -1)
         our_marbles_out: Shape (batch_size,) ou scalaire
         opponent_marbles_out: Shape (batch_size,) ou scalaire
         radius: Rayon du plateau
+        
+    Returns:
+        board_2d: Shape (batch_size, 9, 9, 9) - board actuel + 8 positions historiques (canoniques)
+        marbles_out: Shape (batch_size, 2) - billes sorties [nous, adversaire]
+    """
+    # Détecter si on a un batch ou un seul exemple
+    is_batched = board_3d.ndim > 3  # car board_3d est déjà en 3D
+
+    if not is_batched:
+        # Si single example, ajouter dimension de batch
+        board_3d = board_3d[None, ...]  # (1, x, y, z)
+        history_3d = history_3d[None, ...]  # (1, 8, x, y, z)
+        actual_player = jnp.array([actual_player])  # (1,)
+        our_marbles_out = jnp.array([our_marbles_out])
+        opponent_marbles_out = jnp.array([opponent_marbles_out])
+
+    # Convertir le board actuel : (batch_size, x, y, z) -> (batch_size, 9, 9)
+    # Le board actuel est déjà canonique
+    current_board_2d = jax.vmap(lambda b: cube_to_2d(b, radius))(board_3d)
+    
+    # Appliquer la transformation canonique à l'historique
+    # L'historique contient les positions "réelles", il faut les adapter au joueur actuel
+    def canonicalize_history_for_player(history, player):
+        """Transforme l'historique pour que le joueur actuel voie ses pièces comme 1"""
+        return jnp.where(player == 1, history, -history)
+    
+    # Appliquer la canonicalisation à chaque élément du batch
+    canonical_history = jax.vmap(canonicalize_history_for_player)(history_3d, actual_player)
+    
+    # Convertir l'historique canonique : (batch_size, 8, x, y, z) -> (batch_size, 8, 9, 9)
+    history_2d = jax.vmap(jax.vmap(lambda h: cube_to_2d(h, radius)))(canonical_history)
+    
+    # Empiler board actuel + historique en canaux
+    # current_board_2d: (batch_size, 9, 9) -> (batch_size, 9, 9, 1)
+    current_board_2d = current_board_2d[..., None]
+    
+    # history_2d: (batch_size, 8, 9, 9) -> (batch_size, 9, 9, 8)
+    history_2d = jnp.transpose(history_2d, (0, 2, 3, 1))
+    
+    # Concaténer : (batch_size, 9, 9, 1) + (batch_size, 9, 9, 8) = (batch_size, 9, 9, 9)
+    board_with_history = jnp.concatenate([current_board_2d, history_2d], axis=-1)
+
+    # Remplacer les NaN par -2 et convertir en int8
+    board_with_history = jnp.nan_to_num(board_with_history, -2.0)
+    board_with_history = board_with_history.astype(jnp.int8)
+
+    # Créer le vecteur des billes sorties (batch_size, 2)
+    marbles_out = jnp.stack([our_marbles_out, opponent_marbles_out], axis=-1)
+
+    return board_with_history, marbles_out
+
+
+# Fonction de compatibilité pour l'ancien code
+@partial(jax.jit, static_argnames=['radius'])
+def prepare_input_legacy(board_3d: jnp.ndarray, our_marbles_out: jnp.ndarray, opponent_marbles_out: jnp.ndarray, radius: int = 4):
+    """
+    Version legacy de prepare_input sans historique pour compatibilité.
     """
     # Détecter si on a un batch ou un seul exemple
     is_batched = board_3d.ndim > 3  # car board_3d est déjà en 3D
@@ -108,14 +172,11 @@ def prepare_input(board_3d: jnp.ndarray, our_marbles_out: jnp.ndarray, opponent_
         opponent_marbles_out = jnp.array([opponent_marbles_out])
 
     # Utiliser vmap pour appliquer cube_to_2d sur chaque élément du batch
-    # in_axes=0 car on veut mapper sur la première dimension (batch)
-    # board_2d aura shape (batch_size, 9, 9)
     board_2d = jax.vmap(lambda b: cube_to_2d(b, radius))(board_3d)
 
-    # Remplacer les NaN par 0
-    #board_2d = jnp.nan_to_num(board_2d, 0.0)
-    board_2d = jnp.nan_to_num(board_2d, -2.0)  # Remplacer NaN par -2
-    board_2d = board_2d.astype(jnp.int8)  # Conversion en int8 pour efficacité
+    # Remplacer les NaN par -2 et convertir en int8
+    board_2d = jnp.nan_to_num(board_2d, -2.0)
+    board_2d = board_2d.astype(jnp.int8)
 
     # Créer le vecteur des billes sorties (batch_size, 2)
     marbles_out = jnp.stack([our_marbles_out, opponent_marbles_out], axis=-1)
