@@ -10,29 +10,60 @@ from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel
 from core.coord_conversion import prepare_input, prepare_input_legacy, cube_to_2d
 
+# @partial(jax.jit)
+# def calculate_reward_intermediate(current_state: AbaloneState, next_state: AbaloneState) -> float:
+#     """
+#     INTERMEDIATE REWARDS VERSION (commented out)
+#     Calcule la récompense d'une transition en version canonique
+#     - 1.0 pour gagner la partie
+#     - 0.1 pour chaque bille adverse sortie
+#     """
+#     black_diff = next_state.black_out - current_state.black_out
+#     white_diff = next_state.white_out - current_state.white_out
+
+#     # Billes sorties par le joueur courant
+#     billes_sorties = jnp.where(current_state.actual_player == 1,
+#                               white_diff,  # Noir sort des blanches
+#                               black_diff)  # Blanc sort des noires
+
+#     # Récompense pour les billes sorties
+#     marble_reward = billes_sorties * 0.1
+
+#     # Récompense pour gagner la partie (6 billes sorties)
+#     game_won = (next_state.black_out >= 6) | (next_state.white_out >= 6)
+#     winning_reward = jnp.where(game_won, 1.0, 0.0)
+
+#     return marble_reward + winning_reward
+
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
     """
-    Calcule la récompense d'une transition en version canonique
-    - 1.0 pour gagner la partie
-    - 0.1 pour chaque bille adverse sortie
+    TERMINAL REWARDS ONLY (AlphaZero approach) - VERSION CANONIQUE
+    Calcule la récompense d'une transition - rewards seulement à la fin de partie
+    - +1.0 pour gagner la partie (depuis la perspective du joueur courant)
+    - -1.0 pour perdre la partie (depuis la perspective du joueur courant)
+    - 0.0 pour toutes les autres transitions
+    
+    Note: Utilise la même logique que trainer.py avec outcome * player
     """
-    black_diff = next_state.black_out - current_state.black_out
-    white_diff = next_state.white_out - current_state.white_out
-
-    # Billes sorties par le joueur courant
-    billes_sorties = jnp.where(current_state.actual_player == 1,
-                              white_diff,  # Noir sort des blanches
-                              black_diff)  # Blanc sort des noires
-
-    # Récompense pour les billes sorties
-    marble_reward = billes_sorties * 0.1
-
-    # Récompense pour gagner la partie (6 billes sorties)
-    game_won = (next_state.black_out >= 6) | (next_state.white_out >= 6)
-    winning_reward = jnp.where(game_won, 1.0, 0.0)
-
-    return marble_reward + winning_reward
+    # Vérifier si la partie est terminée
+    game_over = (next_state.black_out >= 6) | (next_state.white_out >= 6)
+    
+    # Si la partie n'est pas finie, pas de reward
+    reward = jnp.where(~game_over, 0.0,
+        # Si la partie est finie, calculer l'outcome comme dans trainer.py
+        jnp.where(
+            next_state.black_out >= 6,
+            1.0 * current_state.actual_player,   # Black wins → outcome=+1, adjust by actual_player
+            jnp.where(
+                next_state.white_out >= 6, 
+                -1.0 * current_state.actual_player,  # White wins → outcome=-1, adjust by actual_player
+                0.0  # Draw (ne devrait pas arriver ici mais par sécurité)
+            )
+        )
+    )
+    
+    return reward
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
