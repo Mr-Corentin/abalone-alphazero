@@ -58,6 +58,8 @@ def parse_args():
                        help='Number of games per iteration')
     parser.add_argument('--buffer-size', type=int, default=None,
                        help='Size of the replay buffer')
+    parser.add_argument('--training-steps', type=int, default=None,
+                       help='Number of training steps per iteration')
     parser.add_argument('--checkpoint-path', type=str, default=None,
                        help='Path to save checkpoints')
     parser.add_argument('--log-dir', type=str, default=None,
@@ -133,6 +135,9 @@ def get_merged_config(args):
     
     if args.num_simulations:
         config['mcts']['num_simulations'] = args.num_simulations
+    
+    if args.training_steps:
+        config['training']['training_steps_per_iteration'] = args.training_steps
     
     if args.checkpoint_path:
         config['checkpoint']['path'] = args.checkpoint_path
