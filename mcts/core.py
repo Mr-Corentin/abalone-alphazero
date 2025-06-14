@@ -53,10 +53,10 @@ def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> f
     reward = jnp.where(~game_over, 0.0,
         # Si la partie est finie, calculer l'outcome comme dans trainer.py
         jnp.where(
-            next_state.black_out >= 6,
+            next_state.white_out >= 6,
             1.0 * current_state.actual_player,   # Black wins → outcome=+1, adjust by actual_player
             jnp.where(
-                next_state.white_out >= 6, 
+                next_state.black_out >= 6, 
                 -1.0 * current_state.actual_player,  # White wins → outcome=-1, adjust by actual_player
                 0.0  # Draw (ne devrait pas arriver ici mais par sécurité)
             )
