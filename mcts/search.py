@@ -224,7 +224,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, iteratio
     return essential_data
 
 
-@partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
+@partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4, 5))
 def generate_parallel_games_pmap(rngs, params, network, env, batch_size_per_device, iteration=0):
     """
     Version pmappée de generate_game_mcts_batch pour paralléliser sur plusieurs devices
@@ -244,7 +244,7 @@ def create_optimized_game_generator(num_simulations=500):
         Fonction pmappée pour générer des parties
     """
     
-    @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
+    @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4, 5))
     def generate_optimized_games_pmap(rng_key, params, network, env, batch_size_per_device, iteration=0):
         """Version optimisée avec lax.scan et filtrage des parties terminées"""
 
