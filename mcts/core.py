@@ -84,11 +84,6 @@ def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: 
     # Depuis la perspective du joueur courant (canonical)
     # Si actual_player = 1 (Black), on veut pousser des blanches
     # Si actual_player = -1 (White), on veut pousser des noires
-    our_marbles_lost = jnp.where(
-        current_state.actual_player == 1,
-        black_diff,  # Black player: lost black marbles
-        white_diff   # White player: lost white marbles  
-    )
     
     opponent_marbles_pushed = jnp.where(
         current_state.actual_player == 1,
@@ -97,7 +92,7 @@ def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: 
     )
     
     # Récompenses intermédiaires
-    intermediate_reward = weight * opponent_marbles_pushed - weight * our_marbles_lost
+    intermediate_reward = weight * opponent_marbles_pushed
     
     # Vérifier si la partie est terminée pour récompense finale
     game_over = (next_state.black_out >= 6) | (next_state.white_out >= 6)
@@ -127,12 +122,12 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
     - Iterations 10+: weight = 0.0 (terminal only, pure AlphaZero)
     """
     weight = jnp.where(
-        iteration < 5,
-        0.1,  # First 5 iterations: full intermediate
+        iteration < 10,
+        0.1,  # First 10 iterations: full intermediate
         jnp.where(
-            iteration < 10,
+            iteration < 20,
             0.05,  # Next 5 iterations: reduced intermediate
-            0.0    # After iteration 10: terminal only
+            0.0    # After iteration 20: terminal only
         )
     )
     
