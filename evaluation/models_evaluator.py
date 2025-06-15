@@ -189,9 +189,9 @@ class ModelsEvaluator:
                     action = jax.lax.cond(
                         is_black,
                         lambda: get_best_move(state, black_params, self.network, self.env, 
-                                            self.num_simulations, action_key),
+                                            self.num_simulations, action_key, 10),
                         lambda: get_best_move(state, white_params, self.network, self.env, 
-                                            self.num_simulations, action_key)
+                                            self.num_simulations, action_key, 10)
                     )
                     
                     # Appliquer l'action

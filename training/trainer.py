@@ -892,7 +892,8 @@ class AbaloneTrainerSync:
             sharded_params,
             self.network,
             self.env,
-            batch_size_per_device
+            batch_size_per_device,
+            self.iteration
         )
 
         # Récupérer les données sur CPU

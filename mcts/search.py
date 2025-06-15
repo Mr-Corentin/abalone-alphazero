@@ -18,6 +18,7 @@ def run_search_batch(states: AbaloneState,
                     params,
                     rng_key,
                     env: AbaloneEnv,
+                    iteration: int = 0,
                     num_simulations: int = 600,
                     max_num_considered_actions: int = 16):
     """
@@ -37,7 +38,7 @@ def run_search_batch(states: AbaloneState,
         policy_output pour chaque état du batch
     """
     # Obtenir root pour le batch
-    root = get_root_output_batch(states, network, params, env)
+    root = get_root_output_batch(states, network, params, env, iteration)
 
     # Obtenir les masques de mouvements légaux pour le batch
     legal_moves = jax.vmap(env.get_legal_moves)(states)  # shape: (batch_size, num_actions)
@@ -66,7 +67,7 @@ def run_search_batch(states: AbaloneState,
 
 
 @partial(jax.jit, static_argnames=['env', 'network', 'num_simulations', 'batch_size'])
-def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simulations=500):
+def generate_game_mcts_batch(rng_key, params, network, env, batch_size, iteration=0, num_simulations=500):
     """
     Génère un batch de parties en utilisant MCTS pour la sélection des actions
     
@@ -128,7 +129,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
 
         # MCTS et coups seulement pour les parties actives non-terminales
         rng, search_rng = jax.random.split(rng)
-        search_outputs = run_search_batch(states, recurrent_fn, network, params, search_rng, env, num_simulations)
+        search_outputs = run_search_batch(states, recurrent_fn, network, params, search_rng, env, iteration, num_simulations)
 
         # Mise à jour des états
         next_states = jax.vmap(env.step)(states, search_outputs.action)
@@ -224,11 +225,11 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, num_simu
 
 
 @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
-def generate_parallel_games_pmap(rngs, params, network, env, batch_size_per_device):
+def generate_parallel_games_pmap(rngs, params, network, env, batch_size_per_device, iteration=0):
     """
     Version pmappée de generate_game_mcts_batch pour paralléliser sur plusieurs devices
     """
-    return generate_game_mcts_batch(rngs, params, network, env, batch_size_per_device)
+    return generate_game_mcts_batch(rngs, params, network, env, batch_size_per_device, iteration)
 
 
 
@@ -244,7 +245,7 @@ def create_optimized_game_generator(num_simulations=500):
     """
     
     @partial(jax.pmap, axis_name='device', static_broadcasted_argnums=(2, 3, 4))
-    def generate_optimized_games_pmap(rng_key, params, network, env, batch_size_per_device):
+    def generate_optimized_games_pmap(rng_key, params, network, env, batch_size_per_device, iteration=0):
         """Version optimisée avec lax.scan et filtrage des parties terminées"""
 
         def game_step(carry, _):

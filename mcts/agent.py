@@ -65,7 +65,8 @@ def get_best_move(state: AbaloneState,
                  network: AbaloneModel,
                  env: AbaloneEnv,
                  num_simulations: int = 600,
-                 rng_key=None):
+                 rng_key=None,
+                 iteration: int = 10):
     """
     Obtient le meilleur coup à jouer dans un état donné selon MCTS+réseau.
     """
@@ -94,7 +95,8 @@ def get_best_move(state: AbaloneState,
         params,
         rng_key,
         env,
-        num_simulations=num_simulations
+        iteration,
+        num_simulations
     )
 
     # Récupérer l'action avec le score le plus élevé
@@ -108,7 +110,8 @@ def get_move_probabilities(state: AbaloneState,
                           network: AbaloneModel,
                           env: AbaloneEnv,
                           num_simulations: int = 600,
-                          temperature: float = 1.0):
+                          temperature: float = 1.0,
+                          iteration: int = 10):
     """
     Retourne les probabilités des coups selon MCTS+réseau.
     Utile pour l'apprentissage ou pour sélectionner un coup de manière stochastique.
@@ -145,7 +148,8 @@ def get_move_probabilities(state: AbaloneState,
         params,
         rng_key,
         env,
-        num_simulations=num_simulations
+        iteration,
+        num_simulations
     )
     
     # Obtenir les poids des actions et appliquer la température
@@ -166,7 +170,8 @@ def sample_move(state: AbaloneState,
                 env: AbaloneEnv, 
                 rng_key=None, 
                 num_simulations: int = 600, 
-                temperature: float = 1.0):
+                temperature: float = 1.0,
+                iteration: int = 10):
     """
     Échantillonne un coup selon la distribution de probabilité MCTS.
     Utile pour l'exploration pendant l'entraînement.
@@ -188,7 +193,7 @@ def sample_move(state: AbaloneState,
     
     # Obtenir les probabilités des coups
     move_probs = get_move_probabilities(
-        state, params, network, env, num_simulations, temperature
+        state, params, network, env, num_simulations, temperature, iteration
     )
     
     # Échantillonner un coup selon cette distribution

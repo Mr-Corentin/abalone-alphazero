@@ -36,7 +36,7 @@ from core.coord_conversion import prepare_input, prepare_input_legacy, cube_to_2
 #     return marble_reward + winning_reward
 
 @partial(jax.jit)
-def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
+def calculate_reward_terminal_only(current_state: AbaloneState, next_state: AbaloneState) -> float:
     """
     TERMINAL REWARDS ONLY (AlphaZero approach) - VERSION CANONIQUE
     Calcule la récompense d'une transition - rewards seulement à la fin de partie
@@ -64,6 +64,88 @@ def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> f
     )
     
     return reward
+
+@partial(jax.jit)
+def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: AbaloneState, weight: float = 0.1) -> float:
+    """
+    INTERMEDIATE REWARDS VERSION - FOR TESTING
+    Calcule la récompense avec récompenses intermédiaires pour pousser des billes
+    - +1.0 pour gagner la partie
+    - +weight pour chaque bille adverse poussée
+    - -weight pour chaque bille propre perdue
+    - -1.0 pour perdre la partie
+    
+    Version canonique: toujours depuis la perspective du joueur courant
+    """
+    # Calculer les changements de billes
+    black_diff = next_state.black_out - current_state.black_out
+    white_diff = next_state.white_out - current_state.white_out
+    
+    # Depuis la perspective du joueur courant (canonical)
+    # Si actual_player = 1 (Black), on veut pousser des blanches
+    # Si actual_player = -1 (White), on veut pousser des noires
+    our_marbles_lost = jnp.where(
+        current_state.actual_player == 1,
+        black_diff,  # Black player: lost black marbles
+        white_diff   # White player: lost white marbles  
+    )
+    
+    opponent_marbles_pushed = jnp.where(
+        current_state.actual_player == 1,
+        white_diff,  # Black player: pushed white marbles
+        black_diff   # White player: pushed black marbles
+    )
+    
+    # Récompenses intermédiaires
+    intermediate_reward = weight * opponent_marbles_pushed - weight * our_marbles_lost
+    
+    # Vérifier si la partie est terminée pour récompense finale
+    game_over = (next_state.black_out >= 6) | (next_state.white_out >= 6)
+    
+    # Récompense finale (terminal)
+    terminal_reward = jnp.where(~game_over, 0.0,
+        jnp.where(
+            next_state.white_out >= 6,
+            1.0 * current_state.actual_player,   # Black wins → +1 for black, -1 for white
+            jnp.where(
+                next_state.black_out >= 6, 
+                -1.0 * current_state.actual_player,  # White wins → -1 for black, +1 for white
+                0.0
+            )
+        )
+    )
+    
+    return intermediate_reward + terminal_reward
+
+@partial(jax.jit)
+def calculate_reward_curriculum(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
+    """
+    CURRICULUM REWARD VERSION
+    Switches between intermediate and terminal rewards based on iteration:
+    - Iterations 0-4: weight = 0.1 (full intermediate rewards)
+    - Iterations 5-9: weight = 0.05 (reduced intermediate rewards)
+    - Iterations 10+: weight = 0.0 (terminal only, pure AlphaZero)
+    """
+    weight = jnp.where(
+        iteration < 5,
+        0.1,  # First 5 iterations: full intermediate
+        jnp.where(
+            iteration < 10,
+            0.05,  # Next 5 iterations: reduced intermediate
+            0.0    # After iteration 10: terminal only
+        )
+    )
+    
+    return jnp.where(
+        weight > 0.0,
+        calculate_reward_with_intermediate(current_state, next_state, weight),
+        calculate_reward_terminal_only(current_state, next_state)
+    )
+
+# Default function (can be switched for testing)
+def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
+    """Current reward function - can be switched between terminal-only and intermediate"""
+    return calculate_reward_with_intermediate(current_state, next_state)
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
@@ -109,7 +191,8 @@ class AbaloneMCTSRecurrentFn:
         next_states = jax.vmap(self.env.step)(current_states, action)
 
         # 3. Calcul des rewards et discounts en batch
-        reward = jax.vmap(calculate_reward)(current_states, next_states)
+        iteration = embedding.get('iteration', 0)
+        reward = jax.vmap(lambda cs, ns: calculate_reward_curriculum(cs, ns, iteration))(current_states, next_states)
         discount = jax.vmap(calculate_discount)(next_states)
 
         # 4. Préparation des entrées du réseau en batch
@@ -136,7 +219,8 @@ class AbaloneMCTSRecurrentFn:
             'actual_player': next_states.actual_player,
             'black_out': next_states.black_out,
             'white_out': next_states.white_out,
-            'moves_count': next_states.moves_count
+            'moves_count': next_states.moves_count,
+            'iteration': embedding.get('iteration', 0)  # Propagate iteration
         }
 
         return mctx.RecurrentFnOutput(
@@ -148,7 +232,7 @@ class AbaloneMCTSRecurrentFn:
 
 
 @partial(jax.jit, static_argnames=['network', 'env'])
-def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, env: AbaloneEnv):
+def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, env: AbaloneEnv, iteration: int = 0):
     """
     Version vectorisée de get_root_output pour traiter un batch d'états
 
@@ -181,7 +265,8 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, e
         'actual_player': states.actual_player,  # shape: (batch_size,)
         'black_out': states.black_out,  # shape: (batch_size,)
         'white_out': states.white_out,  # shape: (batch_size,)
-        'moves_count': states.moves_count  # shape: (batch_size,)
+        'moves_count': states.moves_count,  # shape: (batch_size,)
+        'iteration': iteration  # Curriculum iteration number
     }
 
     return mctx.RootFnOutput(
