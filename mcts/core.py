@@ -191,7 +191,8 @@ class AbaloneMCTSRecurrentFn:
         next_states = jax.vmap(self.env.step)(current_states, action)
 
         # 3. Calcul des rewards et discounts en batch
-        iteration = embedding.get('iteration', 0)
+        iteration_array = embedding.get('iteration', jnp.array([0]))
+        iteration = iteration_array[0]  # Extract scalar from batch (all elements are the same)
         reward = jax.vmap(lambda cs, ns: calculate_reward_curriculum(cs, ns, iteration))(current_states, next_states)
         discount = jax.vmap(calculate_discount)(next_states)
 
@@ -220,7 +221,7 @@ class AbaloneMCTSRecurrentFn:
             'black_out': next_states.black_out,
             'white_out': next_states.white_out,
             'moves_count': next_states.moves_count,
-            'iteration': embedding.get('iteration', 0)  # Propagate iteration
+            'iteration': embedding.get('iteration', jnp.zeros_like(next_states.actual_player))  # Propagate iteration array
         }
 
         return mctx.RecurrentFnOutput(
@@ -266,7 +267,7 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, e
         'black_out': states.black_out,  # shape: (batch_size,)
         'white_out': states.white_out,  # shape: (batch_size,)
         'moves_count': states.moves_count,  # shape: (batch_size,)
-        'iteration': iteration  # Curriculum iteration number
+        'iteration': jnp.full_like(states.actual_player, iteration)  # shape: (batch_size,)
     }
 
     return mctx.RootFnOutput(
