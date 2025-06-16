@@ -1442,33 +1442,33 @@ class AbaloneTrainerSync:
             ref_path = self._get_checkpoint_path(ref_iter)
 
             local_path = f"/tmp/ref_model_{ref_iter}.pkl"
+            eval_success = False
+            
             if ref_path.startswith("gs://"):
                 if not download_checkpoint(ref_path, local_path):
                     if self.verbose:
                         logger.info(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
-                    # Synchroniser même en cas d'échec
-                    jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}_failed")
-                    continue
+                else:
+                    eval_success = True
             else:
                 local_path = ref_path
+                eval_success = True
 
-            ref_params = load_checkpoint_params(local_path)
-            if ref_params is None:
-                if self.verbose:
-                    logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
-                # Synchroniser même en cas d'échec
-                jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}_failed_load")
-                continue
-
-            eval_results = evaluator.evaluate_model_pair(
-                current_params,
-                ref_params,
-                games_to_play=local_games_per_model
-            )
-
-            local_results[ref_iter] = eval_results
+            if eval_success:
+                ref_params = load_checkpoint_params(local_path)
+                if ref_params is None:
+                    if self.verbose:
+                        logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
+                    eval_success = False
+                else:
+                    eval_results = evaluator.evaluate_model_pair(
+                        current_params,
+                        ref_params,
+                        games_to_play=local_games_per_model
+                    )
+                    local_results[ref_iter] = eval_results
             
-            # Synchroniser après chaque évaluation
+            # CRITICAL: All workers must sync with the same name regardless of success/failure
             jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}")
 
         # Synchroniser avant l'agrégation
