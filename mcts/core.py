@@ -121,15 +121,30 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
     - Iterations 5-9: weight = 0.05 (reduced intermediate rewards)
     - Iterations 10+: weight = 0.0 (terminal only, pure AlphaZero)
     """
+    # weight = jnp.where(
+    #     iteration < 10,
+    #     0.3,  # First 10 iterations: full intermediate
+    #     jnp.where(
+    #         iteration < 20,
+    #         0.15,  # Next 5 iterations: reduced intermediate
+    #         0.0    # After iteration 20: terminal only
+    #     )
+    # )
+
     weight = jnp.where(
-        iteration < 10,
-        0.3,  # First 10 iterations: full intermediate
-        jnp.where(
-            iteration < 20,
-            0.15,  # Next 5 iterations: reduced intermediate
-            0.0    # After iteration 20: terminal only
-        )
-    )
+      iteration < 10,
+      1.0,   # First 15 iterations: strong intermediate rewards
+      jnp.where(
+          iteration < 15,
+          0.5,   # Iterations 15-30: reduced intermediate rewards
+          jnp.where(
+              iteration < 30,
+              0.1,   # Iterations 30-50: minimal intermediate rewards
+              0.0    # After iteration 50: pure AlphaZero
+          )
+      )
+  )
+
     
     return jnp.where(
         weight > 0.0,
