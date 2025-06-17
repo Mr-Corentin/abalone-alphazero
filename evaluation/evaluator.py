@@ -39,7 +39,7 @@ class EvaluationGameState:
             moves_count=self.moves_count
         )
     
-def simulate_alphazero_vs_classical(params, network, env, classical_algo="alphabeta_pruning", depth=3, max_moves=200, verbose=False):
+def simulate_alphazero_vs_classical(params, network, env, classical_algo="alphabeta_pruning", depth=3, max_moves=250, verbose=False):
     """
     Simulates a game between AlphaZero and a classical algorithm.
     

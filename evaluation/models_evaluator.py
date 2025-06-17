@@ -279,6 +279,9 @@ class ModelsEvaluator:
             games_per_device
         )
         
+        # Synchroniser entre les deux phases d'évaluation
+        jax.experimental.multihost_utils.sync_global_devices("between_eval_rounds")
+        
         # Inverser les rôles pour l'équité
         logger.info("Parties d'évaluation (modèle actuel en tant que Blanc)...")
         new_rng_key = jax.random.fold_in(rng_key, 1000)

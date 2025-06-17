@@ -82,7 +82,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, iteratio
     Returns:
         Données des parties générées
     """
-    max_moves = 200
+    max_moves = 250
 
     # Reset initial pour le batch
     init_states = env.reset_batch(rng_key, batch_size)
@@ -303,7 +303,7 @@ def create_optimized_game_generator(num_simulations=500):
         init_states = env.reset_batch(rng_key, batch_size_per_device)
 
         # Pré-allouer les tableaux de données
-        max_moves = 200  # Limiter le nombre maximum de coups
+        max_moves = 250  # Limiter le nombre maximum de coups
         game_data = {
             'boards_2d': jnp.zeros((batch_size_per_device, max_moves + 1, 9, 9), dtype=jnp.int8),
             'policies': jnp.zeros((batch_size_per_device, max_moves + 1, 1734), dtype=jnp.float32),

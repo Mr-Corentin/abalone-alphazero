@@ -162,7 +162,7 @@ def calculate_discount(state: AbaloneState) -> float:
     """
     Retourne le facteur d'atténuation en utilisant jnp.where
     """
-    is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= 200)
+    is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= 250)
     return jnp.where(is_terminal, 0.0, 1.0)
 
 
