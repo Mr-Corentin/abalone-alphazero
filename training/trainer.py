@@ -910,6 +910,10 @@ class AbaloneTrainerSync:
             total_game_lengths = 0
             games_completed = 0
             
+            # Track marble counts and proportions
+            white_marble_counts = {i: 0 for i in range(7)}  # 0-6 marbles out
+            black_marble_counts = {i: 0 for i in range(7)}  # 0-6 marbles out
+            
             for device_idx in range(self.num_devices):
                 device_data = jax.tree_util.tree_map(lambda x: x[device_idx], games_data)
                 games_per_device = len(device_data['moves_per_game'])
@@ -920,8 +924,25 @@ class AbaloneTrainerSync:
                         games_completed += 1
                         total_game_lengths += game_length
                         positions_generated += game_length + 1  # +1 for initial position
+                        
+                        # Count marble outs
+                        final_white_out = int(device_data['final_white_out'][game_idx])
+                        final_black_out = int(device_data['final_black_out'][game_idx])
+                        
+                        # Ensure counts are within valid range (0-6)
+                        final_white_out = min(max(final_white_out, 0), 6)
+                        final_black_out = min(max(final_black_out, 0), 6)
+                        
+                        white_marble_counts[final_white_out] += 1
+                        black_marble_counts[final_black_out] += 1
             
             mean_plays_per_game = total_game_lengths / games_completed if games_completed > 0 else 0
+            
+            # Calculate proportions
+            white_marble_proportions = {k: v / games_completed if games_completed > 0 else 0 
+                                      for k, v in white_marble_counts.items()}
+            black_marble_proportions = {k: v / games_completed if games_completed > 0 else 0 
+                                      for k, v in black_marble_counts.items()}
             
             self.metrics_logger.log_generation_metrics(
                 iteration=self.iteration,
@@ -930,7 +951,11 @@ class AbaloneTrainerSync:
                 games_requested=local_total_games,
                 mean_plays_per_game=mean_plays_per_game,
                 total_games_so_far=self.total_games,
-                total_positions_so_far=self.total_positions
+                total_positions_so_far=self.total_positions,
+                white_marble_counts=white_marble_counts,
+                black_marble_counts=black_marble_counts,
+                white_marble_proportions=white_marble_proportions,
+                black_marble_proportions=black_marble_proportions
             )
 
         # Enregistrer les parties pour analyse si activé//Debug currently

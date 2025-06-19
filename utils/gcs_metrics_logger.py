@@ -364,6 +364,27 @@ class IterationMetricsAggregator:
                 stats['avg_mean_plays_per_game'] = sum(mean_plays) / len(mean_plays)
                 stats['min_mean_plays_per_game'] = min(mean_plays)
                 stats['max_mean_plays_per_game'] = max(mean_plays)
+            
+            # Aggregate marble counts across workers
+            white_total_counts = {i: 0 for i in range(7)}
+            black_total_counts = {i: 0 for i in range(7)}
+            
+            for data in data_list:
+                white_counts = data.get('white_marble_counts', {})
+                black_counts = data.get('black_marble_counts', {})
+                
+                for i in range(7):
+                    white_total_counts[i] += white_counts.get(str(i), white_counts.get(i, 0))
+                    black_total_counts[i] += black_counts.get(str(i), black_counts.get(i, 0))
+            
+            stats['white_marble_counts'] = white_total_counts
+            stats['black_marble_counts'] = black_total_counts
+            
+            # Calculate proportions from total counts
+            total_games = stats['total_games_generated']
+            if total_games > 0:
+                stats['white_marble_proportions'] = {i: count / total_games for i, count in white_total_counts.items()}
+                stats['black_marble_proportions'] = {i: count / total_games for i, count in black_total_counts.items()}
         
         elif metric_type == 'training':
             # Average losses and accuracies across workers
@@ -483,6 +504,10 @@ GENERATION METRICS:
   • Average Plays per Game: {gen_stats.get('avg_mean_plays_per_game', 0):.1f}
   • Min/Max Plays per Game: {gen_stats.get('min_mean_plays_per_game', 0):.1f} / {gen_stats.get('max_mean_plays_per_game', 0):.1f}
 
+MARBLE OUT DISTRIBUTION:
+  • White Marbles Out: {self._format_marble_distribution(gen_stats.get('white_marble_counts', {}), gen_stats.get('white_marble_proportions', {}))}
+  • Black Marbles Out: {self._format_marble_distribution(gen_stats.get('black_marble_counts', {}), gen_stats.get('black_marble_proportions', {}))}
+
 TRAINING METRICS:
   • Total Loss: {train_stats.get('avg_total_loss', 0):.4f} (±{train_stats.get('std_total_loss', 0):.4f})
   • Policy Loss: {train_stats.get('avg_policy_loss', 0):.4f} (±{train_stats.get('std_policy_loss', 0):.4f})
@@ -548,6 +573,20 @@ WORKER BREAKDOWN:
             breakdown += f"    Worker {worker_id}: Gen={gen_time:.1f}s | Games={games_gen} | Loss={total_loss:.4f} (P:{policy_loss:.4f}, V:{value_loss:.4f})\n"
         
         return breakdown
+    
+    def _format_marble_distribution(self, counts_dict, proportions_dict):
+        """Format marble distribution in a compact readable format."""
+        if not counts_dict and not proportions_dict:
+            return "No data"
+        
+        parts = []
+        for i in range(7):
+            count = counts_dict.get(i, counts_dict.get(str(i), 0))
+            proportion = proportions_dict.get(i, proportions_dict.get(str(i), 0))
+            if count > 0:
+                parts.append(f"{i}:{count}({proportion:.1%})")
+        
+        return " ".join(parts) if parts else "No games completed"
     
     def _append_to_consolidated_log(self, summary: str):
         """Append the summary to the consolidated log file."""

@@ -161,7 +161,7 @@ class GameLogger:
     """
     Classe asynchrone pour le stockage des parties dans Google Cloud Storage
     """
-    def __init__(self, bucket_name: str, process_id, buffer_size: int = 64, flush_interval: int = 250):
+    def __init__(self, bucket_name: str, process_id, buffer_size: int = 64, flush_interval: int = 300):
         """
         Initialise le logger de parties
         
@@ -256,7 +256,7 @@ class LocalGameLogger:
     """
     Version locale du GameLogger pour le développement ou l'exécution sans GCS
     """
-    def __init__(self, output_dir: str, buffer_size: int = 64, flush_interval: int = 250):
+    def __init__(self, output_dir: str, buffer_size: int = 64, flush_interval: int = 300):
         """
         Initialise le logger de parties local
         
