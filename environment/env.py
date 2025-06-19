@@ -183,7 +183,7 @@ class AbaloneEnv:
               state.black_out >= 6,
               state.white_out >= 6
           ),
-          state.moves_count >= 250
+          state.moves_count >= 300
       )
     @partial(jax.jit, static_argnames=['self'])
     def is_terminal_batch(self, states: AbaloneState) -> chex.Array:
@@ -192,7 +192,7 @@ class AbaloneEnv:
                 s.black_out >= 6,
                 s.white_out >= 6
             ),
-            s.moves_count >= 250
+            s.moves_count >= 300
         ))(states)
     def get_winner(self, state: AbaloneState) -> int:
         """
@@ -205,7 +205,7 @@ class AbaloneEnv:
             return 1  # Noirs gagnent
         elif state.black_out >= 6:
             return -1  # Blancs gagnent
-        elif state.moves_count >= 250:
+        elif state.moves_count >= 300:
             return 0  # Match nul
         return 0  # Partie en cours
     @partial(jax.jit, static_argnames=['self'])
@@ -349,7 +349,7 @@ class AbaloneEnvNonCanonical(AbaloneEnv):
                 state.black_out >= 6,
                 state.white_out >= 6
             ),
-            state.moves_count >= 250
+            state.moves_count >= 300
         )
     
     def get_winner(self, state: AbaloneStateNonCanonical) -> int:
@@ -358,6 +358,6 @@ class AbaloneEnvNonCanonical(AbaloneEnv):
             return 1  # Noirs gagnent
         elif state.black_out >= 6:
             return -1  # Blancs gagnent
-        elif state.moves_count >= 250:
+        elif state.moves_count >= 300:
             return 0  # Match nul
         return 0  # Partie en cours

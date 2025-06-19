@@ -155,14 +155,14 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
 # Default function (can be switched for testing)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
     """Current reward function - can be switched between terminal-only and intermediate"""
-    return calculate_reward_with_intermediate(current_state, next_state)
+    return calculate_reward_terminal_only(current_state, next_state)
 
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
     """
     Retourne le facteur d'atténuation en utilisant jnp.where
     """
-    is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= 250)
+    is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= 300)
     return jnp.where(is_terminal, 0.0, 1.0)
 
 
@@ -201,9 +201,7 @@ class AbaloneMCTSRecurrentFn:
         next_states = jax.vmap(self.env.step)(current_states, action)
 
         # 3. Calcul des rewards et discounts en batch
-        iteration_array = embedding.get('iteration', jnp.array([0]))
-        iteration = iteration_array[0]  # Extract scalar from batch (all elements are the same)
-        reward = jax.vmap(lambda cs, ns: calculate_reward_curriculum(cs, ns, iteration))(current_states, next_states)
+        reward = jax.vmap(calculate_reward_terminal_only)(current_states, next_states)
         discount = jax.vmap(calculate_discount)(next_states)
 
         # 4. Préparation des entrées du réseau en batch
