@@ -236,7 +236,7 @@ class AbaloneMCTSRecurrentFn:
             reward=reward,  # shape: (batch_size,)
             discount=discount,  # shape: (batch_size,)
             prior_logits=prior_logits,  # shape: (batch_size, num_actions)
-            value=value  # shape: (batch_size,)
+            value=-value  # Negate value for correct MCTS backup perspective
         ), next_embedding
 
 
