@@ -153,6 +153,7 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
     )
 
 # Default function (can be switched for testing)
+@partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
     """Current reward function - can be switched between terminal-only and intermediate"""
     #return calculate_reward_terminal_only(current_state, next_state)
@@ -202,7 +203,7 @@ class AbaloneMCTSRecurrentFn:
         next_states = jax.vmap(self.env.step)(current_states, action)
 
         # 3. Calcul des rewards et discounts en batch
-        reward = jax.vmap(calculate_reward_terminal_only)(current_states, next_states)
+        reward = jax.vmap(calculate_reward)(current_states, next_states)
         discount = jax.vmap(calculate_discount)(next_states)
 
         # 4. Préparation des entrées du réseau en batch
