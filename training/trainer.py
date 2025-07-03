@@ -1544,6 +1544,31 @@ class AbaloneTrainerSync:
                     
             logger.info(f"\n=== Évaluation terminée ===")
         
+        # Log evaluation metrics if we have results and metrics logger
+        if all_results and self.metrics_logger and self.is_main_process:
+            # Calculate summary metrics
+            total_wins = sum(res['current_wins'] for res in all_results.values())
+            total_games = sum(res['total_games'] for res in all_results.values())
+            global_win_rate = total_wins / total_games if total_games > 0 else 0
+            
+            # Create evaluation metrics dict
+            eval_metrics = {
+                'global_win_rate': global_win_rate,
+                'total_eval_games': total_games,
+                'total_eval_wins': total_wins,
+                'num_models_evaluated': len(all_results)
+            }
+            
+            # Add individual win rates
+            for ref_iter, ref_results in all_results.items():
+                eval_metrics[f'win_rate_vs_iter{ref_iter}'] = ref_results['win_rate']
+            
+            # Log the evaluation metrics
+            self.metrics_logger.log_evaluation_metrics(
+                iteration=current_iter,
+                **eval_metrics
+            )
+        
         # Synchroniser à la fin de l'évaluation
         jax.experimental.multihost_utils.sync_global_devices("post_evaluation")
             

@@ -87,6 +87,23 @@ class SimpleGCSLogger:
         
         self._write_log('timing', iteration, log_data)
     
+    def log_evaluation_metrics(self, iteration: int, **metrics):
+        """Log evaluation metrics immediately."""
+        if not self.enabled:
+            return
+            
+        log_data = {
+            'timestamp': time.time(),
+            'datetime': datetime.now().isoformat(),
+            'session_id': self.session_id,
+            'worker_id': self.process_id,
+            'iteration': iteration,
+            'phase': 'evaluation',
+            **metrics
+        }
+        
+        self._write_log('evaluation', iteration, log_data)
+    
     def _write_log(self, log_type: str, iteration: int, data: Dict[str, Any]):
         """Write a single log entry to GCS."""
         try:
@@ -129,7 +146,7 @@ class LocalMetricsLogger:
         self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Create log directories
-        for subdir in ['generation', 'training', 'timing', 'summaries']:
+        for subdir in ['generation', 'training', 'timing', 'evaluation', 'summaries']:
             os.makedirs(os.path.join(log_dir, 'training_logs', subdir), exist_ok=True)
         
         logger.info(f"Local Logger initialized for worker {process_id}, session {self.session_id}")
@@ -175,6 +192,20 @@ class LocalMetricsLogger:
         }
         
         self._write_log('timing', iteration, log_data)
+    
+    def log_evaluation_metrics(self, iteration: int, **metrics):
+        """Log evaluation metrics to local file."""
+        log_data = {
+            'timestamp': time.time(),
+            'datetime': datetime.now().isoformat(),
+            'session_id': self.session_id,
+            'worker_id': self.process_id,
+            'iteration': iteration,
+            'phase': 'evaluation',
+            **metrics
+        }
+        
+        self._write_log('evaluation', iteration, log_data)
     
     def _write_log(self, log_type: str, iteration: int, data: Dict[str, Any]):
         """Write a single log entry to local file."""
@@ -259,6 +290,7 @@ class IterationMetricsAggregator:
             generation_data = self._collect_worker_data('generation', iteration, num_workers, session_id)
             training_data = self._collect_worker_data('training', iteration, num_workers, session_id)
             timing_data = self._collect_worker_data('timing', iteration, num_workers, session_id)
+            evaluation_data = self._collect_worker_data('evaluation', iteration, num_workers, session_id)
             
             # Create consolidated files
             if generation_data:
@@ -267,6 +299,8 @@ class IterationMetricsAggregator:
                 self._write_consolidated_file('training', iteration, training_data, session_id)
             if timing_data:
                 self._write_consolidated_file('timing', iteration, timing_data, session_id)
+            if evaluation_data:
+                self._write_consolidated_file('evaluation', iteration, evaluation_data, session_id)
             
             logger.info(f"Aggregated metrics for iteration {iteration} from {len(generation_data)} workers")
             
@@ -418,6 +452,25 @@ class IterationMetricsAggregator:
                 stats['total_games_per_sec'] = sum(games_per_sec)
                 stats['avg_games_per_sec'] = sum(games_per_sec) / len(games_per_sec)
         
+        elif metric_type == 'evaluation':
+            # Aggregate evaluation results
+            if data_list:
+                # Take the evaluation data from the main process (worker 0)
+                main_eval_data = next((d for d in data_list if d.get('worker_id') == 0), data_list[0] if data_list else {})
+                
+                # Copy over the evaluation metrics
+                for key, value in main_eval_data.items():
+                    if key.startswith('win_rate_vs_iter') or key in ['global_win_rate', 'total_eval_games', 'total_eval_wins']:
+                        stats[key] = value
+                        
+                # Calculate summary stats
+                win_rates = [value for key, value in main_eval_data.items() if key.startswith('win_rate_vs_iter')]
+                if win_rates:
+                    stats['avg_win_rate_vs_previous'] = sum(win_rates) / len(win_rates)
+                    stats['min_win_rate_vs_previous'] = min(win_rates)
+                    stats['max_win_rate_vs_previous'] = max(win_rates)
+                    stats['num_models_evaluated'] = len(win_rates)
+        
         return stats
     
     def _get_consolidated_log_path(self):
@@ -468,27 +521,32 @@ Last updated: {datetime}
             generation_data = self._collect_worker_data('generation', iteration, num_workers, session_id)
             training_data = self._collect_worker_data('training', iteration, num_workers, session_id)
             timing_data = self._collect_worker_data('timing', iteration, num_workers, session_id)
+            evaluation_data = self._collect_worker_data('evaluation', iteration, num_workers, session_id)
             
             # Calculate aggregated stats
             gen_stats = self._calculate_stats(generation_data, 'generation')
             train_stats = self._calculate_stats(training_data, 'training')
             time_stats = self._calculate_stats(timing_data, 'timing')
+            eval_stats = self._calculate_stats(evaluation_data, 'evaluation') if evaluation_data else {}
             
             # Create readable summary
-            summary = self._format_readable_summary(iteration, session_id, gen_stats, train_stats, time_stats, num_workers, generation_data, training_data, timing_data)
+            summary = self._format_readable_summary(iteration, session_id, gen_stats, train_stats, time_stats, eval_stats, num_workers, generation_data, training_data, timing_data, evaluation_data)
             
             # Append to consolidated file
             self._append_to_consolidated_log(summary)
             
             # Clean up individual worker files
-            self._cleanup_worker_files(iteration, num_workers, ['generation', 'training', 'timing'])
+            cleanup_types = ['generation', 'training', 'timing']
+            if evaluation_data:
+                cleanup_types.append('evaluation')
+            self._cleanup_worker_files(iteration, num_workers, cleanup_types)
             
             logger.info(f"Consolidated readable summary written for iteration {iteration}")
             
         except Exception as e:
             logger.error(f"Failed to write consolidated readable summary for iteration {iteration}: {e}")
     
-    def _format_readable_summary(self, iteration: int, session_id: str, gen_stats: dict, train_stats: dict, time_stats: dict, num_workers: int, generation_data: list, training_data: list, timing_data: list):
+    def _format_readable_summary(self, iteration: int, session_id: str, gen_stats: dict, train_stats: dict, time_stats: dict, eval_stats: dict, num_workers: int, generation_data: list, training_data: list, timing_data: list, evaluation_data: list = None):
         """Format the metrics into a human-readable text summary."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -520,7 +578,7 @@ TIMING METRICS:
   • Total Generation Time: {time_stats.get('total_generation_time', 0):.1f}s (avg: {time_stats.get('avg_generation_time', 0):.1f}s)
   • Total Training Time: {time_stats.get('total_training_time', 0):.1f}s (avg: {time_stats.get('avg_training_time', 0):.1f}s)
   • Total Iteration Time: {time_stats.get('total_total_iteration_time', 0):.1f}s
-  • Games per Second: {time_stats.get('total_games_per_sec', 0):.1f} (avg: {time_stats.get('avg_games_per_sec', 0):.1f})
+  • Games per Second: {time_stats.get('total_games_per_sec', 0):.1f} (avg: {time_stats.get('avg_games_per_sec', 0):.1f}){self._format_evaluation_section(eval_stats, evaluation_data)}
 
 WORKER BREAKDOWN:
 {self._format_worker_breakdown(generation_data, training_data, timing_data)}
@@ -587,6 +645,50 @@ WORKER BREAKDOWN:
                 parts.append(f"{i}:{count}({proportion:.1%})")
         
         return " ".join(parts) if parts else "No games completed"
+    
+    def _format_evaluation_section(self, eval_stats: dict, evaluation_data: list = None):
+        """Format evaluation metrics section if evaluation occurred."""
+        if not eval_stats or not evaluation_data:
+            return ""
+        
+        section = "\n\nEVALUATION METRICS:"
+        
+        # Global win rate
+        global_win_rate = eval_stats.get('global_win_rate')
+        if global_win_rate is not None:
+            section += f"\n  • Global Win Rate: {global_win_rate:.1%}"
+        
+        # Number of models evaluated
+        num_models = eval_stats.get('num_models_evaluated', 0)
+        if num_models > 0:
+            section += f"\n  • Models Evaluated: {num_models}"
+            
+            # Average win rate vs previous models
+            avg_win_rate = eval_stats.get('avg_win_rate_vs_previous')
+            min_win_rate = eval_stats.get('min_win_rate_vs_previous')
+            max_win_rate = eval_stats.get('max_win_rate_vs_previous')
+            
+            if avg_win_rate is not None:
+                section += f"\n  • Avg Win Rate vs Previous: {avg_win_rate:.1%}"
+                section += f"\n  • Win Rate Range: {min_win_rate:.1%} - {max_win_rate:.1%}"
+        
+        # Detailed results per model
+        individual_results = []
+        for key, value in eval_stats.items():
+            if key.startswith('win_rate_vs_iter'):
+                iter_num = key.replace('win_rate_vs_iter', '')
+                individual_results.append(f"iter{iter_num}:{value:.1%}")
+        
+        if individual_results:
+            section += f"\n  • Individual Results: {' '.join(individual_results)}"
+        
+        # Total games and wins
+        total_games = eval_stats.get('total_eval_games')
+        total_wins = eval_stats.get('total_eval_wins')
+        if total_games and total_wins:
+            section += f"\n  • Total Evaluation Games: {total_games} (wins: {total_wins})"
+        
+        return section
     
     def _append_to_consolidated_log(self, summary: str):
         """Append the summary to the consolidated log file."""
