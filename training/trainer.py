@@ -914,6 +914,11 @@ class AbaloneTrainerSync:
             white_marble_counts = {i: 0 for i in range(7)}  # 0-6 marbles out
             black_marble_counts = {i: 0 for i in range(7)}  # 0-6 marbles out
             
+            # Track actual wins/losses
+            white_wins = 0
+            black_wins = 0
+            draws = 0
+            
             for device_idx in range(self.num_devices):
                 device_data = jax.tree_util.tree_map(lambda x: x[device_idx], games_data)
                 games_per_device = len(device_data['moves_per_game'])
@@ -933,6 +938,14 @@ class AbaloneTrainerSync:
                         final_white_out = min(max(final_white_out, 0), 6)
                         final_black_out = min(max(final_black_out, 0), 6)
                         
+                        # Count actual winners
+                        if final_black_out >= 6:
+                            white_wins += 1  # White won (pushed out 6 black marbles)
+                        elif final_white_out >= 6:
+                            black_wins += 1  # Black won (pushed out 6 white marbles)
+                        else:
+                            draws += 1  # Draw or max moves reached
+                        
                         white_marble_counts[final_white_out] += 1
                         black_marble_counts[final_black_out] += 1
             
@@ -943,6 +956,12 @@ class AbaloneTrainerSync:
                                       for k, v in white_marble_counts.items()}
             black_marble_proportions = {k: v / games_completed if games_completed > 0 else 0 
                                       for k, v in black_marble_counts.items()}
+            
+            # Calculate win rates
+            total_finished_games = white_wins + black_wins + draws
+            white_win_rate = white_wins / total_finished_games if total_finished_games > 0 else 0
+            black_win_rate = black_wins / total_finished_games if total_finished_games > 0 else 0
+            draw_rate = draws / total_finished_games if total_finished_games > 0 else 0
             
             self.metrics_logger.log_generation_metrics(
                 iteration=self.iteration,
@@ -955,7 +974,13 @@ class AbaloneTrainerSync:
                 white_marble_counts=white_marble_counts,
                 black_marble_counts=black_marble_counts,
                 white_marble_proportions=white_marble_proportions,
-                black_marble_proportions=black_marble_proportions
+                black_marble_proportions=black_marble_proportions,
+                white_wins=white_wins,
+                black_wins=black_wins,
+                draws=draws,
+                white_win_rate=white_win_rate,
+                black_win_rate=black_win_rate,
+                draw_rate=draw_rate
             )
 
         # Enregistrer les parties pour analyse si activé//Debug currently

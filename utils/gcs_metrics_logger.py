@@ -419,6 +419,24 @@ class IterationMetricsAggregator:
             if total_games > 0:
                 stats['white_marble_proportions'] = {i: count / total_games for i, count in white_total_counts.items()}
                 stats['black_marble_proportions'] = {i: count / total_games for i, count in black_total_counts.items()}
+            
+            # Aggregate win/loss statistics across workers
+            stats['total_white_wins'] = sum(d.get('white_wins', 0) for d in data_list)
+            stats['total_black_wins'] = sum(d.get('black_wins', 0) for d in data_list)
+            stats['total_draws'] = sum(d.get('draws', 0) for d in data_list)
+            
+            # Calculate average win rates across workers
+            win_rates = [d.get('white_win_rate', 0) for d in data_list if 'white_win_rate' in d]
+            if win_rates:
+                stats['avg_white_win_rate'] = sum(win_rates) / len(win_rates)
+            
+            win_rates = [d.get('black_win_rate', 0) for d in data_list if 'black_win_rate' in d]
+            if win_rates:
+                stats['avg_black_win_rate'] = sum(win_rates) / len(win_rates)
+            
+            draw_rates = [d.get('draw_rate', 0) for d in data_list if 'draw_rate' in d]
+            if draw_rates:
+                stats['avg_draw_rate'] = sum(draw_rates) / len(draw_rates)
         
         elif metric_type == 'training':
             # Average losses and accuracies across workers
@@ -561,6 +579,11 @@ GENERATION METRICS:
   • Total Positions: {gen_stats.get('total_positions_generated', 0):,}
   • Average Plays per Game: {gen_stats.get('avg_mean_plays_per_game', 0):.1f}
   • Min/Max Plays per Game: {gen_stats.get('min_mean_plays_per_game', 0):.1f} / {gen_stats.get('max_mean_plays_per_game', 0):.1f}
+
+WIN/LOSS DISTRIBUTION:
+  • White Wins: {gen_stats.get('total_white_wins', 0):,} ({gen_stats.get('avg_white_win_rate', 0)*100:.1f}%)
+  • Black Wins: {gen_stats.get('total_black_wins', 0):,} ({gen_stats.get('avg_black_win_rate', 0)*100:.1f}%)
+  • Draws: {gen_stats.get('total_draws', 0):,} ({gen_stats.get('avg_draw_rate', 0)*100:.1f}%)
 
 MARBLE OUT DISTRIBUTION:
   • White Marbles Out: {self._format_marble_distribution(gen_stats.get('white_marble_counts', {}), gen_stats.get('white_marble_proportions', {}))}
