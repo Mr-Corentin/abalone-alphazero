@@ -1439,93 +1439,107 @@ class AbaloneTrainerSync:
         # Générer les itérations de référence
         target_references = generate_evaluation_checkpoints(total_iterations, num_reference_models)
 
-        # Filtrer pour ne garder que celles qui sont disponibles et antérieures à l'itération actuelle
+        # Filtrer pour les références antérieures à l'itération actuelle
+        # TOUS les workers utilisent la même liste pour la synchronisation
+        sync_refs = [ref for ref in target_references if ref < current_iter]
+        
+        # Chaque worker détermine quels modèles il peut réellement évaluer
         available_refs = []
-        for ref in target_references:
-            if ref < current_iter:
-                # Vérifier si le checkpoint existe
-                ref_path = self._get_checkpoint_path(ref)
-                if check_checkpoint_exists(ref_path):
-                    available_refs.append(ref)
+        for ref in sync_refs:
+            # Vérifier si le checkpoint existe pour ce worker
+            ref_path = self._get_checkpoint_path(ref)
+            if check_checkpoint_exists(ref_path):
+                available_refs.append(ref)
+
+        # Synchroniser TOUS les workers avant l'évaluation
+        jax.experimental.multihost_utils.sync_global_devices("pre_evaluation")
+
+        # Initialiser local_results pour TOUS les workers
+        local_results = {}
+
+        # Initialiser les variables pour tous les workers
+        evaluator = None
+        current_params = self.params
+        local_games_per_model = 0
 
         if not available_refs:
             if self.verbose:
                 logger.info("Aucun modèle précédent disponible pour l'évaluation")
-            # PAS de synchronisation ici car on n'a pas encore fait le premier sync
-            return {}
-
-        # Synchroniser SEULEMENT si on a des modèles à évaluer
-        jax.experimental.multihost_utils.sync_global_devices("pre_evaluation")
-
-        # Ajuster le nombre de parties en fonction du nombre de modèles disponibles
-        if len(available_refs) == 1:
-            games_per_model = max(16, self.num_processes * 2)  # Au moins 2 parties par processus
-        elif len(available_refs) < 4:
-            games_per_model = 32  # Plus de parties si peu de modèles
         else:
-            games_per_model = 16  # Nombre standard
+            # Ajuster le nombre de parties en fonction du nombre de modèles disponibles
+            if len(available_refs) == 1:
+                games_per_model = max(16, self.num_processes * 2)  # Au moins 2 parties par processus
+            elif len(available_refs) < 4:
+                games_per_model = 32  # Plus de parties si peu de modèles
+            else:
+                games_per_model = 16  # Nombre standard
 
-        local_games_per_model = games_per_model // self.num_processes
-        
-        if self.verbose:
-            logger.info(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
-            logger.info(f"Itérations sélectionnées: {available_refs}")
-            logger.info(f"Parties totales par modèle: {games_per_model}")
-        logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
-
-        evaluator = ModelsEvaluator(
-            network=self.network,
-            num_simulations=500,  
-            games_per_model=games_per_model
-        )
-
-        current_params = self.params
-        local_results = {}
-
-        for ref_iter in available_refs:
-            # Synchroniser avant chaque évaluation de modèle
-            jax.experimental.multihost_utils.sync_global_devices(f"pre_eval_iter_{ref_iter}")
+            local_games_per_model = games_per_model // self.num_processes
             
             if self.verbose:
-                logger.info(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
+                logger.info(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
+                logger.info(f"Itérations sélectionnées: {available_refs}")
+                logger.info(f"Parties totales par modèle: {games_per_model}")
+            logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
 
-            ref_path = self._get_checkpoint_path(ref_iter)
+            evaluator = ModelsEvaluator(
+                network=self.network,
+                num_simulations=500,  
+                games_per_model=games_per_model
+            )
 
-            local_path = f"/tmp/ref_model_{ref_iter}.pkl"
-            eval_success = False
+        # TOUS les workers participent aux mêmes sync calls pour chaque référence
+        for ref_iter in sync_refs:
+            # Synchroniser avant chaque évaluation de modèle - TOUS les workers
+            jax.experimental.multihost_utils.sync_global_devices(f"pre_eval_iter_{ref_iter}")
             
-            if ref_path.startswith("gs://"):
-                if not download_checkpoint(ref_path, local_path):
-                    if self.verbose:
-                        logger.info(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
+            # Seuls les workers qui ont ce modèle disponible l'évaluent
+            if ref_iter in available_refs:
+                if self.verbose:
+                    logger.info(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
+
+                ref_path = self._get_checkpoint_path(ref_iter)
+                local_path = f"/tmp/ref_model_{ref_iter}.pkl"
+                eval_success = False
+                
+                if ref_path.startswith("gs://"):
+                    if not download_checkpoint(ref_path, local_path):
+                        if self.verbose:
+                            logger.info(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
+                    else:
+                        eval_success = True
                 else:
+                    local_path = ref_path
                     eval_success = True
+
+                if eval_success:
+                    ref_params = load_checkpoint_params(local_path)
+                    if ref_params is None:
+                        if self.verbose:
+                            logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
+                        eval_success = False
+                    else:
+                        # Only evaluate if we have evaluator (workers with available models)
+                        if evaluator is not None:
+                            eval_results = evaluator.evaluate_model_pair(
+                                current_params,
+                                ref_params,
+                                games_to_play=local_games_per_model
+                            )
+                            local_results[ref_iter] = eval_results
             else:
-                local_path = ref_path
-                eval_success = True
-
-            if eval_success:
-                ref_params = load_checkpoint_params(local_path)
-                if ref_params is None:
-                    if self.verbose:
-                        logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
-                    eval_success = False
-                else:
-                    eval_results = evaluator.evaluate_model_pair(
-                        current_params,
-                        ref_params,
-                        games_to_play=local_games_per_model
-                    )
-                    local_results[ref_iter] = eval_results
+                # Worker doesn't have this model, but still participates in sync
+                if self.verbose:
+                    logger.info(f"Modèle itération {ref_iter} non disponible pour ce worker, participation sync seulement")
             
-            # CRITICAL: All workers must sync with the same name regardless of success/failure
+            # CRITICAL: All workers must sync with the same name regardless of evaluation
             jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}")
-
-        # Synchroniser avant l'agrégation
+        
+        # Synchroniser avant l'agrégation - TOUS les workers participent
         jax.experimental.multihost_utils.sync_global_devices("pre_aggregation")
         
-        # Agréger les résultats de tous les processus
-        all_results = self._aggregate_evaluation_results(local_results, available_refs)
+        # Agréger les résultats de tous les processus pour TOUTES les références de sync
+        all_results = self._aggregate_evaluation_results(local_results, sync_refs)
 
         # Synchroniser après l'agrégation
         jax.experimental.multihost_utils.sync_global_devices("post_aggregation")
