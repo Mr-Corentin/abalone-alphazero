@@ -144,15 +144,15 @@ def get_merged_config(args):
     
     # If using GCS bucket, update paths for cloud storage
     if args.gcs_bucket:
-        bucket_path = f"gs://{args.gcs_bucket}"
+        bucket_path = "gs://{}".format(args.gcs_bucket)
         if not args.checkpoint_path:
             timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            config['checkpoint']['path'] = f"{bucket_path}/checkpoints/model_{timestamp}"
+            config['checkpoint']['path'] = "{}/checkpoints/model_{}".format(bucket_path, timestamp)
         
         if not args.log_dir:
             if 'log_dir' not in config:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-                args.log_dir = f"{bucket_path}/logs/abalone_az_{timestamp}"
+                args.log_dir = "{}/logs/abalone_az_{}".format(bucket_path, timestamp)
     
     if args.use_gcs_buffer:
         config['buffer']['use_gcs'] = True
@@ -230,6 +230,7 @@ def create_trainer(config, args):
     eval_games = config.get('evaluation', {}).get('num_games', 2)
 
     # Create the trainer
+    main_process_log(f"Creating trainer with {config['mcts']['num_simulations']} MCTS simulations")
     trainer = AbaloneTrainerSync(
         network=network,
         env=env,
