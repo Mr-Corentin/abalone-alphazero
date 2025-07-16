@@ -1641,6 +1641,9 @@ class AbaloneTrainerSync:
                 aggregated_data[ref_iter] = jnp.zeros(4, dtype=jnp.int32)
 
         # Convertir en un seul grand tableau pour faciliter la communication collective
+        if not model_iterations:
+            # Pas de modèles à évaluer, retourner des résultats vides
+            return {}
         all_models_data = jnp.stack([aggregated_data[ref] for ref in model_iterations])
 
         # Répliquer les données sur tous les dispositifs locaux

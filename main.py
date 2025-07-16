@@ -230,7 +230,7 @@ def create_trainer(config, args):
     eval_games = config.get('evaluation', {}).get('num_games', 2)
 
     # Create the trainer
-    main_process_log(f"Creating trainer with {config['mcts']['num_simulations']} MCTS simulations")
+    logger.info(f"Process {jax.process_index()+1}/{jax.process_count()} - Using {config['mcts']['num_simulations']} MCTS simulations")
     trainer = AbaloneTrainerSync(
         network=network,
         env=env,
