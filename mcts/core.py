@@ -156,8 +156,8 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
     """Current reward function - can be switched between terminal-only and intermediate"""
-    #return calculate_reward_terminal_only(current_state, next_state)
-    return calculate_reward_with_intermediate(current_state, next_state)
+    return calculate_reward_terminal_only(current_state, next_state)
+    #return calculate_reward_with_intermediate(current_state, next_state)
     
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
