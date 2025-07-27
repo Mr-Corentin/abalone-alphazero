@@ -178,8 +178,13 @@ def move_group_inline(board: chex.Array,
     updated_board = board.at[start_indices].set(
         jnp.where(positions_mask, 0., board[start_indices])
     )
+    
+    # Only place marbles if destination is actually valid (prevent ghost marbles)
+    in_bounds_mask = ((board_positions >= 0) & (board_positions < board.shape[0])).all(axis=1)
+    valid_placement = positions_mask & in_bounds_mask
+    
     updated_board = updated_board.at[board_indices].set(
-        jnp.where(positions_mask, 1., updated_board[board_indices])
+        jnp.where(valid_placement, 1., updated_board[board_indices])
     )
 
     # 9. Calcul de la validité de la poussée
@@ -201,16 +206,24 @@ def move_group_inline(board: chex.Array,
     # Reste du code identique pour la mise à jour avec poussée...
     push_dest_positions = push_positions + dir_vec
     push_dest_board_positions = push_dest_positions + radius
-    dest_indices = (push_dest_board_positions[:, 0], 
-                   push_dest_board_positions[:, 1], 
-                   push_dest_board_positions[:, 2])
     valid_push = jnp.array([True, True, False]) 
     valid_push = valid_push & (jnp.arange(3) < n_opposing) & push_in_bounds
 
+    # Only place pushed marbles at valid positions (prevent ghost marbles from negative indexing)
+    push_dest_in_bounds = ((push_dest_board_positions >= 0) & (push_dest_board_positions < board.shape[0])).all(axis=1)
+    safe_valid_push = valid_push & push_dest_in_bounds
+    
+    # Create safe indices that avoid negative index wrapping
+    safe_dest_indices = (
+        jnp.where(safe_valid_push, push_dest_board_positions[:, 0], 0),
+        jnp.where(safe_valid_push, push_dest_board_positions[:, 1], 0),
+        jnp.where(safe_valid_push, push_dest_board_positions[:, 2], 0)
+    )
+    
     push_updated_board = jnp.where(
         has_opposing & success,
-        updated_board.at[dest_indices].set(
-            jnp.where(valid_push, -1, updated_board[dest_indices])
+        updated_board.at[safe_dest_indices].set(
+            jnp.where(safe_valid_push, -1, updated_board[safe_dest_indices])
         ),
         updated_board
     )
