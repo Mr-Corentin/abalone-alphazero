@@ -1,0 +1,29 @@
+.board-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+}
+
+.board-svg {
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+}
+
+.marble:hover {
+  filter: brightness(1.1);
+}
+
+.marble.selected {
+  filter: drop-shadow(0 0 8px #e74c3c);
+}
+
+.direction-arrow:hover {
+  fill: #5dade2;
+  transform: scale(1.1);
+}
+
+.hex-cell {
+  fill-opacity: 0.1;
+}
