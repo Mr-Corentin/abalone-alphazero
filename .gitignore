@@ -25,3 +25,9 @@ venv.bak/
 
 tmp/
 temp/
+
+# Web interface
+web_interface/node_modules/
+web_interface/.env
+web_interface/dist/
+web_interface/build/
