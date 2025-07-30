@@ -16,7 +16,6 @@ from environment.env import AbaloneEnv
 from training.replay_buffer import CPUReplayBuffer
 from training.loss import train_step_pmap_impl
 from mcts.search import generate_parallel_games_pmap, create_optimized_game_generator
-from evaluation.evaluator import Evaluator
 from utils.game_storage import convert_games_batch, GameLogger, LocalGameLogger
 from utils.gcs_metrics_logger import SimpleGCSLogger, LocalMetricsLogger, IterationMetricsAggregator
 
