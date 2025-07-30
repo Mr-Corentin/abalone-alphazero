@@ -6,40 +6,38 @@ from typing import Tuple
 
 from core.core import CubeCoord, Direction, DIRECTIONS
 
-################
-
 def create_board_mask(radius: int = 4) -> chex.Array:
     """
-    Crée un masque 3D des positions valides sur le plateau
+    Creates a 3D mask of valid positions on the board
     Returns:
-        chex.Array: Masque booléen (2*radius+1, 2*radius+1, 2*radius+1)
+        chex.Array: Boolean mask (2*radius+1, 2*radius+1, 2*radius+1)
     """
     size = 2 * radius + 1
     mask = jnp.full((size, size, size), False)
     
-    # Liste de toutes les coordonnées valides
+    # List of all valid coordinates
     valid_coords = [
-        # Ligne 1 (z = -4)
+        # Row 1 (z = -4)
         (0,4,-4), (1,3,-4), (2,2,-4), (3,1,-4), (4,0,-4),
-        # Ligne 2 (z = -3)
+        # Row 2 (z = -3)
         (-1,4,-3), (0,3,-3), (1,2,-3), (2,1,-3), (3,0,-3), (4,-1,-3),
-        # Ligne 3 (z = -2)
+        # Row 3 (z = -2)
         (-2,4,-2), (-1,3,-2), (0,2,-2), (1,1,-2), (2,0,-2), (3,-1,-2), (4,-2,-2),
-        # Ligne 4 (z = -1)
+        # Row 4 (z = -1)
         (-3,4,-1), (-2,3,-1), (-1,2,-1), (0,1,-1), (1,0,-1), (2,-1,-1), (3,-2,-1), (4,-3,-1),
-        # Ligne 5 (z = 0)
+        # Row 5 (z = 0)
         (-4,4,0), (-3,3,0), (-2,2,0), (-1,1,0), (0,0,0), (1,-1,0), (2,-2,0), (3,-3,0), (4,-4,0),
-        # Ligne 6 (z = 1)
+        # Row 6 (z = 1)
         (-4,3,1), (-3,2,1), (-2,1,1), (-1,0,1), (0,-1,1), (1,-2,1), (2,-3,1), (3,-4,1),
-        # Ligne 7 (z = 2)
+        # Row 7 (z = 2)
         (-4,2,2), (-3,1,2), (-2,0,2), (-1,-1,2), (0,-2,2), (1,-3,2), (2,-4,2),
-        # Ligne 8 (z = 3)
+        # Row 8 (z = 3)
         (-4,1,3), (-3,0,3), (-2,-1,3), (-1,-2,3), (0,-3,3), (1,-4,3),
-        # Ligne 9 (z = 4)
+        # Row 9 (z = 4)
         (-4,0,4), (-3,-1,4), (-2,-2,4), (-1,-3,4), (0,-4,4)
     ]
     
-    # Marquer toutes les positions valides dans le masque
+    # Mark all valid positions in the mask
     for x, y, z in valid_coords:
         array_x = x + radius
         array_y = y + radius
@@ -49,70 +47,38 @@ def create_board_mask(radius: int = 4) -> chex.Array:
     return mask
 def initialize_board(radius: int = 4) -> chex.Array:
     """
-    Initialise le plateau avec les positions de départ
+    Initialize the board with starting positions
     Returns:
-        chex.Array: Plateau avec positions initiales
+        chex.Array: Board with initial positions
     """
     size = 2 * radius + 1
     board = jnp.full((size, size, size), jnp.nan)
     
-    # Créer le masque des positions valides et initialiser les cases valides à 0
+    # Create valid positions mask and initialize valid cells to 0
     valid_mask = create_board_mask(radius)
     board = jnp.where(valid_mask, 0., board)
     
-    # # Position initiale des billes noires (haut du plateau)
-    # black_coords = [
-    #     # Première rangée
-    #     (0,4,-4), (1,3,-4), (2,2,-4), (3,1,-4), (4,0,-4),
-    #     # Deuxième rangée
-    #     (-1,4,-3), (0,3,-3), (1,2,-3), (2,1,-3), (3,0,-3), (4,-1,-3),
-    #     # Troisième rangée
-    #     (0,2,-2), (1,1,-2), (2,0,-2)
-    # ]
-    
-    # # Position initiale des billes blanches (bas du plateau)
-    # white_coords = [
-    #     # Première rangée
-    #     (-4,0,4), (-3,-1,4), (-2,-2,4), (-1,-3,4), (0,-4,4),
-    #     # Deuxième rangée
-    #     (-4,1,3), (-3,0,3), (-2,-1,3), (-1,-2,3), (0,-3,3), (1,-4,3),
-    #     # Troisième rangée
-    #     (-2,0,2), (-1,-1,2), (0,-2,2)
-    # ]
 
-    #Belgian Daisy config
+    # Belgian Daisy config
     black_coords = [
-        # Première rangée
         (3,1,-4), (4,0,-4),
-        # Deuxième rangée
         (2,1,-3), (3,0,-3), (4,-1,-3),
-        # Troisième rangée
         (2,0,-2), (3,-1,-2),
-        # Septième rangée
         (-3,1,2), (-2,0,2),
-        # Huitième rangée
         (-4,1,3), (-3,0,3), (-2,-1,3),
-        # Neuvième rangée
         (-4,0,4), (-3,-1,4)
     ]
     
-    # Position initiale des billes blanches (bas du plateau)
     white_coords = [
-        # Première rangée
         (0,4,-4), (1,3,-4),
-        # Deuxième rangée
         (-1,4,-3), (0,3,-3), (1,2,-3),
-        # Troisième rangée
         (-1,3,-2), (0,2,-2),
-        # Septième rangée
         (0,-2,2), (1,-3,2),
-        # Huitième rangée
         (-1,-2,3), (0,-3,3), (1,-4,3),
-        # Neuvième rangée
         (-1,-3,4), (0,-4,4)
     ]
     
-    # Placer les billes noires (1) et blanches (-1)
+    # Place black marbles (1) and white marbles (-1)
     for x, y, z in black_coords:
         array_x, array_y, array_z = x + radius, y + radius, z + radius
         board = board.at[array_x, array_y, array_z].set(1.)
@@ -126,31 +92,29 @@ def initialize_board(radius: int = 4) -> chex.Array:
     
 def display_board(board: chex.Array, radius: int = 4):
     """
-    Affiche le plateau Abalone en 2D en suivant les coordonnées cubiques
+    Display the Abalone board in 2D following cubic coordinates
     """
-    print("\nPlateau Abalone:")
-    print("Légende: ● (noir), ○ (blanc), · (vide)\n")
+    print("\nAbalone Board:")
+    print("Legend: ● (black), ○ (white), · (empty)\n")
     
-    # Coordonnées de départ pour chaque ligne
+    # Starting coordinates for each row
     line_starts = [
-        [(0,4,-4), 5],    # ligne 1: 5 cellules
-        [(-1,4,-3), 6],   # ligne 2: 6 cellules
-        [(-2,4,-2), 7],   # ligne 3: 7 cellules
-        [(-3,4,-1), 8],   # ligne 4: 8 cellules
-        [(-4,4,0), 9],    # ligne 5: 9 cellules
-        [(-4,3,1), 8],    # ligne 6: 8 cellules
-        [(-4,2,2), 7],    # ligne 7: 7 cellules
-        [(-4,1,3), 6],    # ligne 8: 6 cellules
-        [(-4,0,4), 5],    # ligne 9: 5 cellules
+        [(0,4,-4), 5],
+        [(-1,4,-3), 6],
+        [(-2,4,-2), 7],
+        [(-3,4,-1), 8],
+        [(-4,4,0), 9],
+        [(-4,3,1), 8],
+        [(-4,2,2), 7],
+        [(-4,1,3), 6],
+        [(-4,0,4), 5]
     ]
     
-    # Pour chaque ligne
+    # For each row
     for row_idx, ((start_x, start_y, start_z), num_cells) in enumerate(line_starts):
-        # Indentation
         indent = abs(4 - row_idx)
         print(" " * indent, end="")
         
-        # Parcourir les cellules de la ligne
         for i in range(num_cells):
             x = start_x + i
             y = start_y - i
@@ -172,24 +136,24 @@ def display_board(board: chex.Array, radius: int = 4):
 
 def create_custom_board(marbles: list[tuple[tuple[int, int, int], int]], radius: int = 4) -> chex.Array:
     """
-    Crée un plateau avec des billes placées à des positions spécifiques
+    Create a board with marbles placed at specific positions
     
     Args:
-        marbles: Liste de tuples ((x,y,z), couleur) où couleur est 1 pour noir, -1 pour blanc
-        radius: Rayon du plateau
+        marbles: List of tuples ((x,y,z), color) where color is 1 for black, -1 for white
+        radius: Board radius
     
     Returns:
-        chex.Array: Plateau personnalisé
+        chex.Array: Custom board
     """
-    # Créer un plateau vide
+    # Create empty board
     size = 2 * radius + 1
     board = jnp.full((size, size, size), jnp.nan)
     
-    # Remplir toutes les positions valides avec 0 (vide)
+    # Fill all valid positions with 0 (empty)
     valid_mask = create_board_mask(radius)
     board = jnp.where(valid_mask, 0., board)
     
-    # Placer les billes aux positions spécifiées
+    # Place marbles at specified positions
     for (x, y, z), color in marbles:
         board_pos = jnp.array([x, y, z]) + radius
         board = board.at[board_pos[0], board_pos[1], board_pos[2]].set(float(color))
@@ -201,35 +165,35 @@ def create_custom_board(marbles: list[tuple[tuple[int, int, int], int]], radius:
 @jax.jit
 def get_neighbors_array(pos_array: chex.Array) -> chex.Array:
     """
-    Retourne les positions voisines d'une coordonnée donnée en format tableau
+    Returns neighboring positions of a given coordinate in array format
     Args:
-        pos_array: Position d'origine (array [x, y, z])
+        pos_array: Origin position (array [x, y, z])
     Returns:
-        chex.Array: Tableau (6, 3) des coordonnées voisines
+        chex.Array: Array (6, 3) of neighboring coordinates
     """
     return pos_array[None, :] + DIRECTIONS
 
 def get_neighbors(pos: CubeCoord) -> chex.Array:
     """
-    Version wrapper qui accepte un CubeCoord
+    Wrapper version that accepts a CubeCoord
     """
     return get_neighbors_array(pos.to_array())
 
 @partial(jax.jit, static_argnums=(2,))
 def is_valid_position(pos: chex.Array, board: chex.Array, radius: int = 4) -> chex.Array:
     """
-    Vérifie si une position est valide sur le plateau
+    Check if a position is valid on the board
     Args:
-        pos: Position à vérifier (x, y, z)
-        board: État du plateau
-        radius: Rayon du plateau
+        pos: Position to check (x, y, z)
+        board: Board state
+        radius: Board radius
     Returns:
-        chex.Array: True si la position est valide
+        chex.Array: True if position is valid
     """
     x, y, z = pos
     size = 2 * radius + 1
     
-    # Utiliser jnp.where au lieu des opérations booléennes Python
+    # Use jnp.where instead of Python boolean operations
     within_bounds = ((x + radius >= 0) & 
                     (x + radius < size) & 
                     (y + radius >= 0) & 
@@ -237,7 +201,7 @@ def is_valid_position(pos: chex.Array, board: chex.Array, radius: int = 4) -> ch
                     (z + radius >= 0) & 
                     (z + radius < size))
     
-    # Maintenant utiliser jnp.where pour combiner les conditions
+    # Now use jnp.where to combine conditions
     return jnp.where(
         within_bounds,
         ~jnp.isnan(board[x + radius, y + radius, z + radius]),

@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 @dataclass(frozen=True)
 class CubeCoord:
     """
-    Représentation d'une coordonnée cubique avec contrainte x + y + z = 0
+    Representation of a cubic coordinate with constraint x + y + z = 0
     """
     x: int
     y: int
@@ -19,34 +19,34 @@ class CubeCoord:
             raise ValueError(f"Invalid cube coordinates: {self.x}+{self.y}+{self.z}≠0")
     
     def to_array(self) -> chex.Array:
-        """Convertit en tableau JAX"""
+        """Convert to JAX array"""
         return jnp.array([self.x, self.y, self.z])
     
     @staticmethod
     def from_array(arr: chex.Array) -> 'CubeCoord':
-        """Crée une coordonnée à partir d'un tableau JAX"""
+        """Create coordinate from JAX array"""
         return CubeCoord(int(arr[0]), int(arr[1]), int(arr[2]))
 
 class Direction(Enum):
     """
-    Directions possibles sur la grille hexagonale en coordonnées cubiques
+    Possible directions on hexagonal grid in cubic coordinates
     """
-    NE = (1, 0, -1)   # Nord-Est
-    E  = (1, -1, 0)   # Est
-    SE = (0, -1, 1)   # Sud-Est
-    SW = (-1, 0, 1)   # Sud-Ouest
-    W  = (-1, 1, 0)   # Ouest
-    NW = (0, 1, -1)   # Nord-Ouest
+    NE = (1, 0, -1)   # North-East
+    E  = (1, -1, 0)   # East
+    SE = (0, -1, 1)   # South-East
+    SW = (-1, 0, 1)   # South-West
+    W  = (-1, 1, 0)   # West
+    NW = (0, 1, -1)   # North-West
     
     def to_array(self) -> chex.Array:
-        """Convertit la direction en tableau JAX"""
+        """Convert direction to JAX array"""
         return jnp.array(self.value)
     
     @staticmethod
     def all_directions() -> chex.Array:
-        """Retourne toutes les directions sous forme de matrice"""
+        """Return all directions as matrix"""
         return jnp.array([d.value for d in Direction])
 
-# Constantes utiles
+# Useful constants
 DIRECTIONS = Direction.all_directions()
 DIR_TO_IDX = {d: i for i, d in enumerate(Direction)}

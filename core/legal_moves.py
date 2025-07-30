@@ -9,7 +9,7 @@ import numpy as np
 @partial(jax.jit, static_argnames=['radius'])
 def create_player_positions_mask(board: chex.Array, radius: int = 4) -> chex.Array:
     """
-    Crée un masque booléen des positions où se trouvent les billes du joueur courant (toujours 1)
+    Create boolean mask of positions where current player's marbles are located (always 1)
     """
     return board == 1
 
@@ -18,7 +18,7 @@ def filter_moves_by_positions(player_mask: chex.Array,
                             moves_index: Dict[str, chex.Array],
                             radius: int = 4) -> chex.Array:
     """
-    Crée un masque des mouvements dont toutes les positions de départ sont des billes du joueur
+    Create mask of moves where all start positions have player marbles
     """
     def check_move_positions(move_idx):
         positions = moves_index['positions'][move_idx]
@@ -30,10 +30,10 @@ def filter_moves_by_positions(player_mask: chex.Array,
                                board_positions[:, 1],
                                board_positions[:, 2]]
         
-        # Créer masque pour nombre correct de positions
+        # Create mask for correct number of positions
         positions_mask = jnp.arange(3) < group_size
 
-       # True si toutes les positions requises ont nos pièces
+        # True if all required positions have our pieces
         return jnp.all(jnp.where(positions_mask, has_pieces, True))
     
     return jax.vmap(check_move_positions)(jnp.arange(len(moves_index['directions'])))
@@ -45,7 +45,7 @@ def check_moves_validity(board: chex.Array,
                         filtered_moves: chex.Array,
                         radius: int = 4) -> chex.Array:
     """
-    Vérifie quels mouvements filtrés sont légaux selon les règles du jeu
+    Check which filtered moves are legal according to game rules
     """
     def check_move(move_idx):
 
@@ -80,7 +80,7 @@ def get_legal_moves(board: chex.Array,
                    moves_index: Dict[str, chex.Array],
                    radius: int = 4) -> chex.Array:
     """
-    Détermine tous les mouvements légaux pour le joueur courant (toujours 1)
+    Determine all legal moves for current player (always 1)
     """
     position_filtered = filter_moves_by_positions(
         create_player_positions_mask(board),  
@@ -95,7 +95,7 @@ def filter_moves_by_positions_for_eval(player_mask: chex.Array,
                                      moves_index: Dict[str, chex.Array],
                                      radius: int = 4) -> chex.Array:
     """
-    Version sans vmap de filter_moves_by_positions pour l'évaluation
+    Non-vmap version of filter_moves_by_positions for evaluation
     """
     num_moves = len(moves_index['directions'])
     results = np.zeros(num_moves, dtype=bool)
@@ -106,7 +106,7 @@ def filter_moves_by_positions_for_eval(player_mask: chex.Array,
         
         board_positions = positions + radius
         
-        # Vérifier chaque position requise
+        # Check each required position
         valid = True
         for i in range(group_size):
             pos = board_positions[i]
@@ -123,13 +123,13 @@ def check_moves_validity_for_eval(board: chex.Array,
                                 filtered_moves: np.ndarray,
                                 radius: int = 4) -> np.ndarray:
     """
-    Version sans vmap de check_moves_validity pour l'évaluation
+    Non-vmap version of check_moves_validity for evaluation
     """
     num_moves = len(moves_index['directions'])
     results = np.zeros(num_moves, dtype=bool)
     
     for move_idx in range(num_moves):
-        # Si le mouvement n'a pas passé le premier filtre, passer au suivant
+        # If move didn't pass first filter, skip to next
         if not filtered_moves[move_idx]:
             continue
         
@@ -138,7 +138,7 @@ def check_moves_validity_for_eval(board: chex.Array,
         move_type = moves_index['move_types'][move_idx]
         group_size = moves_index['group_sizes'][move_idx]
         
-        # Vérifier selon le type de mouvement
+        # Check based on move type
         if move_type == 0:
             _, success = move_single_marble(board, positions[0], direction, radius)
             results[move_idx] = success
@@ -155,7 +155,7 @@ def get_legal_moves_for_eval(board: chex.Array,
                            moves_index: Dict[str, chex.Array],
                            radius: int = 4) -> np.ndarray:
     """
-    Version sans vmap de get_legal_moves pour l'évaluation
+    Non-vmap version of get_legal_moves for evaluation
     """
     player_mask = (board == 1)
     position_filtered = filter_moves_by_positions_for_eval(player_mask, moves_index, radius)
@@ -166,14 +166,14 @@ def get_legal_moves_for_eval(board: chex.Array,
 @partial(jax.jit, static_argnames=['radius'])
 def get_legal_moves_for_single(board, moves_index, radius=4):
     """
-    Version jit mais non-vectorisée pour un seul état.
-    Réutilise les fonctions internes de get_legal_moves mais sans vmap.
+    JIT version but non-vectorized for single state.
+    Reuses internal functions from get_legal_moves but without vmap.
     """
-    # Créer le masque du joueur
+    # Create player mask
     player_mask = board == 1
     
-    # Utiliser la fonction interne de filter_moves_by_positions mais l'appliquer 
-    # à chaque mouvement un par un sans vmap
+    # Use internal function from filter_moves_by_positions but apply
+    # to each move one by one without vmap
     def check_move_positions(move_idx):
         positions = moves_index['positions'][move_idx]
         group_size = moves_index['group_sizes'][move_idx]
@@ -184,17 +184,17 @@ def get_legal_moves_for_single(board, moves_index, radius=4):
                                board_positions[:, 1],
                                board_positions[:, 2]]
         
-        # Créer masque pour nombre correct de positions
+        # Create mask for correct number of positions
         positions_mask = jnp.arange(3) < group_size
 
-        # True si toutes les positions requises ont nos pièces
+        # True if all required positions have our pieces
         return jnp.all(jnp.where(positions_mask, has_pieces, True))
     
-    # Appliquer à chaque mouvement avec un scan ou cumulativement
+    # Apply to each move with scan or cumulatively
     num_moves = len(moves_index['directions'])
     position_filtered = jnp.zeros(num_moves, dtype=jnp.bool_)
     
-    # Utiliser jax.lax.fori_loop au lieu d'une boucle Python
+    # Use jax.lax.fori_loop instead of Python loop
     def body_fn(i, filtered):
         filtered = filtered.at[i].set(check_move_positions(i))
         return filtered
@@ -203,7 +203,7 @@ def get_legal_moves_for_single(board, moves_index, radius=4):
         0, num_moves, body_fn, position_filtered
     )
     
-    # Fonction interne check_move de check_moves_validity
+    # Internal check_move function from check_moves_validity
     def check_move(move_idx):
         # Si le mouvement n'a pas passé le premier filtre, retourner False
         is_filtered = position_filtered[move_idx]
@@ -228,7 +228,7 @@ def get_legal_moves_for_single(board, moves_index, radius=4):
 
         return jnp.where(is_filtered, is_valid, False)
     
-    # Appliquer à chaque mouvement
+    # Apply to each move
     legal_moves = jnp.zeros(num_moves, dtype=jnp.bool_)
     
     def body_fn2(i, legal):

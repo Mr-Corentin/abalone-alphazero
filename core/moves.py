@@ -5,7 +5,6 @@ from functools import partial
 from core.core import Direction, DIRECTIONS
 from core.positions import get_valid_neighbors, analyze_group
 
-# Dans moves.py
 #@partial(jax.jit, static_argnames=['radius', 'direction_idx'])
 @partial(jax.jit)
 def move_single_marble(board: chex.Array, 
@@ -13,26 +12,26 @@ def move_single_marble(board: chex.Array,
                                direction_idx: int,
                                radius: int = 4) -> tuple[chex.Array, bool]:
     """
-    Version optimisée du mouvement d'une seule bille
-    Le joueur courant est toujours représenté par 1
+    Optimized version of single marble movement
+    Current player is always represented by 1
     """
-    # 1. Calcul des positions en une fois
+    # 1. Calculate positions at once
     start_pos_idx = position + radius
     dir_vec = DIRECTIONS[direction_idx]
     new_pos_idx = start_pos_idx + dir_vec
 
-    # 2. Vérification des conditions en une seule lecture du board
+    # 2. Check conditions with single board read
     start_value = board[start_pos_idx[0], start_pos_idx[1], start_pos_idx[2]]
     has_marble = start_value == 1
     
-    # 3. Vérification de validité combinée
+    # 3. Combined validity check
     valid_mask, _ = get_valid_neighbors(position, board, radius)
     dest_value = board[new_pos_idx[0], new_pos_idx[1], new_pos_idx[2]]
     
-    # 4. Validation finale
+    # 4. Final validation
     success = has_marble & valid_mask[direction_idx] & (dest_value == 0)
     
-    # 5. Mise à jour du plateau en une seule opération
+    # 5. Update board in single operation
     new_board = jnp.where(success,
                          board.at[start_pos_idx[0], start_pos_idx[1], start_pos_idx[2]].set(0)
                               .at[new_pos_idx[0], new_pos_idx[1], new_pos_idx[2]].set(1),
@@ -49,24 +48,24 @@ def move_group_parallel(board: chex.Array,
                        group_size: int,
                        radius: int = 4) -> tuple[chex.Array, bool]:
     """
-    Version optimisée du mouvement parallèle
-    Le joueur courant est toujours représenté par 1
+    Optimized version of parallel movement
+    Current player is always represented by 1
     """
-    # 1. Préparation des positions et masques
+    # 1. Prepare positions and masks
     positions_mask = jnp.arange(positions.shape[0]) < group_size
     valid_positions = jnp.where(positions_mask[:, None], positions, 0)
     
-    # 2. Analyse du groupe et validation
+    # 2. Group analysis and validation
     is_valid, _, parallel_dirs = analyze_group(valid_positions, board, group_size, radius)
     is_valid_direction = parallel_dirs[direction]
 
-    # 3. Calcul des positions
+    # 3. Calculate positions
     dir_vec = DIRECTIONS[direction]
     start_positions = valid_positions + radius
     new_positions = jnp.where(positions_mask[:, None], positions + dir_vec, 0)
     board_positions = new_positions + radius
 
-    # 4. Vérification des limites et validité
+    # 4. Check bounds and validity
     in_bounds = jnp.all((board_positions >= 0) & (board_positions < board.shape[0]))
     actual_board_state = jnp.where(
         positions_mask,
@@ -75,10 +74,10 @@ def move_group_parallel(board: chex.Array,
     )
     destinations_empty = jnp.all(actual_board_state == 0)
     
-    # 5. Validation finale
+    # 5. Final validation
     success = is_valid & is_valid_direction & in_bounds & destinations_empty
 
-    # 6. Préparation des indices pour la mise à jour
+    # 6. Prepare indices for update
     start_indices = (
         jnp.where(positions_mask, start_positions[:, 0], 0),
         jnp.where(positions_mask, start_positions[:, 1], 0),
@@ -90,7 +89,7 @@ def move_group_parallel(board: chex.Array,
         jnp.where(positions_mask, board_positions[:, 2], 0)
     )
     
-    # 7. Mise à jour du plateau
+    # 7. Update board
     updated_board = board.at[start_indices].set(
         jnp.where(positions_mask, 0., board[start_indices])
     )
@@ -98,7 +97,7 @@ def move_group_parallel(board: chex.Array,
         jnp.where(positions_mask, 1., updated_board[board_indices])
     )
 
-    # 8. Finalisation
+    # 8. Finalization
     new_board = jnp.where(success, updated_board, board)
     
     return new_board, success
@@ -111,26 +110,26 @@ def move_group_inline(board: chex.Array,
                               group_size: int,
                               radius: int = 4) -> tuple[chex.Array, bool, int]:
     """
-    Version optimisée du mouvement inline
-    Gère à la fois les déplacements simples et les poussées
-    Le joueur courant est toujours représenté par 1, l'adversaire par -1
+    Optimized version of inline movement
+    Handles both simple moves and pushes
+    Current player is always represented by 1, opponent by -1
     """
-    # 1. Préparation optimisée des positions et masques
+    # 1. Optimized preparation of positions and masks
     positions_mask = jnp.arange(positions.shape[0]) < group_size
     valid_positions = jnp.where(positions_mask[:, None], positions, 0)
     dir_vec = DIRECTIONS[direction]
     
-    # 2. Analyse du groupe et validation de base
+    # 2. Group analysis and basic validation
     is_valid, inline_dirs, _ = analyze_group(valid_positions, board, group_size, radius)
     is_valid_direction = inline_dirs[direction]
 
-    # 3. Calcul de la tête et des positions
+    # 3. Calculate head and positions
     scores = jnp.sum(valid_positions * dir_vec, axis=1)
     scores = jnp.where(positions_mask, scores, -jnp.inf)
     head_index = jnp.argmax(scores)
     head_position = valid_positions[head_index]
     
-    # 4. Vérification du contenu devant la tête du groupe
+    # 4. Check content ahead of group head
     position_ahead = head_position + dir_vec
     position_ahead_board = position_ahead + radius
     content_ahead = board[position_ahead_board[0], 
@@ -138,12 +137,12 @@ def move_group_inline(board: chex.Array,
                         position_ahead_board[2]]
     is_blocking_friend_ahead = content_ahead == 1
     
-    # 5. Calcul des nouvelles positions
+    # 5. Calculate new positions
     start_positions = valid_positions + radius
     new_positions = jnp.where(positions_mask[:, None], positions + dir_vec, 0)
     board_positions = new_positions + radius
 
-    # 6. Vérification des limites et validité
+    # 6. Check bounds and validity
     in_bounds = jnp.all((board_positions >= 0) & (board_positions < board.shape[0]))
     actual_board_state = jnp.where(
         positions_mask,
@@ -151,10 +150,10 @@ def move_group_inline(board: chex.Array,
         0
     )
     is_empty = actual_board_state == 0
-    is_moving_piece = positions_mask  # Gardé simple pour permettre les poussées
+    is_moving_piece = positions_mask  # Kept simple to allow pushes
     is_valid_position = is_empty | is_moving_piece
 
-    # 7. Early check pour la présence de bille adverse
+    # 7. Early check for opposing marble presence
     push_positions = head_position + jnp.array([dir_vec * (i + 1) for i in range(3)])
     push_board_positions = push_positions + radius
     push_contents = board[push_board_positions[:, 0],
@@ -162,7 +161,7 @@ def move_group_inline(board: chex.Array,
                         push_board_positions[:, 2]]
     has_opposing = push_contents[0] == -1
 
-    # 8. Préparation du mouvement simple
+    # 8. Prepare simple movement
     start_indices = (
         jnp.where(positions_mask, start_positions[:, 0], 0),
         jnp.where(positions_mask, start_positions[:, 1], 0),
@@ -187,7 +186,7 @@ def move_group_inline(board: chex.Array,
         jnp.where(valid_placement, 1., updated_board[board_indices])
     )
 
-    # 9. Calcul de la validité de la poussée
+    # 9. Calculate push validity
     push_in_bounds = jnp.all((push_board_positions >= 0) & 
                             (push_board_positions < board.shape[0]), axis=1)
     is_opposing = push_contents == -1
@@ -199,11 +198,11 @@ def move_group_inline(board: chex.Array,
                         (n_opposing > 0) & (n_opposing < group_size) & no_friendly_behind,
                         False)
     
-    # 10. Validation finale avec la condition combinée
+    # 10. Final validation with combined condition
     destinations_valid = jnp.all(is_valid_position) & ~is_blocking_friend_ahead & ((content_ahead == 0) | (has_opposing & can_push))
     success = is_valid & is_valid_direction & in_bounds & destinations_valid
 
-    # Reste du code identique pour la mise à jour avec poussée...
+    # Rest of code identical for push update...
     push_dest_positions = push_positions + dir_vec
     push_dest_board_positions = push_dest_positions + radius
     valid_push = jnp.array([True, True, False]) 
@@ -228,12 +227,11 @@ def move_group_inline(board: chex.Array,
         updated_board
     )
 
-    # Calcul des billes sorties
+    # Calculate marbles out
     push_possibility = jnp.array([False, True, True])
     out_of_bounds = push_possibility & ~push_in_bounds
     opposing_mask = jnp.roll(jnp.arange(3) < n_opposing, shift=1)
     potential_exits = jnp.where(opposing_mask, out_of_bounds, False)
-    # billes_sorties = jnp.where(has_opposing & success, jnp.sum(potential_exits), 0)
     billes_sorties = jnp.where(has_opposing & success, jnp.minimum(jnp.sum(potential_exits), 1), 0)
 
     new_board = jnp.where(success, push_updated_board, board)
