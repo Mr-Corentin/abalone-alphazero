@@ -145,7 +145,8 @@ class AbaloneMCTSRecurrentFn:
 
         next_states = jax.vmap(self.env.step)(current_states, action)
 
-        reward = jax.vmap(calculate_reward)(current_states, next_states)
+        iteration = embedding.get('iteration', jnp.zeros_like(current_states.actual_player))
+        reward = jax.vmap(calculate_reward_curriculum)(current_states, next_states, iteration)
         discount = jax.vmap(calculate_discount)(next_states)
         our_marbles = jnp.where(next_states.actual_player == 1,
                                next_states.black_out,
