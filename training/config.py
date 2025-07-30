@@ -1,5 +1,5 @@
 """
-Configuration d'entraînement pour AlphaZero Abalone
+Training configuration for AlphaZero Abalone
 """
 
 DEFAULT_CONFIG = {
@@ -136,9 +136,9 @@ CPU_CONFIG = {
 
 def get_config():
     """
-    Récupère la configuration par défaut
+    Get default configuration
     
     Returns:
-        Dictionnaire de configuration
+        Configuration dictionary
     """
     return DEFAULT_CONFIG
