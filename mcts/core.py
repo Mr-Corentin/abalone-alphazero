@@ -93,11 +93,13 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
         )
     )
 
+    intermediate_reward = calculate_reward_with_intermediate(current_state, next_state, weight)
+    terminal_reward = calculate_reward_terminal_only(current_state, next_state)
     
     return jnp.where(
         weight > 0.0,
-        calculate_reward_with_intermediate(current_state, next_state, weight),
-        calculate_reward_terminal_only(current_state, next_state)
+        intermediate_reward,
+        terminal_reward
     )
 
 # Default function (can be switched for testing)
@@ -105,8 +107,8 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
     """Current reward function - can be switched between terminal-only and intermediate"""
     #return calculate_reward_terminal_only(current_state, next_state)
-    #return calculate_reward_curriculum(current_state,next_state, iteration)
-    return calculate_reward_with_intermediate(current_state, next_state)
+    return calculate_reward_curriculum(current_state,next_state, iteration)
+    #return calculate_reward_with_intermediate(current_state, next_state)
     
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
