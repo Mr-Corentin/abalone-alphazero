@@ -93,14 +93,22 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
         )
     )
 
-    intermediate_reward = calculate_reward_with_intermediate(current_state, next_state, weight)
+    # Calculate only the intermediate part of the reward
+    black_diff = next_state.black_out - current_state.black_out
+    white_diff = next_state.white_out - current_state.white_out
+    
+    opponent_marbles_pushed = jnp.where(
+        current_state.actual_player == 1,
+        white_diff,
+        black_diff
+    )
+    
+    intermediate_reward_part = weight * opponent_marbles_pushed
+
+    # Always add the terminal reward
     terminal_reward = calculate_reward_terminal_only(current_state, next_state)
     
-    return jnp.where(
-        weight > 0.0,
-        intermediate_reward,
-        terminal_reward
-    )
+    return intermediate_reward_part + terminal_reward
 
 # Default function (can be switched for testing)
 @partial(jax.jit)
