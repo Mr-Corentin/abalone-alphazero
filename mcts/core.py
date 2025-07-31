@@ -167,7 +167,7 @@ class AbaloneMCTSRecurrentFn:
             'black_out': next_states.black_out,
             'white_out': next_states.white_out,
             'moves_count': next_states.moves_count,
-            'iteration': embedding.get('iteration', jnp.zeros_like(next_states.actual_player))
+            'iteration': iteration
         }
 
         return mctx.RecurrentFnOutput(
