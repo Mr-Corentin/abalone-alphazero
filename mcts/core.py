@@ -76,21 +76,18 @@ def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: 
 def calculate_reward_curriculum(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
     """
     CURRICULUM REWARD VERSION
-    Switches between intermediate and terminal rewards based on iteration:
-    - Iterations 0-4: weight = 0.1 (full intermediate rewards)
-    - Iterations 5-9: weight = 0.05 (reduced intermediate rewards)
-    - Iterations 10+: weight = 0.0 (terminal only, pure AlphaZero)
+    Switches between intermediate and terminal rewards based on iteration
     """
 
     weight = jnp.where(
         iteration < 10,
-        1.0,
+        0.1,
         jnp.where(
             iteration < 15,
-            0.5,
+            0.05,
             jnp.where(
                 iteration < 30,
-                0.1,
+                0.01,
                 0.0
             )
         )
@@ -105,9 +102,10 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
 
 # Default function (can be switched for testing)
 @partial(jax.jit)
-def calculate_reward(current_state: AbaloneState, next_state: AbaloneState) -> float:
+def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
     """Current reward function - can be switched between terminal-only and intermediate"""
-    return calculate_reward_terminal_only(current_state, next_state)
+    #return calculate_reward_terminal_only(current_state, next_state)
+    return calculate_reward_curriculum(current_state,next_state, iteration)
     
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
@@ -146,7 +144,7 @@ class AbaloneMCTSRecurrentFn:
         next_states = jax.vmap(self.env.step)(current_states, action)
 
         iteration = embedding.get('iteration', jnp.zeros_like(current_states.actual_player))
-        reward = jax.vmap(calculate_reward_curriculum)(current_states, next_states, iteration)
+        reward = jax.vmap(calculate_reward)(current_states, next_states, iteration)
         discount = jax.vmap(calculate_discount)(next_states)
         our_marbles = jnp.where(next_states.actual_player == 1,
                                next_states.black_out,
