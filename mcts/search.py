@@ -7,7 +7,7 @@ from typing import Tuple, Dict, Any
 # Local imports
 from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel
-from core.coord_conversion import cube_to_2d
+from core.coord_conversion import cube_to_2d, convert_and_canonicalize_history_batch
 from mcts.core import AbaloneMCTSRecurrentFn, get_root_output_batch
 
 
@@ -146,8 +146,9 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size, iteratio
         )
         
         # Convert and store 2D history
+        # OPTIMIZED: Use efficient conversion with canonicalization
         # states.history shape: (batch_size, 8, x, y, z) -> (batch_size, 8, 9, 9)
-        current_history_2d = jax.vmap(batch_cube_to_2d)(states.history)
+        current_history_2d = convert_and_canonicalize_history_batch(states.history, states.actual_player)
         new_history_2d = history_2d.at[jnp.arange(batch_size), moves_per_game].set(
             jnp.where(active[:, None, None, None], current_history_2d, history_2d[jnp.arange(batch_size), moves_per_game])
         )
@@ -266,30 +267,47 @@ def create_optimized_game_generator(num_simulations=500):
 
             # Calculate data for this turn
             current_boards_2d = jax.vmap(cube_to_2d)(states.board)
-            
-            # Update arrays with vectorized approach
+            # OPTIMIZED: Add history conversion with canonicalization
+            current_history_2d = convert_and_canonicalize_history_batch(states.history, states.actual_player)
+
+            # Update arrays - OPTIMIZED: No Python loop, explicit JAX updates
             batch_indices = jnp.arange(batch_size_per_device)
             move_indices = moves_per_game
-            
-            # Update game data
-            for key, value in [
-                ('boards_2d', current_boards_2d),
-                ('policies', search_outputs.action_weights),
-                ('actual_players', states.actual_player),
-                ('black_outs', states.black_out),
-                ('white_outs', states.white_out),
-                ('is_terminal', terminal_states)
-            ]:
-                # Create mask adapted to value shape
-                mask = active_games
-                if len(value.shape) > 1:
-                    reshape_dims = [len(value.shape) - 1]
-                    mask = mask.reshape(-1, *([1] * reshape_dims[0]))
-                
-                # Update array
-                game_data[key] = game_data[key].at[batch_indices, move_indices].set(
-                    jnp.where(mask, value, game_data[key][batch_indices, move_indices])
-                )
+
+            # Update boards_2d
+            game_data['boards_2d'] = game_data['boards_2d'].at[batch_indices, move_indices].set(
+                jnp.where(active_games[:, None, None], current_boards_2d, game_data['boards_2d'][batch_indices, move_indices])
+            )
+
+            # Update history_2d (NEW)
+            game_data['history_2d'] = game_data['history_2d'].at[batch_indices, move_indices].set(
+                jnp.where(active_games[:, None, None, None], current_history_2d, game_data['history_2d'][batch_indices, move_indices])
+            )
+
+            # Update policies
+            game_data['policies'] = game_data['policies'].at[batch_indices, move_indices].set(
+                jnp.where(active_games[:, None], search_outputs.action_weights, game_data['policies'][batch_indices, move_indices])
+            )
+
+            # Update actual_players
+            game_data['actual_players'] = game_data['actual_players'].at[batch_indices, move_indices].set(
+                jnp.where(active_games, states.actual_player, game_data['actual_players'][batch_indices, move_indices])
+            )
+
+            # Update black_outs
+            game_data['black_outs'] = game_data['black_outs'].at[batch_indices, move_indices].set(
+                jnp.where(active_games, states.black_out, game_data['black_outs'][batch_indices, move_indices])
+            )
+
+            # Update white_outs
+            game_data['white_outs'] = game_data['white_outs'].at[batch_indices, move_indices].set(
+                jnp.where(active_games, states.white_out, game_data['white_outs'][batch_indices, move_indices])
+            )
+
+            # Update is_terminal
+            game_data['is_terminal'] = game_data['is_terminal'].at[batch_indices, move_indices].set(
+                jnp.where(active_games, terminal_states, game_data['is_terminal'][batch_indices, move_indices])
+            )
 
             # Increment move count for active games
             new_moves_per_game = jnp.where(active_games, moves_per_game + 1, moves_per_game)
@@ -306,6 +324,7 @@ def create_optimized_game_generator(num_simulations=500):
         max_moves = 300  # Limit maximum number of moves
         game_data = {
             'boards_2d': jnp.zeros((batch_size_per_device, max_moves + 1, 9, 9), dtype=jnp.int8),
+            'history_2d': jnp.zeros((batch_size_per_device, max_moves + 1, 8, 9, 9), dtype=jnp.int8),  # ADDED: History storage
             'policies': jnp.zeros((batch_size_per_device, max_moves + 1, 1734), dtype=jnp.float32),
             'actual_players': jnp.zeros((batch_size_per_device, max_moves + 1), dtype=jnp.int32),
             'black_outs': jnp.zeros((batch_size_per_device, max_moves + 1), dtype=jnp.int32),

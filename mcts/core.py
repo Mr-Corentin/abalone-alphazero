@@ -7,7 +7,7 @@ from functools import partial
 
 from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel
-from core.coord_conversion import prepare_input_legacy, cube_to_2d
+from core.coord_conversion import prepare_input_legacy, cube_to_2d, convert_and_canonicalize_history_batch
 
 @partial(jax.jit)
 def calculate_reward_terminal_only(current_state: AbaloneState, next_state: AbaloneState) -> float:
@@ -165,7 +165,9 @@ class AbaloneMCTSRecurrentFn:
                                next_states.black_out)
 
         board_2d, marbles_out = prepare_input_legacy(next_states.board, our_marbles, opp_marbles)
-        history_2d = jax.vmap(jax.vmap(cube_to_2d))(next_states.history)
+
+        # OPTIMIZED: Use efficient single-vmap conversion with canonicalization
+        history_2d = convert_and_canonicalize_history_batch(next_states.history, next_states.actual_player)
 
         prior_logits, value = self.network.apply(params, board_2d, marbles_out, history_2d)
         next_embedding = {
@@ -205,7 +207,9 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, e
                            states.black_out)
 
     board_2d, marbles_out = prepare_input_legacy(states.board, our_marbles, opp_marbles)
-    history_2d = jax.vmap(jax.vmap(cube_to_2d))(states.history)
+
+    # OPTIMIZED: Use efficient single-vmap conversion with canonicalization
+    history_2d = convert_and_canonicalize_history_batch(states.history, states.actual_player)
 
     prior_logits, value = network.apply(params, board_2d, marbles_out, history_2d)
 

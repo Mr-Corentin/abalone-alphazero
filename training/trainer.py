@@ -170,16 +170,13 @@ class AbaloneTrainerSync:
                 logger.info(f"Using local buffer of size {buffer_size}")
             self.buffer = CPUReplayBuffer(buffer_size)
 
-        # SGD optimizer initialization
-        self.optimizer = optax.sgd(learning_rate=self.initial_lr, momentum=self.momentum)
-
-        # Parameter and optimization state initialization
+        # Parameter initialization
+        # Note: optimizer will be created in train() with LR schedule to preserve momentum
         rng = jax.random.PRNGKey(42)
         sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
         sample_history = jnp.zeros((1, 8, 9, 9), dtype=jnp.int8)  # 8 history positions
         self.params = network.init(rng, sample_board, sample_marbles, sample_history)
-        self.opt_state = self.optimizer.init(self.params)
 
         # Statistics
         self.iteration = 0
@@ -319,77 +316,77 @@ class AbaloneTrainerSync:
         if self.verbose:
             logger.info(f"Evaluation {'enabled' if enable else 'disabled'}")
 
-    def _update_learning_rate(self, iteration_percentage):
+    def _create_lr_schedule_fn(self, num_iterations, training_steps_per_iteration):
         """
-        Update learning rate according to defined schedule
+        Create an optax learning rate schedule function.
 
         Args:
-            iteration_percentage: Training progress percentage [0.0, 1.0]
+            num_iterations: Total number of training iterations
+            training_steps_per_iteration: Training steps per iteration
 
         Returns:
-            New learning rate
+            Optax schedule function
         """
-        # Find appropriate learning rate for current iteration percentage
-        new_lr = self.initial_lr  # Default value
+        total_steps = num_iterations * training_steps_per_iteration
 
+        # Convert our schedule format [(threshold_pct, lr), ...] to optax boundaries
+        boundaries_and_scales = {}
+
+        # Sort schedule by threshold
+        sorted_schedule = sorted(self.lr_schedule, key=lambda x: x[0])
+
+        current_lr = sorted_schedule[0][1]
+
+        for i in range(1, len(sorted_schedule)):
+            threshold_pct, new_lr = sorted_schedule[i]
+            step_boundary = int(threshold_pct * total_steps)
+
+            # Scale = new_lr / current_lr
+            scale = new_lr / current_lr
+            boundaries_and_scales[step_boundary] = scale
+            current_lr = new_lr
+
+        # Create piecewise constant schedule
+        lr_schedule_fn = optax.piecewise_constant_schedule(
+            init_value=sorted_schedule[0][1],
+            boundaries_and_scales=boundaries_and_scales
+        )
+
+        return lr_schedule_fn
+
+    def _get_current_lr_from_step(self, step):
+        """Get current learning rate for logging purposes."""
+        # Just for display - actual LR comes from schedule
+        iteration_percentage = step / self.total_training_steps
+
+        current_lr = self.initial_lr
         for threshold, lr in self.lr_schedule:
             if iteration_percentage >= threshold:
-                new_lr = lr
+                current_lr = lr
 
-        if new_lr != self.current_lr:
-            if self.verbose:
-                logger.info(f"Learning rate updated: {self.current_lr} -> {new_lr}")
-            self.current_lr = new_lr
-
-            # Create new optimizer with gradient clipping
-            self.optimizer = optax.chain(
-                optax.clip_by_global_norm(1.0),
-                optax.sgd(learning_rate=self.current_lr, momentum=self.momentum)
-            )
-
-            # Reset optimizer state
-            self.opt_state = self.optimizer.init(self.params)
-
-            # Update JAX functions that use the optimizer
-            self.optimizer_update_pmap = jax.pmap(
-                lambda g, o, p: self.optimizer.update(g, o, p),
-                axis_name='devices',
-                devices=self.devices
-            )
-
-        return new_lr
+        return current_lr
 
     def _setup_jax_functions(self):
         """Configure JAX functions for generation and training."""
-        # Use our optimized generator
+        # Use our optimized generator (LOCAL devices - each host generates independently)
         self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
 
-        # Add gradient clipping to optimizer
-        self.optimizer = optax.chain(
-            optax.clip_by_global_norm(1.0),  # Limit gradient norm to 1.0
-            optax.sgd(learning_rate=self.current_lr, momentum=self.momentum)
-        )
+        # Note: optimizer will be created in train() with proper LR schedule
+        # to avoid resetting momentum when LR changes
 
-        # Reset optimizer state
-        self.opt_state = self.optimizer.init(self.params)
-
-        # Configure parallel processing functions
+        # CRITICAL: Training uses GLOBAL devices for cross-host gradient averaging
+        # This enables true distributed training where gradients are averaged across ALL TPU cores
         self.train_step_pmap = jax.pmap(
             partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
             axis_name='devices',
-            devices=self.devices
+            devices=self.global_devices  # ✅ GLOBAL devices for distributed training
         )
 
-        self.optimizer_update_pmap = jax.pmap(
-            lambda g, o, p: self.optimizer.update(g, o, p),
-            axis_name='devices',
-            devices=self.devices
-        )
-        
+        # Sum across ALL devices (all hosts) for evaluation aggregation
         self.sum_across_devices = jax.pmap(
             lambda x: jax.lax.psum(x, axis_name='devices'),
             axis_name='devices',
-            devices=self.devices
+            devices=self.global_devices  # ✅ GLOBAL devices
         )
 
     def train(self, num_iterations=100, games_per_iteration=64,
@@ -412,14 +409,45 @@ class AbaloneTrainerSync:
         process_specific_seed = seed_base + (self.process_id * 1000)
         rng_key = jax.random.PRNGKey(process_specific_seed)
 
+        # Create learning rate schedule (ONCE at start to preserve momentum)
+        self.total_training_steps = num_iterations * training_steps_per_iteration
+        lr_schedule_fn = self._create_lr_schedule_fn(num_iterations, training_steps_per_iteration)
+
+        if self.verbose:
+            logger.info(f"Learning rate schedule created for {self.total_training_steps} total steps")
+            logger.info(f"Schedule transitions: {self.lr_schedule}")
+
+        # Create optimizer with LR schedule and gradient clipping
+        # This is done ONCE - no more resets, momentum is preserved!
+        self.optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.sgd(learning_rate=lr_schedule_fn, momentum=self.momentum)
+        )
+
+        # Initialize optimizer state (only once!)
+        self.opt_state = self.optimizer.init(self.params)
+
+        # Create optimizer update pmap function (GLOBAL devices for distributed training)
+        self.optimizer_update_pmap = jax.pmap(
+            lambda g, o, p: self.optimizer.update(g, o, p),
+            axis_name='devices',
+            devices=self.global_devices  # ✅ GLOBAL devices
+        )
+
+        if self.verbose:
+            logger.info(f"Optimizer initialized with momentum={self.momentum} (momentum will be preserved across LR changes)")
+
+        # Track global training step for LR schedule
+        self.global_training_step = 0
+
         # Determine reference iterations for entire training
         from evaluation.models_evaluator import generate_evaluation_checkpoints
         self.reference_iterations = generate_evaluation_checkpoints(num_iterations)
-        
+
         if self.verbose:
             logger.info(f"Planned reference iterations: {self.reference_iterations}")
             logger.info(f"Evaluation {'enabled' if self.eval_enabled else 'disabled'}")
-        
+
         # Initial log for each process
         logger.info(f"Process {self.process_id}: Starting training")
 
@@ -430,10 +458,9 @@ class AbaloneTrainerSync:
                 
                 logger.info(f"Process {self.process_id}: Starting iteration {iteration+1}")
 
-                # Update learning rate according to schedule
-                iteration_percentage = iteration / num_iterations
-                self._update_learning_rate(iteration_percentage)
-                
+                # Get current learning rate for logging (schedule is automatic via optax)
+                self.current_lr = self._get_current_lr_from_step(self.global_training_step)
+
                 if self.verbose:
                     logger.info(f"\n=== Itération {iteration+1}/{num_iterations} (LR: {self.current_lr}) ===")
 
@@ -817,14 +844,13 @@ class AbaloneTrainerSync:
     def _update_buffer(self, games_data):
         """
         Met à jour le buffer d'expérience avec les nouvelles parties générées.
-        
+
         Args:
             games_data: Données des parties générées
-            
+
         Returns:
             int: Nombre de positions ajoutées au buffer
         """
-        logger.info(f"Début entrée update buffer")
         positions_added = 0
         
         using_gcs_buffer = hasattr(self.buffer, 'flush_to_gcs')
@@ -929,14 +955,16 @@ class AbaloneTrainerSync:
 
         using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
 
-        params_sharded = jax.device_put_replicated(self.params, self.devices)
-        opt_state_sharded = jax.device_put_replicated(self.opt_state, self.devices)
+        # CRITICAL: Shard parameters on GLOBAL devices for distributed training
+        params_sharded = jax.device_put_replicated(self.params, self.global_devices)
+        opt_state_sharded = jax.device_put_replicated(self.opt_state, self.global_devices)
 
         cumulative_metrics = None
         steps_completed = 0
 
         for step in range(num_steps):
-            total_batch_size = self.batch_size * self.num_devices
+            # CRITICAL: Batch size must account for ALL devices (all hosts)
+            total_batch_size = self.batch_size * self.num_global_devices
 
             try:
                 if using_gcs_buffer:
@@ -969,11 +997,12 @@ class AbaloneTrainerSync:
             else:
                 history = jnp.zeros((boards.shape[0], 8, 9, 9), dtype=jnp.int8)
 
-            boards = boards.reshape(self.num_devices, -1, *boards.shape[1:])
-            marbles = marbles.reshape(self.num_devices, -1, *marbles.shape[1:])
-            history = history.reshape(self.num_devices, -1, *history.shape[1:])
-            policies = policies.reshape(self.num_devices, -1, *policies.shape[1:])
-            values = values.reshape(self.num_devices, -1, *values.shape[1:])
+            # CRITICAL: Reshape for GLOBAL devices (distributed across all hosts)
+            boards = boards.reshape(self.num_global_devices, -1, *boards.shape[1:])
+            marbles = marbles.reshape(self.num_global_devices, -1, *marbles.shape[1:])
+            history = history.reshape(self.num_global_devices, -1, *history.shape[1:])
+            policies = policies.reshape(self.num_global_devices, -1, *policies.shape[1:])
+            values = values.reshape(self.num_global_devices, -1, *values.shape[1:])
 
             metrics_sharded, grads_averaged = self.train_step_pmap(
                 params_sharded, (boards, marbles, history), policies, values
@@ -990,8 +1019,9 @@ class AbaloneTrainerSync:
                 cumulative_metrics = step_metrics
             else:
                 cumulative_metrics = {k: cumulative_metrics[k] + step_metrics[k] for k in step_metrics}
-                
+
             steps_completed += 1
+            self.global_training_step += 1  # Track global step for LR schedule
 
         self.params = jax.tree.map(lambda x: x[0], params_sharded)
         self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
@@ -1366,9 +1396,11 @@ class AbaloneTrainerSync:
             return {}
         all_models_data = jnp.stack([aggregated_data[ref] for ref in model_iterations])
 
-        replicated_data = jnp.repeat(all_models_data[None, :, :], self.num_devices, axis=0)
-        devices_data = jax.device_put_sharded(list(replicated_data), self.devices)
+        # CRITICAL: Aggregate across ALL devices (all hosts) using global pmap
+        replicated_data = jnp.repeat(all_models_data[None, :, :], self.num_global_devices, axis=0)
+        devices_data = jax.device_put_sharded(list(replicated_data), self.global_devices)
 
+        # sum_across_devices now uses global pmap, so it sums across all hosts
         summed_data = self.sum_across_devices(devices_data)
 
         global_results = jax.device_get(summed_data)[0]

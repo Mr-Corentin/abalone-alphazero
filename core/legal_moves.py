@@ -46,32 +46,41 @@ def check_moves_validity(board: chex.Array,
                         radius: int = 4) -> chex.Array:
     """
     Check which filtered moves are legal according to game rules
+    OPTIMIZED: Uses jax.lax.switch to avoid evaluating all branches
     """
     def check_move(move_idx):
 
         # Si le mouvement n'a pas passé le premier filtre, retourner False
         is_filtered = filtered_moves[move_idx]
-        
+
         positions = moves_index['positions'][move_idx]
         direction = moves_index['directions'][move_idx]
         move_type = moves_index['move_types'][move_idx]
-        group_size = moves_index['group_sizes'][move_idx]  
-        
-        # Vérifier les différents types de mouvements
-        _, success_single = move_single_marble(board, positions[0], direction, radius)
-        
-        _, success_parallel = move_group_parallel(board, positions, direction, group_size, radius)
-        
-        _, success_inline, _ = move_group_inline(board, positions, direction, group_size, radius)
-        
-        # Sélectionner le bon résultat selon le type
-        is_valid = jnp.where(
-            move_type == 0, success_single,
-            jnp.where(move_type == 1, success_parallel, success_inline)
+        group_size = moves_index['group_sizes'][move_idx]
+
+        # Définir les branches comme des fonctions
+        # Seulement la branche sélectionnée sera évaluée (économie de calcul)
+        def branch_single(_):
+            _, success = move_single_marble(board, positions[0], direction, radius)
+            return success
+
+        def branch_parallel(_):
+            _, success = move_group_parallel(board, positions, direction, group_size, radius)
+            return success
+
+        def branch_inline(_):
+            _, success, _ = move_group_inline(board, positions, direction, group_size, radius)
+            return success
+
+        # Switch n'évalue QUE la branche sélectionnée (vs jnp.where qui évalue tout)
+        is_valid = jax.lax.switch(
+            move_type,
+            [branch_single, branch_parallel, branch_inline],
+            None
         )
 
         return jnp.where(is_filtered, is_valid, False)
-    
+
     return jax.vmap(check_move)(jnp.arange(len(moves_index['directions'])))
 
 

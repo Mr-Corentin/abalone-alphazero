@@ -78,37 +78,30 @@ class AbaloneEnv:
         # Convert move_idx to scalar integer
         move_idx = move_idx.astype(jnp.int32).reshape(())
 
-        # Access data with JAX
-        positions = jnp.array(self.moves_index['positions'])
-        direction = jnp.array(self.moves_index['directions'])[move_idx]
-        move_type = jnp.array(self.moves_index['move_types'])[move_idx]
-        group_size = jnp.array(self.moves_index['group_sizes'])[move_idx]
-        position = positions[move_idx]
+        # Access data (already in JAX arrays, no conversion needed)
+        direction = self.moves_index['directions'][move_idx]
+        move_type = self.moves_index['move_types'][move_idx]
+        group_size = self.moves_index['group_sizes'][move_idx]
+        position = self.moves_index['positions'][move_idx]
 
-        def single_marble_case(inputs):
-            state, position, direction = inputs
+        # Define move type branches (cleaner than nested lambdas)
+        def single_marble_branch(_):
             new_board, _ = move_single_marble(state.board, position[0], direction, self.radius)
             return new_board, 0
 
-        def group_parallel_case(inputs):
-            state, position, direction, group_size = inputs
+        def group_parallel_branch(_):
             new_board, _ = move_group_parallel(state.board, position, direction, group_size, self.radius)
             return new_board, 0
 
-        def group_inline_case(inputs):
-            state, position, direction, group_size = inputs
+        def group_inline_branch(_):
             new_board, _, billes_sorties = move_group_inline(state.board, position, direction, group_size, self.radius)
             return new_board, billes_sorties
 
         # Use switch for move type
         new_board, billes_sorties = jax.lax.switch(
             move_type,
-            [
-                lambda x: single_marble_case((state, position, direction)),
-                lambda x: group_parallel_case((state, position, direction, group_size)),
-                lambda x: group_inline_case((state, position, direction, group_size))
-            ],
-            0
+            [single_marble_branch, group_parallel_branch, group_inline_branch],
+            None  # Operand not used by branches
         )
 
         # Ensure actual_player is scalar
@@ -138,20 +131,21 @@ class AbaloneEnv:
 
     
     def _load_moves_index(self):
-        """Load moves index from npz file"""
+        """Load moves index from npz file and convert to JAX arrays once"""
         import os
-        
+
         # Build path to file in data/ folder
         data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'move_map.npz')
-        
+
         # Load data
         moves_data = np.load(data_path)
-        
+
+        # Convert to JAX arrays ONCE (not at every step)
         return {
-            'positions': moves_data['positions'],
-            'directions': moves_data['directions'],
-            'move_types': moves_data['move_types'],
-            'group_sizes': moves_data['group_sizes']
+            'positions': jnp.array(moves_data['positions']),
+            'directions': jnp.array(moves_data['directions']),
+            'move_types': jnp.array(moves_data['move_types']),
+            'group_sizes': jnp.array(moves_data['group_sizes'])
         }
 
     @partial(jax.jit, static_argnames=['self'])
@@ -162,9 +156,8 @@ class AbaloneEnv:
     @partial(jax.jit, static_argnames=['self'])
     def get_legal_moves_batch(self, states: AbaloneState) -> chex.Array:
         """Return legal moves mask for batch of states"""
-        return jax.vmap(get_legal_moves)(states.board,
-                                        self.moves_index,
-                                        self.radius)
+        # FIXED: Use lambda to avoid vmapping over moves_index and radius
+        return jax.vmap(lambda board: get_legal_moves(board, self.moves_index, self.radius))(states.board)
 
     def is_terminal(self, state: AbaloneState) -> bool:
       """Check if state is terminal"""
