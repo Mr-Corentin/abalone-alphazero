@@ -260,7 +260,7 @@ def create_optimized_game_generator(num_simulations=500):
             rng, search_rng = jax.random.split(rng)
 
             # Execute MCTS only on active states
-            search_outputs = run_search_batch(states, recurrent_fn, network, params, search_rng, env, num_simulations)
+            search_outputs = run_search_batch(states, recurrent_fn, network, params, search_rng, env, iteration, num_simulations)
 
             # Apply actions to get new states
             next_states = jax.vmap(env.step)(states, search_outputs.action)

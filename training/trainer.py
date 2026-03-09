@@ -176,7 +176,8 @@ class AbaloneTrainerSync:
         sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
         sample_history = jnp.zeros((1, 8, 9, 9), dtype=jnp.int8)  # 8 history positions
-        self.params = network.init(rng, sample_board, sample_marbles, sample_history)
+        sample_moves_count = jnp.zeros((1,), dtype=jnp.float32)  # Moves count feature
+        self.params = network.init(rng, sample_board, sample_marbles, sample_history, sample_moves_count)
 
         # Statistics
         self.iteration = 0
@@ -996,16 +997,22 @@ class AbaloneTrainerSync:
                 history = jnp.array(batch_data['history'])
             else:
                 history = jnp.zeros((boards.shape[0], 8, 9, 9), dtype=jnp.int8)
+            # Extract moves_count from batch (stored as move_num in buffer)
+            if 'move_num' in batch_data:
+                moves_count = jnp.array(batch_data['move_num'], dtype=jnp.float32)
+            else:
+                moves_count = jnp.zeros(boards.shape[0], dtype=jnp.float32)
 
             # CRITICAL: Reshape for GLOBAL devices (distributed across all hosts)
             boards = boards.reshape(self.num_global_devices, -1, *boards.shape[1:])
             marbles = marbles.reshape(self.num_global_devices, -1, *marbles.shape[1:])
             history = history.reshape(self.num_global_devices, -1, *history.shape[1:])
+            moves_count = moves_count.reshape(self.num_global_devices, -1)
             policies = policies.reshape(self.num_global_devices, -1, *policies.shape[1:])
             values = values.reshape(self.num_global_devices, -1, *values.shape[1:])
 
             metrics_sharded, grads_averaged = self.train_step_pmap(
-                params_sharded, (boards, marbles, history), policies, values
+                params_sharded, (boards, marbles, history, moves_count), policies, values
             )
 
             updates, opt_state_sharded = self.optimizer_update_pmap(

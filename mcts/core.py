@@ -113,10 +113,16 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
 # Default function (can be switched for testing)
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
-    """Current reward function - can be switched between terminal-only and intermediate"""
-    #return calculate_reward_terminal_only(current_state, next_state)
-    #return calculate_reward_curriculum(current_state,next_state, iteration)
-    return calculate_reward_with_intermediate(current_state, next_state)
+    """
+    Current reward function - uses curriculum learning for Abalone
+
+    Curriculum schedule:
+    - Iterations 0-10:  weight=0.1  (strong guidance via intermediate rewards)
+    - Iterations 10-15: weight=0.05 (reduced guidance)
+    - Iterations 15-30: weight=0.01 (minimal guidance)
+    - Iterations 30+:   weight=0.0  (pure AlphaZero - terminal rewards only)
+    """
+    return calculate_reward_curriculum(current_state, next_state, iteration)
     
 @partial(jax.jit)
 def calculate_discount(state: AbaloneState) -> float:
@@ -169,7 +175,8 @@ class AbaloneMCTSRecurrentFn:
         # OPTIMIZED: Use efficient single-vmap conversion with canonicalization
         history_2d = convert_and_canonicalize_history_batch(next_states.history, next_states.actual_player)
 
-        prior_logits, value = self.network.apply(params, board_2d, marbles_out, history_2d)
+        # Pass moves_count to the network for temporal awareness
+        prior_logits, value = self.network.apply(params, board_2d, marbles_out, history_2d, next_states.moves_count)
         next_embedding = {
             'board_3d': next_states.board,
             'history_3d': next_states.history,
@@ -211,7 +218,8 @@ def get_root_output_batch(states: AbaloneState, network: AbaloneModel, params, e
     # OPTIMIZED: Use efficient single-vmap conversion with canonicalization
     history_2d = convert_and_canonicalize_history_batch(states.history, states.actual_player)
 
-    prior_logits, value = network.apply(params, board_2d, marbles_out, history_2d)
+    # Pass moves_count to the network for temporal awareness
+    prior_logits, value = network.apply(params, board_2d, marbles_out, history_2d, states.moves_count)
 
     embedding = {
         'board_3d': states.board,

@@ -11,10 +11,14 @@ def compute_loss(params, batch, network, value_weight=1.0):
     Calculate loss function for network training
     """
     inputs, target_policies, target_values = batch
-    
-    # Handle input format with or without history
-    if len(inputs) == 3:
-        # New format with history: (board_states, marbles_states, history_states)
+
+    # Handle input format: with history + moves_count (4), with history (3), or legacy (2)
+    if len(inputs) == 4:
+        # New format with history + moves_count: (board_states, marbles_states, history_states, moves_count)
+        board_states, marbles_states, history_states, moves_count = inputs
+        predicted_policies, predicted_values = network.apply(params, board_states, marbles_states, history_states, moves_count)
+    elif len(inputs) == 3:
+        # Format with history: (board_states, marbles_states, history_states)
         board_states, marbles_states, history_states = inputs
         predicted_policies, predicted_values = network.apply(params, board_states, marbles_states, history_states)
     else:

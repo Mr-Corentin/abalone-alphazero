@@ -100,8 +100,12 @@ def convert_and_canonicalize_history_batch(history_3d: jnp.ndarray,
     This function replaces the inefficient jax.vmap(jax.vmap(cube_to_2d)) pattern
     with a single vmap and proper canonicalization.
 
+    CRITICAL FIX: History positions alternate between opponent and our moves:
+    - history[0, 2, 4, 6] = opponent's moves (must be flipped)
+    - history[1, 3, 5, 7] = our previous moves (keep as-is)
+
     Args:
-        history_3d: (batch_size, 8, 9, 9, 9) - raw history in 3D
+        history_3d: (batch_size, 8, 9, 9, 9) - raw history in 3D (already canonical from each player's turn)
         actual_players: (batch_size,) - current player for each state (1 or -1)
         radius: Board radius
 
@@ -112,12 +116,39 @@ def convert_and_canonicalize_history_batch(history_3d: jnp.ndarray,
     """
     batch_size = history_3d.shape[0]
 
-    # Step 1: Canonicalize (flip values if player is -1)
-    # This ensures current player always sees their pieces as 1
+    # Step 1: Canonicalize with alternating pattern
+    # History is stored as canonical views from when each move was played:
+    # - history[0] = last opponent's move (their canonical view) → FLIP
+    # - history[1] = our previous move (our canonical view) → KEEP
+    # - history[2] = opponent's move before (their canonical view) → FLIP
+    # etc.
+
+    # Create alternating flip mask: [-1, 1, -1, 1, -1, 1, -1, 1]
+    # Position 0, 2, 4, 6 (even) get -1 (will be flipped when actual_player=1)
+    # Position 1, 3, 5, 7 (odd) get +1 (will stay same when actual_player=1)
+    history_indices = jnp.arange(8)
+    flip_mask = jnp.where(history_indices % 2 == 0, -1, 1)  # [-1, 1, -1, 1, -1, 1, -1, 1]
+
+    # For each batch element:
+    # - If actual_player == 1 (Black), we flip opponent moves (even indices)
+    # - If actual_player == -1 (White), we flip our old moves (odd indices)
+    # This is achieved by: history * (actual_player * flip_mask)
+
+    # Expand dimensions for broadcasting: (8,) -> (1, 8, 1, 1, 1)
+    flip_mask_expanded = flip_mask[None, :, None, None, None]
+
+    # Create multiplier for each position
+    # When actual_player = 1: positions 0,2,4,6 get -1 (flip), positions 1,3,5,7 get +1 (keep)
+    # When actual_player = -1: positions 0,2,4,6 get +1 (keep), positions 1,3,5,7 get -1 (flip)
+    multiplier = actual_players[:, None, None, None, None] * flip_mask_expanded
+
+    # CRITICAL: Only flip valid board positions (-1, 0, 1), NOT invalid positions (NaN)
+    # Invalid positions should stay as NaN after canonicalization
+    valid_mask = ~jnp.isnan(history_3d)
     canonical_history_3d = jnp.where(
-        actual_players[:, None, None, None, None] == 1,
-        history_3d,
-        -history_3d
+        valid_mask,
+        history_3d * multiplier,
+        history_3d  # Keep NaN/invalid positions unchanged
     )
 
     # Step 2: Flatten batch and history dimensions for efficient conversion
