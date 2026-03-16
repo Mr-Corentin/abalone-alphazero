@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import chex
 from typing import Tuple, Dict, NamedTuple
 from core.board import initialize_board, create_custom_board, create_board_mask
-from core.legal_moves import get_legal_moves
+from core.legal_moves import get_legal_moves, get_legal_moves_vectorized, precalculate_vectorized_legal_moves_data
 from core.moves import move_group_inline, move_group_parallel, move_single_marble
 import numpy as np
 from core.coord_conversion import compute_coord_map
@@ -23,6 +23,7 @@ class AbaloneEnv:
       self.radius = radius
       self.moves_index = self._load_moves_index()
       self.coord_map = compute_coord_map(radius)
+      self.precalc_vectorized = precalculate_vectorized_legal_moves_data(self.moves_index, radius)
 
     # RNG arg to parallelize
     def reset(self, rng: chex.PRNGKey) -> AbaloneState:
@@ -150,14 +151,13 @@ class AbaloneEnv:
 
     @partial(jax.jit, static_argnames=['self'])
     def get_legal_moves(self, state: AbaloneState) -> chex.Array:
-        """Return legal moves mask"""
-        return get_legal_moves(state.board, self.moves_index, self.radius)
+        """Return legal moves mask (vectorized, no branches)"""
+        return get_legal_moves_vectorized(state.board, self.precalc_vectorized, self.radius)
 
     @partial(jax.jit, static_argnames=['self'])
     def get_legal_moves_batch(self, states: AbaloneState) -> chex.Array:
         """Return legal moves mask for batch of states"""
-        # FIXED: Use lambda to avoid vmapping over moves_index and radius
-        return jax.vmap(lambda board: get_legal_moves(board, self.moves_index, self.radius))(states.board)
+        return jax.vmap(lambda board: get_legal_moves_vectorized(board, self.precalc_vectorized, self.radius))(states.board)
 
     def is_terminal(self, state: AbaloneState) -> bool:
       """Check if state is terminal"""
