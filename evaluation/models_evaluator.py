@@ -134,7 +134,7 @@ class ModelsEvaluator:
     def __init__(self, network, radius=4, num_simulations=50, games_per_model=10):
         """
         Initialise l'évaluateur.
-        
+
         Args:
             network: Le modèle de réseau neuronal
             radius: Rayon du plateau (par défaut: 4)
@@ -145,14 +145,18 @@ class ModelsEvaluator:
         self.radius = radius
         self.num_simulations = num_simulations
         self.games_per_model = games_per_model
-        
+
         # Créer un environnement non-canonique pour l'évaluation
         self.env = AbaloneEnv(radius=radius)
-        
+
         # Stocker les dispositifs locaux pour les opérations TPU
         self.devices = jax.local_devices()
         self.num_devices = len(self.devices)
-        
+
+        # Récupérer le process_id pour générer des parties différentes par host
+        self.process_id = jax.process_index()
+        self.num_processes = jax.process_count()
+
         # Créer la fonction d'évaluation
         self.play_evaluation_games = self._create_evaluation_function()
 
@@ -257,34 +261,41 @@ class ModelsEvaluator:
         """
         # Utiliser le nombre spécifié ou la valeur par défaut
         num_games = games_to_play if games_to_play is not None else self.games_per_model
-        
+
         # Préparer les paramètres pour distribution aux dispositifs
         current_params_replicated = jax.device_put_replicated(current_params, self.devices)
         reference_params_replicated = jax.device_put_replicated(reference_params, self.devices)
-        
+
         # Nombre de parties par dispositif
+        # IMPORTANT: Tous les hosts doivent jouer le même nombre de parties
         games_per_device = math.ceil(num_games / self.num_devices)
-        
-        # Générer des clés aléatoires pour chaque dispositif
-        rng_key = jax.random.PRNGKey(42)
+
+        # Générer des clés aléatoires DIFFÉRENTES pour chaque host
+        # Utiliser process_id pour garantir des parties différentes entre hosts
+        base_seed = 42
+        process_seed = base_seed + (self.process_id * 10000)  # Offset important par process
+        rng_key = jax.random.PRNGKey(process_seed)
         sharded_rngs = jax.random.split(rng_key, self.num_devices)
         sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
+
+        logger.info(f"Processus {self.process_id}: {num_games} parties à jouer, {games_per_device} par device (seed={process_seed})")
         
         # Jouer des parties d'évaluation (actuel en tant que noir, référence en tant que blanc)
         logger.info("Parties d'évaluation (modèle actuel en tant que Noir)...")
         results_current_black = self.play_evaluation_games(
-            sharded_rngs, 
+            sharded_rngs,
             current_params_replicated,
             reference_params_replicated,
             games_per_device
         )
-        
-        # Synchroniser entre les deux phases d'évaluation
-        jax.experimental.multihost_utils.sync_global_devices("between_eval_rounds")
-        
+
+        # Note: Pas de sync global ici - chaque host joue indépendamment
+        # Le sync se fait au niveau du trainer avant/après l'évaluation complète
+
         # Inverser les rôles pour l'équité
         logger.info("Parties d'évaluation (modèle actuel en tant que Blanc)...")
-        new_rng_key = jax.random.fold_in(rng_key, 1000)
+        # Utiliser fold_in pour une seed différente mais déterministe
+        new_rng_key = jax.random.fold_in(rng_key, 1000 + self.process_id)
         sharded_rngs = jax.random.split(new_rng_key, self.num_devices)
         sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
         

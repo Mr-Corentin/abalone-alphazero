@@ -1204,9 +1204,32 @@ class AbaloneTrainerSync:
 
 
     
+    def _broadcast_params(self, params, source_process=0):
+        """
+        Broadcast des paramètres depuis un process source vers tous les autres.
+
+        Args:
+            params: Paramètres à broadcaster (ou None pour les processus non-source)
+            source_process: ID du processus source (défaut: 0)
+
+        Returns:
+            Les paramètres broadcastés à tous les processus
+        """
+        # Utiliser broadcast_one_to_all de JAX
+        # Cette fonction gère automatiquement le broadcast depuis le process source
+        broadcasted_params = jax.experimental.multihost_utils.broadcast_one_to_all(
+            params if self.process_id == source_process else None
+        )
+        return broadcasted_params
+
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
         """
         Évalue le modèle actuel contre des versions précédentes.
+        Architecture multi-host robuste:
+        1. Main process charge les checkpoints
+        2. Broadcast des paramètres à tous les hosts
+        3. Tous les hosts jouent leurs parties en parallèle
+        4. Agrégation des résultats
 
         Args:
             total_iterations: Nombre total d'itérations prévues pour l'entraînement
@@ -1227,95 +1250,151 @@ class AbaloneTrainerSync:
 
         target_references = generate_evaluation_checkpoints(total_iterations, num_reference_models)
 
+        # Sync au début pour s'assurer que tous les hosts démarrent ensemble
+        jax.experimental.multihost_utils.sync_global_devices("eval_start")
 
-        sync_refs = [ref for ref in target_references if ref < current_iter]
-        
-        available_refs = []
-        for ref in sync_refs:
-            ref_path = self._get_checkpoint_path(ref)
-            if check_checkpoint_exists(ref_path):
-                available_refs.append(ref)
+        # Seul le main process détermine quels checkpoints sont disponibles
+        if self.is_main_process:
+            sync_refs = [ref for ref in target_references if ref < current_iter]
+            available_refs = []
+            for ref in sync_refs:
+                ref_path = self._get_checkpoint_path(ref)
+                if check_checkpoint_exists(ref_path):
+                    available_refs.append(ref)
 
-        jax.experimental.multihost_utils.sync_global_devices("pre_evaluation")
+            if self.verbose:
+                if not available_refs:
+                    logger.info("Aucun modèle précédent disponible pour l'évaluation")
+                else:
+                    logger.info(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
+                    logger.info(f"Itérations sélectionnées: {available_refs}")
+        else:
+            # Les autres process attendent
+            available_refs = None
+
+        # Broadcast de la liste des références disponibles à tous les hosts
+        # Convertir en array JAX pour le broadcast
+        if self.is_main_process:
+            # Créer un array avec les références disponibles (max 20 références)
+            refs_array = jnp.zeros(20, dtype=jnp.int32)
+            if available_refs:
+                refs_array = refs_array.at[:len(available_refs)].set(jnp.array(available_refs, dtype=jnp.int32))
+            num_refs = len(available_refs) if available_refs else 0
+        else:
+            refs_array = None
+            num_refs = None
+
+        # Broadcast du nombre de références et de la liste
+        num_refs = jax.experimental.multihost_utils.broadcast_one_to_all(
+            jnp.array(num_refs if self.is_main_process else 0, dtype=jnp.int32)
+        )
+        refs_array = jax.experimental.multihost_utils.broadcast_one_to_all(refs_array)
+
+        # Tous les hosts récupèrent la liste
+        num_refs = int(num_refs)
+        available_refs = [int(refs_array[i]) for i in range(num_refs)]
 
         local_results = {}
-
-        evaluator = None
         current_params = self.params
-        local_games_per_model = 0
 
         if not available_refs:
-            if self.verbose:
-                logger.info("Aucun modèle précédent disponible pour l'évaluation")
+            # Sync et retour immédiat si pas de références
+            jax.experimental.multihost_utils.sync_global_devices("eval_no_refs")
+            return {}
+
+        # Calculer le nombre de parties par modèle
+        if len(available_refs) == 1:
+            base_games = max(16, self.num_processes * 2)
+        elif len(available_refs) < 4:
+            base_games = 32
         else:
-            if len(available_refs) == 1:
-                games_per_model = max(16, self.num_processes * 2)  
-            elif len(available_refs) < 4:
-                games_per_model = 32  
-            else:
-                games_per_model = 16  
+            base_games = 16
 
-            local_games_per_model = games_per_model // self.num_processes
-            
-            if self.verbose:
-                logger.info(f"\n=== Évaluation contre modèles précédents (itération actuelle: {current_iter}) ===")
-                logger.info(f"Itérations sélectionnées: {available_refs}")
-                logger.info(f"Parties totales par modèle: {games_per_model}")
-            logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
+        # Assurer que chaque host joue le même nombre de parties
+        # en arrondissant vers le haut pour ne pas perdre de parties
+        local_games_per_model = math.ceil(base_games / self.num_processes)
+        games_per_model = local_games_per_model * self.num_processes
 
-            evaluator = ModelsEvaluator(
-                network=self.network,
-                num_simulations=500,  
-                games_per_model=games_per_model
-            )
+        logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle (total: {games_per_model} parties)")
+        if self.verbose and games_per_model != base_games:
+            logger.info(f"Note: {games_per_model} parties au lieu de {base_games} pour assurer une répartition équitable entre {self.num_processes} hosts")
 
-      
-        for ref_iter in sync_refs:
+        # Créer l'évaluateur (tous les hosts)
+        evaluator = ModelsEvaluator(
+            network=self.network,
+            num_simulations=500,
+            games_per_model=games_per_model
+        )
 
+        # Évaluer contre chaque modèle de référence
+        for ref_iter in available_refs:
             jax.experimental.multihost_utils.sync_global_devices(f"pre_eval_iter_{ref_iter}")
 
-            if ref_iter in available_refs:
+            # Seul le main process charge le checkpoint
+            ref_params = None
+            if self.is_main_process:
                 if self.verbose:
-                    logger.info(f"\nÉvaluation contre le modèle de l'itération {ref_iter}...")
+                    logger.info(f"\nChargement du modèle de l'itération {ref_iter}...")
 
                 ref_path = self._get_checkpoint_path(ref_iter)
                 local_path = f"/tmp/ref_model_{ref_iter}.pkl"
-                eval_success = False
-                
+
                 if ref_path.startswith("gs://"):
-                    if not download_checkpoint(ref_path, local_path):
-                        if self.verbose:
-                            logger.info(f"Échec du téléchargement du checkpoint pour l'itération {ref_iter}, on passe")
+                    if download_checkpoint(ref_path, local_path):
+                        ref_params = load_checkpoint_params(local_path)
                     else:
-                        eval_success = True
+                        logger.warning(f"Échec du téléchargement du checkpoint {ref_iter}")
                 else:
-                    local_path = ref_path
-                    eval_success = True
+                    ref_params = load_checkpoint_params(ref_path)
 
-                if eval_success:
-                    ref_params = load_checkpoint_params(local_path)
-                    if ref_params is None:
-                        if self.verbose:
-                            logger.info(f"Échec du chargement des paramètres pour l'itération {ref_iter}, on passe")
-                        eval_success = False
-                    else:
-                        if evaluator is not None:
-                            eval_results = evaluator.evaluate_model_pair(
-                                current_params,
-                                ref_params,
-                                games_to_play=local_games_per_model
-                            )
-                            local_results[ref_iter] = eval_results
-            else:
+                if ref_params is None:
+                    logger.warning(f"Échec du chargement des paramètres pour l'itération {ref_iter}")
 
-                if self.verbose:
-                    logger.info(f"Modèle itération {ref_iter} non disponible pour ce worker, participation sync seulement")
-            
+            # Sync après le chargement
+            jax.experimental.multihost_utils.sync_global_devices(f"post_load_iter_{ref_iter}")
+
+            # Broadcast des paramètres à tous les hosts
+            try:
+                ref_params = self._broadcast_params(ref_params, source_process=0)
+            except Exception as e:
+                logger.error(f"Échec du broadcast des paramètres pour iter {ref_iter}: {e}")
+                # Sync pour éviter deadlock
+                jax.experimental.multihost_utils.sync_global_devices(f"broadcast_failed_iter_{ref_iter}")
+                continue
+
+            # Vérifier que tous les hosts ont reçu les paramètres
+            if ref_params is None:
+                logger.warning(f"Processus {self.process_id}: paramètres None après broadcast pour iter {ref_iter}, skip")
+                jax.experimental.multihost_utils.sync_global_devices(f"params_none_iter_{ref_iter}")
+                continue
+
+            # Tous les hosts jouent leurs parties
+            logger.info(f"Processus {self.process_id}: évaluation contre itération {ref_iter}...")
+
+            try:
+                eval_results = evaluator.evaluate_model_pair(
+                    current_params,
+                    ref_params,
+                    games_to_play=local_games_per_model
+                )
+                local_results[ref_iter] = eval_results
+                logger.info(f"Processus {self.process_id}: terminé pour iter {ref_iter} - {eval_results['total_games']} parties")
+            except Exception as e:
+                logger.error(f"Processus {self.process_id}: erreur pendant l'évaluation iter {ref_iter}: {e}")
+                # Mettre des résultats vides pour ne pas casser l'agrégation
+                local_results[ref_iter] = {
+                    'total_games': 0,
+                    'current_wins': 0,
+                    'reference_wins': 0,
+                    'draws': 0,
+                    'win_rate': 0.0
+                }
+
             jax.experimental.multihost_utils.sync_global_devices(f"post_eval_iter_{ref_iter}")
-        
+        # Agrégation des résultats de tous les hosts
         jax.experimental.multihost_utils.sync_global_devices("pre_aggregation")
-        
-        all_results = self._aggregate_evaluation_results(local_results, sync_refs)
+
+        all_results = self._aggregate_evaluation_results(local_results, available_refs)
 
         jax.experimental.multihost_utils.sync_global_devices("post_aggregation")
 
