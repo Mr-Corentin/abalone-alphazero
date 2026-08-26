@@ -27,7 +27,10 @@ class CPUReplayBuffer:
             'board': np.zeros((capacity, board_size, board_size), dtype=np.int8),
             'marbles_out': np.zeros((capacity, 2), dtype=np.int8),
             'policy': np.zeros((capacity, action_space), dtype=np.float32),
-            'outcome': np.zeros(capacity, dtype=np.int8),
+            # float32, pas int8 : le resultat d'une partie tronquee a la limite
+            # de coups vaut le differentiel de billes (voir _update_buffer), donc
+            # une valeur continue. En int8 elle etait silencieusement tronquee a 0.
+            'outcome': np.zeros(capacity, dtype=np.float32),
             'player': np.zeros(capacity, dtype=np.int8),
             'history': np.zeros((capacity, history_length, board_size, board_size), dtype=np.int8),  # 2D history
             'game_id': np.zeros(capacity, dtype=np.int32),  # Unique game ID
@@ -146,18 +149,18 @@ class CPUReplayBuffer:
         if self.size == 0:
             raise ValueError("Buffer vide, impossible d'échantillonner")
 
-        # Calculate weights based on recency
-        if self.position == 0 and self.size == self.capacity:
-            # Full circular buffer, position 0 is most recent
-            indices = np.arange(self.size)
-        else:
-            # Position is index of next element to write
-            indices = np.arange(self.size)
-            # Reorganize so higher indices are most recent
-            indices = (indices + self.capacity - self.position) % self.capacity
+        # Rank each filled slot by recency: 0 = oldest, size-1 = most recent.
+        # `self.position` is the next slot to write, so it is also the oldest one
+        # once the buffer has wrapped; before wrapping, position == size and the
+        # formula degenerates to rank == index, which is what we want.
+        ranks = (np.arange(self.size) - self.position) % self.size
 
-        # Higher indices correspond to more recent entries
-        recency_weights = np.exp((indices / self.size) * temperature)
+        # Normalise by size-1 so the exponent stays in [0, temperature]. Dividing
+        # by `size` while ranks were offset by `capacity` used to make the exponent
+        # reach ~800 for a small buffer inside a large capacity: exp overflowed to
+        # inf, the probabilities became NaN, and jax.random.choice then silently
+        # returned a degenerate batch instead of raising.
+        recency_weights = np.exp((ranks / max(self.size - 1, 1)) * temperature)
         sampling_probs = recency_weights / np.sum(recency_weights)
 
         # Sample with these probabilities
@@ -249,7 +252,7 @@ class GCSReplayBufferSync:
             'board': np.zeros((max_local_size, board_size, board_size), dtype=np.int8),
             'marbles_out': np.zeros((max_local_size, 2), dtype=np.int8),
             'policy': np.zeros((max_local_size, action_space), dtype=np.float32),
-            'outcome': np.zeros(max_local_size, dtype=np.int8),
+            'outcome': np.zeros(max_local_size, dtype=np.float32),  # cf. CPUReplayBuffer
             'player': np.zeros(max_local_size, dtype=np.int8),
             'history': np.zeros((max_local_size, history_length, board_size, board_size), dtype=np.int8),
             'game_id': np.zeros(max_local_size, dtype=np.int32),
@@ -458,8 +461,9 @@ class GCSReplayBufferSync:
                         bytes_list=tf.train.BytesList(value=[data['policy'][i].tobytes()])),
                     'history': tf.train.Feature(
                         bytes_list=tf.train.BytesList(value=[data['history'][i].tobytes()])),
+                    # float_list : le resultat n'est plus entier (parties tronquees)
                     'outcome': tf.train.Feature(
-                        int64_list=tf.train.Int64List(value=[data['outcome'][i]])),
+                        float_list=tf.train.FloatList(value=[float(data['outcome'][i])])),
                     'player': tf.train.Feature(
                         int64_list=tf.train.Int64List(value=[data['player'][i]])),
                     'game_id': tf.train.Feature(
@@ -742,7 +746,7 @@ class GCSReplayBufferSync:
             'marbles_out': tf.io.FixedLenFeature([], tf.string),
             'policy': tf.io.FixedLenFeature([], tf.string),
             'history': tf.io.FixedLenFeature([], tf.string),
-            'outcome': tf.io.FixedLenFeature([], tf.int64),
+            'outcome': tf.io.FixedLenFeature([], tf.float32),
             'player': tf.io.FixedLenFeature([], tf.int64),
             'game_id': tf.io.FixedLenFeature([], tf.int64),
             'move_num': tf.io.FixedLenFeature([], tf.int64),

@@ -113,16 +113,44 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
 # Default function (can be switched for testing)
 @partial(jax.jit)
 def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
-    """Current reward function - can be switched between terminal-only and intermediate"""
-    #return calculate_reward_terminal_only(current_state, next_state)
-    #return calculate_reward_curriculum(current_state,next_state, iteration)
-    return calculate_reward_with_intermediate(current_state, next_state)
+    """
+    Reward used by the search. Terminal outcomes only (standard AlphaZero).
+
+    The intermediate variants below are kept for experiments but are NOT used:
+    the value head is trained on the final game outcome alone, so shaping only the
+    search reward makes the two disagree. Concretely, +0.1 per marble pushed made a
+    won game worth 0.6 + 1.0 = 1.6, which a tanh-bounded value head can never
+    predict, and qtransform_completed_by_mix_value then blended that Q with a value
+    living on a different scale.
+
+    If you want to reward pushing marbles, do it on the TRAINING TARGET instead
+    (e.g. score the move limit by the marble differential), not here.
+    """
+    return calculate_reward_terminal_only(current_state, next_state)
+    # return calculate_reward_curriculum(current_state, next_state, iteration)
+    # return calculate_reward_with_intermediate(current_state, next_state)
     
-@partial(jax.jit)
-def calculate_discount(state: AbaloneState) -> float:
-    """Return discount factor using jnp.where"""
-    is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= 300)
-    return jnp.where(is_terminal, 0.0, 1.0)
+@partial(jax.jit, static_argnames=['max_moves'])
+def calculate_discount(state: AbaloneState, max_moves: int = 300) -> float:
+    """
+    Discount for a two-player zero-sum game under mctx.
+
+    mctx backs values up with `leaf_value = reward + discount * leaf_value`, with
+    NO per-level sign flip of its own. `reward` is expressed from the point of view
+    of the player who moved (see calculate_reward) and the child's value from the
+    point of view of the player to move at the child -- the opposite side. The
+    discount is what converts between the two, hence -1.0.
+
+    Terminal states return 0.0 so nothing below them propagates: the terminal
+    outcome is already carried by the reward of the transition into them.
+    """
+    is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= max_moves)
+    return jnp.where(is_terminal, 0.0, -1.0)
+
+
+# Logit used to mask illegal actions. Large and negative, but finite: -inf would
+# produce NaNs in mctx's softmax when a state has no legal move at all.
+MASKED_LOGIT = -1e9
 
 
 class AbaloneMCTSRecurrentFn:
@@ -142,21 +170,22 @@ class AbaloneMCTSRecurrentFn:
             action: Actions to apply (shape: (batch_size,))
             embedding: Dict containing batch state
         """
-        batch_size = action.shape[0]
-        current_states = jax.vmap(lambda b: AbaloneState(
-            board=embedding['board_3d'][b],
-            history=embedding.get('history_3d', jnp.zeros((8,) + embedding['board_3d'][b].shape))[b],
-            actual_player=embedding['actual_player'][b],
-            black_out=embedding['black_out'][b],
-            white_out=embedding['white_out'][b],
-            moves_count=embedding['moves_count'][b]
-        ))(jnp.arange(batch_size))
+        current_states = AbaloneState(
+            board=embedding['board_3d'],
+            history=embedding['history_3d'],
+            actual_player=embedding['actual_player'],
+            black_out=embedding['black_out'],
+            white_out=embedding['white_out'],
+            moves_count=embedding['moves_count']
+        )
 
         next_states = jax.vmap(self.env.step)(current_states, action)
 
-        iteration = embedding.get('iteration', jnp.zeros_like(current_states.actual_player))
+        iteration = embedding['iteration']
         reward = jax.vmap(calculate_reward)(current_states, next_states, iteration)
-        discount = jax.vmap(calculate_discount)(next_states)
+        discount = jax.vmap(
+            lambda s: calculate_discount(s, self.env.max_moves)
+        )(next_states)
         our_marbles = jnp.where(next_states.actual_player == 1,
                                next_states.black_out,
                                next_states.white_out)
@@ -170,6 +199,13 @@ class AbaloneMCTSRecurrentFn:
         history_2d = convert_and_canonicalize_history_batch(next_states.history, next_states.actual_player)
 
         prior_logits, value = self.network.apply(params, board_2d, marbles_out, history_2d)
+
+        # mctx only masks invalid actions at the ROOT. Without this, interior nodes
+        # expand illegal moves, which env.step turns into null moves (board unchanged,
+        # turn passed) -- with ~52 legal moves out of 1734, that is ~97% of the tree.
+        legal_moves = self.env.get_legal_moves_batch(next_states)
+        prior_logits = jnp.where(legal_moves, prior_logits, MASKED_LOGIT)
+
         next_embedding = {
             'board_3d': next_states.board,
             'history_3d': next_states.history,
@@ -184,7 +220,9 @@ class AbaloneMCTSRecurrentFn:
             reward=reward,
             discount=discount,
             prior_logits=prior_logits,
-            value=-value
+            # Value stays in the perspective of the player to move at the child.
+            # The sign flip between levels is handled by discount = -1.
+            value=value
         ), next_embedding
 
 

@@ -101,16 +101,16 @@ def convert_and_canonicalize_history_batch(history_3d: jnp.ndarray,
     with a single vmap and proper canonicalization.
 
     Args:
-        history_3d: (batch_size, 8, 9, 9, 9) - raw history in 3D
+        history_3d: (batch_size, H, 9, 9, 9) - raw history in 3D (H may be 0)
         actual_players: (batch_size,) - current player for each state (1 or -1)
         radius: Board radius
 
     Returns:
-        history_2d: (batch_size, 8, 9, 9) - canonical 2D history
+        history_2d: (batch_size, H, 9, 9) - canonical 2D history
 
     Performance: ~2-3x faster than jax.vmap(jax.vmap(cube_to_2d)) on TPU
     """
-    batch_size = history_3d.shape[0]
+    batch_size, history_length = history_3d.shape[0], history_3d.shape[1]
 
     # Step 1: Canonicalize (flip values if player is -1)
     # This ensures current player always sees their pieces as 1
@@ -129,7 +129,7 @@ def convert_and_canonicalize_history_batch(history_3d: jnp.ndarray,
 
     # Step 4: Reshape back to separate batch and history
     # (batch_size * 8, 9, 9) -> (batch_size, 8, 9, 9)
-    history_2d = flat_history_2d.reshape(batch_size, 8, 9, 9)
+    history_2d = flat_history_2d.reshape(batch_size, history_length, 9, 9)
 
     return history_2d
 

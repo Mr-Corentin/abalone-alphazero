@@ -7,6 +7,7 @@ import math
 from functools import partial
 from typing import List, Dict, Any, Tuple
 from environment.env import AbaloneEnv
+from utils.sharding import replicate
 
 import logging
 
@@ -131,7 +132,8 @@ def load_checkpoint_params(checkpoint_path):
 class ModelsEvaluator:
     """Classe pour évaluer le modèle actuel contre des versions antérieures."""
 
-    def __init__(self, network, radius=4, num_simulations=50, games_per_model=10):
+    def __init__(self, network, radius=4, num_simulations=50, games_per_model=10,
+                 max_moves=150, max_num_considered_actions=16):
         """
         Initialise l'évaluateur.
         
@@ -145,9 +147,11 @@ class ModelsEvaluator:
         self.radius = radius
         self.num_simulations = num_simulations
         self.games_per_model = games_per_model
-        
-        # Créer un environnement non-canonique pour l'évaluation
-        self.env = AbaloneEnv(radius=radius)
+        self.max_num_considered_actions = max_num_considered_actions
+
+        # Même limite de coups qu'à l'entraînement (auparavant 200 ici contre 300
+        # à l'entraînement, ce qui faussait la comparaison des taux de nul).
+        self.env = AbaloneEnv(radius=radius, max_moves=max_moves)
         
         # Stocker les dispositifs locaux pour les opérations TPU
         self.devices = jax.local_devices()
@@ -157,92 +161,80 @@ class ModelsEvaluator:
         self.play_evaluation_games = self._create_evaluation_function()
 
     def _create_evaluation_function(self):
-        """Crée une fonction pour jouer des parties entre deux versions du modèle."""
-        from mcts.agent import get_best_move
-        
-        @partial(jax.pmap, axis_name='devices', static_broadcasted_argnums=(3))
-        def play_evaluation_games(rng_keys, black_params, white_params, games_per_device):
-            """
-            Joue des parties d'évaluation entre deux versions du modèle.
-            """
-            def play_single_game(rng_key):
-                # Initialiser l'état
-                init_state = self.env.reset(rng_key)
-                
-                # Créer la fonction de condition pour while_loop
-                def cond_fn(carry):
-                    state, move_count, current_rng = carry
-                    not_terminal = jnp.logical_not(self.env.is_terminal(state))
-                    under_max = move_count < 200  # max_moves
-                    return jnp.logical_and(not_terminal, under_max)
-                
-                # Créer le corps de la boucle
-                def body_fn(carry):
-                    state, move_count, current_rng = carry
-                    
-                    # Générer une nouvelle clé
-                    current_rng, action_key = jax.random.split(current_rng)
-                    
-                    # Sélectionner l'action en fonction du joueur actuel
-                    is_black = state.actual_player == 1 
-                    
-                    action = jax.lax.cond(
-                        is_black,
-                        lambda: get_best_move(state, black_params, self.network, self.env, 
-                                            self.num_simulations, action_key, 10),
-                        lambda: get_best_move(state, white_params, self.network, self.env, 
-                                            self.num_simulations, action_key, 10)
-                    )
-                    
-                    # Appliquer l'action
-                    next_state = self.env.step(state, action)
-                    
-                    return next_state, move_count + 1, current_rng
-                
-                # Exécuter la boucle JAX
-                final_state, final_moves, _ = jax.lax.while_loop(
-                    cond_fn,
-                    body_fn,
-                    (init_state, 0, rng_key)
+        """
+        Crée une fonction pour jouer des parties d'évaluation entre deux modèles.
+
+        Les parties d'un même appel avancent en lock-step : elles démarrent toutes
+        au pli 0 avec les Noirs au trait, donc le camp au trait ne dépend que de la
+        parité du pli. On choisit les paramètres avec un lax.cond et on lance UNE
+        recherche MCTS batchée par pli -- au lieu de l'ancienne version qui
+        déroulait une boucle Python sur les parties, avec un MCTS de batch 1 par
+        coup et deux branches lax.cond contenant chacune une recherche complète.
+        """
+        from mcts.core import AbaloneMCTSRecurrentFn
+        from mcts.search import run_search_batch
+
+        env = self.env
+        network = self.network
+        num_simulations = self.num_simulations
+        max_considered = self.max_num_considered_actions
+
+        @partial(jax.pmap, axis_name='devices', static_broadcasted_argnums=(3,))
+        def play_evaluation_games(rng_key, black_params, white_params, games_per_device):
+            recurrent_fn = AbaloneMCTSRecurrentFn(env, network)
+            init_states = env.reset_batch(rng_key, games_per_device)
+
+            def cond_fn(carry):
+                return jnp.any(carry[2])
+
+            def body_fn(carry):
+                states, rng, active, move_counts, ply = carry
+
+                terminal = env.is_terminal_batch(states)
+                active_games = active & ~terminal
+
+                rng, search_rng = jax.random.split(rng)
+
+                # Toutes les parties actives sont au même pli : le camp au trait
+                # est donné par la parité, pas besoin de brancher par partie.
+                params = jax.lax.cond(ply % 2 == 0,
+                                      lambda: black_params,
+                                      lambda: white_params)
+
+                search_outputs = run_search_batch(
+                    states, recurrent_fn, network, params, search_rng, env,
+                    iteration=0,
+                    num_simulations=num_simulations,
+                    max_num_considered_actions=max_considered,
                 )
-                
-                # Déterminer le résultat final
-                outcome = jax.lax.cond(
-                    final_state.black_out >= 6,
-                    lambda: jnp.array(-1, dtype=jnp.int8),  # Black lost (white won)
-                    lambda: jax.lax.cond(
-                        final_state.white_out >= 6,
-                        lambda: jnp.array(1, dtype=jnp.int8),  # Black won
-                        lambda: jnp.array(0, dtype=jnp.int8)   # Draw
-                    )
-                )
-                
-                return outcome, final_moves
-            
-            # Générer un lot de parties
-            keys = jax.random.split(rng_keys, games_per_device + 1)
-            
-            # Initialiser les tableaux pour stocker les résultats
-            outcomes = jnp.zeros(games_per_device, dtype=jnp.int8)
-            move_counts = jnp.zeros(games_per_device, dtype=jnp.int16)
-            
-            # Exécuter les parties (de manière séquentielle mais compilée)
-            for i in range(games_per_device):
-                outcome, moves = play_single_game(keys[i])
-                outcomes = outcomes.at[i].set(outcome)
-                move_counts = move_counts.at[i].set(moves)
-            
-            # Retourner tous les résultats
-            return {
-                'outcomes': outcomes,
-                'move_counts': move_counts
-            }
-        
+
+                next_states = jax.vmap(env.step)(states, search_outputs.action)
+
+                # Les parties terminées sont gelées.
+                states = jax.tree.map(
+                    lambda nxt, cur: jnp.where(
+                        active_games.reshape(active_games.shape + (1,) * (nxt.ndim - 1)), nxt, cur),
+                    next_states, states)
+
+                return (states, rng, active_games,
+                        move_counts + active_games.astype(jnp.int16), ply + 1)
+
+            final_states, _, _, move_counts, _ = jax.lax.while_loop(
+                cond_fn, body_fn,
+                (init_states, rng_key,
+                 jnp.ones(games_per_device, dtype=jnp.bool_),
+                 jnp.zeros(games_per_device, dtype=jnp.int16),
+                 jnp.int32(0)))
+
+            outcomes = jnp.where(
+                final_states.black_out >= 6, jnp.int8(-1),      # les Blancs gagnent
+                jnp.where(final_states.white_out >= 6, jnp.int8(1),  # les Noirs gagnent
+                          jnp.int8(0))).astype(jnp.int8)
+
+            return {'outcomes': outcomes, 'move_counts': move_counts}
+
         return play_evaluation_games
 
-    
-
-    
     def evaluate_model_pair(self, current_params, reference_params, games_to_play=None):
         """
         Évalue le modèle actuel contre un modèle de référence.
@@ -259,16 +251,16 @@ class ModelsEvaluator:
         num_games = games_to_play if games_to_play is not None else self.games_per_model
         
         # Préparer les paramètres pour distribution aux dispositifs
-        current_params_replicated = jax.device_put_replicated(current_params, self.devices)
-        reference_params_replicated = jax.device_put_replicated(reference_params, self.devices)
+        current_params_replicated = replicate(current_params, self.num_devices)
+        reference_params_replicated = replicate(reference_params, self.num_devices)
         
         # Nombre de parties par dispositif
         games_per_device = math.ceil(num_games / self.num_devices)
         
         # Générer des clés aléatoires pour chaque dispositif
         rng_key = jax.random.PRNGKey(42)
+        # pmap shards the leading axis itself
         sharded_rngs = jax.random.split(rng_key, self.num_devices)
-        sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
         
         # Jouer des parties d'évaluation (actuel en tant que noir, référence en tant que blanc)
         logger.info("Parties d'évaluation (modèle actuel en tant que Noir)...")
@@ -286,7 +278,6 @@ class ModelsEvaluator:
         logger.info("Parties d'évaluation (modèle actuel en tant que Blanc)...")
         new_rng_key = jax.random.fold_in(rng_key, 1000)
         sharded_rngs = jax.random.split(new_rng_key, self.num_devices)
-        sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
         
         results_current_white = self.play_evaluation_games(
             sharded_rngs, 

@@ -3,6 +3,15 @@ Training configuration for AlphaZero Abalone
 """
 
 DEFAULT_CONFIG = {
+    "game": {
+        # Truncation limit for self-play games. NOT an Abalone rule -- see
+        # AbaloneEnv. Lower means faster iterations during early training.
+        "max_moves": 150,
+        # Past positions fed to the network. 0 = disabled (see AbaloneEnv);
+        # set to 8 to restore the previous behaviour.
+        "history_length": 0,
+    },
+
     "model": {
         "num_filters": 128,
         "num_blocks": 10,
@@ -56,6 +65,15 @@ DEFAULT_CONFIG = {
 
 
 MINIMAL_CONFIG = {
+    "game": {
+        # Truncation limit for self-play games. NOT an Abalone rule -- see
+        # AbaloneEnv. Lower means faster iterations during early training.
+        "max_moves": 150,
+        # Past positions fed to the network. 0 = disabled (see AbaloneEnv);
+        # set to 8 to restore the previous behaviour.
+        "history_length": 0,
+    },
+
     "model": {
         "num_filters": 64,
         "num_blocks": 10,
@@ -108,6 +126,8 @@ MINIMAL_CONFIG = {
 }
 
 CPU_CONFIG = {
+    "game": {"max_moves": 30, "history_length": 0},
+
     "model": {"num_filters": 32, "num_blocks": 3},
     "mcts": {"num_simulations": 5, "max_num_considered_actions": 8},
     "buffer": {"size": 1000},

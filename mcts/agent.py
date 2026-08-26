@@ -10,14 +10,15 @@ from mcts.core import AbaloneMCTSRecurrentFn
 from mcts.search import run_search_batch
 
 
-@partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
+@partial(jax.jit, static_argnames=['network', 'env', 'num_simulations', 'max_num_considered_actions'])
 def get_best_move(state: AbaloneState,
                  params,
                  network: AbaloneModel,
                  env: AbaloneEnv,
-                 num_simulations: int = 600,
+                 num_simulations: int,
                  rng_key=None,
-                 iteration: int = 10):
+                 max_num_considered_actions: int = 16,
+                 iteration: int = 0):
     """
     Obtient le meilleur coup à jouer dans un état donné selon MCTS+réseau.
     """
@@ -46,8 +47,9 @@ def get_best_move(state: AbaloneState,
         params,
         rng_key,
         env,
-        iteration,
-        num_simulations
+        num_simulations=num_simulations,
+        max_num_considered_actions=max_num_considered_actions,
+        iteration=iteration,
     )
 
     # Get action with highest score
@@ -55,14 +57,15 @@ def get_best_move(state: AbaloneState,
 
     return best_action
 
-@partial(jax.jit, static_argnames=['network', 'env', 'num_simulations'])
+@partial(jax.jit, static_argnames=['network', 'env', 'num_simulations', 'temperature', 'max_num_considered_actions'])
 def get_move_probabilities(state: AbaloneState,
                           params,
                           network: AbaloneModel,
                           env: AbaloneEnv,
-                          num_simulations: int = 600,
+                          num_simulations: int,
                           temperature: float = 1.0,
-                          iteration: int = 10):
+                          max_num_considered_actions: int = 16,
+                          iteration: int = 0):
     """
     Return move probabilities according to MCTS+network.
     Useful for training or selecting moves stochastically.
@@ -99,19 +102,25 @@ def get_move_probabilities(state: AbaloneState,
         params,
         rng_key,
         env,
-        iteration,
-        num_simulations
+        num_simulations=num_simulations,
+        max_num_considered_actions=max_num_considered_actions,
+        iteration=iteration,
     )
     
-    # Obtenir les poids des actions et appliquer la température
-    action_weights = policy_output.action_weights[0]
+    # action_weights est DEJA une distribution de probabilite (mctx applique un
+    # softmax sur les logits de recherche completes, et met zero sur les coups
+    # illegaux). Le re-passer dans un softmax aplatissait la distribution sur les
+    # 1734 actions -- ~97% de la masse allait sur des coups illegaux.
+    move_probs = policy_output.action_weights[0]
+
     if temperature != 1.0:
-        # Ajuster par la température
-        action_weights = action_weights / temperature
-    
-    # Convertir en probabilités
-    move_probs = jax.nn.softmax(action_weights)
-    
+        # Temperature appliquee a la distribution, pas a des logits : p^(1/T),
+        # renormalise. T -> 0 concentre sur le meilleur coup, T grand aplatit.
+        # Les coups illegaux ont une proba nulle et le restent.
+        support = move_probs > 0
+        logits = jnp.where(support, jnp.log(jnp.where(support, move_probs, 1.0)) / temperature, -jnp.inf)
+        move_probs = jax.nn.softmax(logits)
+
     return move_probs
 
 
@@ -119,10 +128,11 @@ def sample_move(state: AbaloneState,
                 params, 
                 network: AbaloneModel, 
                 env: AbaloneEnv, 
-                rng_key=None, 
-                num_simulations: int = 600, 
+                rng_key=None,
+                num_simulations: int = None,
                 temperature: float = 1.0,
-                iteration: int = 10):
+                max_num_considered_actions: int = 16,
+                iteration: int = 0):
     """
     Sample move according to MCTS probability distribution.
     Useful for exploration during training.
@@ -144,7 +154,11 @@ def sample_move(state: AbaloneState,
     
     # Obtenir les probabilités des coups
     move_probs = get_move_probabilities(
-        state, params, network, env, num_simulations, temperature, iteration
+        state, params, network, env,
+        num_simulations=num_simulations,
+        temperature=temperature,
+        max_num_considered_actions=max_num_considered_actions,
+        iteration=iteration,
     )
     
     # Échantillonner un coup selon cette distribution

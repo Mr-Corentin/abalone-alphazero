@@ -91,16 +91,23 @@ def parse_args():
     parser.add_argument('--num-simulations', type=int, default=None,
                        help='Number of MCTS simulations per action')
 
+    # Game options
+    parser.add_argument('--max-moves', type=int, default=None,
+                       help='Move limit before a game is truncated (default 150)')
+    parser.add_argument('--history-length', type=int, default=None,
+                       help='Past positions fed to the network (0 = disabled)')
+
     return parser.parse_args()
 
 
 def get_merged_config(args):
     """Combine configuration from defaults and command line arguments"""
     # Load base configuration
+    import copy
     if args.cpu_only:
-        config = CPU_CONFIG.copy()
+        config = copy.deepcopy(CPU_CONFIG)
     else:
-        config = get_config().copy()
+        config = copy.deepcopy(get_config())
     
     # Load from file if specified
     if args.config:
@@ -135,6 +142,12 @@ def get_merged_config(args):
     
     if args.num_simulations:
         config['mcts']['num_simulations'] = args.num_simulations
+
+    if args.max_moves is not None:
+        config.setdefault('game', {})['max_moves'] = args.max_moves
+
+    if args.history_length is not None:
+        config.setdefault('game', {})['history_length'] = args.history_length
     
     if args.training_steps:
         config['training']['training_steps_per_iteration'] = args.training_steps
@@ -171,6 +184,9 @@ def display_config_summary(config):
     main_process_log(f"Training: {config['training']['num_iterations']} iterations, {config['training']['games_per_iteration']} games/iter")
     main_process_log(f"Batch: {config['training']['batch_size']}, {config['training']['training_steps_per_iteration']} steps/iter")
     main_process_log(f"MCTS: {config['mcts']['num_simulations']} simulations per action")
+    game_cfg = config.get('game', {})
+    main_process_log(f"Game: move limit {game_cfg.get('max_moves', 150)}, "
+                     f"history length {game_cfg.get('history_length', 0)}")
     main_process_log(f"Checkpoints: {config['checkpoint']['path']}")
     
     # Show logging configuration
@@ -224,7 +240,11 @@ def create_trainer(config, args):
     )
 
     # Create the environment
-    env = AbaloneEnv()
+    game_cfg = config.get('game', {})
+    env = AbaloneEnv(
+        max_moves=game_cfg.get('max_moves', 150),
+        history_length=game_cfg.get('history_length', 0),
+    )
 
     # Get evaluation parameters
     eval_games = config.get('evaluation', {}).get('num_games', 2)
@@ -238,6 +258,8 @@ def create_trainer(config, args):
         batch_size=config['training']['batch_size'],
         value_weight=config['training']['value_weight'],
         num_simulations=config['mcts']['num_simulations'],
+        max_num_considered_actions=config['mcts'].get('max_num_considered_actions', 16),
+        eval_simulations=config['mcts'].get('eval_simulations'),
         recency_bias=config['buffer'].get('recency_bias', True),
         recency_temperature=config['buffer'].get('recency_temperature', 0.8),
         initial_lr=config['optimizer']['initial_lr'],

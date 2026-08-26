@@ -15,9 +15,10 @@ from model.neural_net import AbaloneModel
 from environment.env import AbaloneEnv
 from training.replay_buffer import CPUReplayBuffer
 from training.loss import train_step_pmap_impl
-from mcts.search import generate_parallel_games_pmap, create_optimized_game_generator
+from mcts.search import create_optimized_game_generator
 from utils.game_storage import convert_games_batch, GameLogger, LocalGameLogger
 from utils.gcs_metrics_logger import SimpleGCSLogger, LocalMetricsLogger, IterationMetricsAggregator
+from utils.sharding import replicate, unreplicate
 
 
 
@@ -42,7 +43,7 @@ class AbaloneTrainerSync:
             buffer_size=1_000_000,
             batch_size=128,
             value_weight=1.0,
-            num_simulations=500,
+            num_simulations=None,
             recency_bias=True,
             recency_temperature=0.8,
             initial_lr=0.2,
@@ -57,6 +58,8 @@ class AbaloneTrainerSync:
             use_gcs_buffer=False,
             gcs_buffer_dir='buffer',
             eval_games=5,
+            max_num_considered_actions=16,
+            eval_simulations=None,
             verbose=True,
             enable_comprehensive_logging=True,
             metrics_logging_interval=30):
@@ -115,7 +118,15 @@ class AbaloneTrainerSync:
         self.batch_size = batch_size
         self.value_weight = value_weight
         self.checkpoint_path = checkpoint_path
+        if num_simulations is None:
+            raise ValueError(
+                "num_simulations is required -- pass config['mcts']['num_simulations']. "
+                "It used to default to 500 here while the config said 600, so the "
+                "configured value was silently ignored.")
         self.num_simulations = num_simulations
+        self.max_num_considered_actions = max_num_considered_actions
+        # Evaluation used a hard-coded 500 simulations regardless of config.
+        self.eval_simulations = eval_simulations if eval_simulations is not None else num_simulations
         self.recency_bias = recency_bias
         self.recency_temperature = recency_temperature
         self.save_games = save_games
@@ -163,19 +174,20 @@ class AbaloneTrainerSync:
                 recency_enabled=recency_bias,
                 recency_temperature=recency_temperature,
                 cleanup_temperature=2.0,
+                history_length=env.history_length,
                 log_level='INFO' if self.verbose else 'WARNING'
             )
         else:
             if self.verbose:
                 logger.info(f"Using local buffer of size {buffer_size}")
-            self.buffer = CPUReplayBuffer(buffer_size)
+            self.buffer = CPUReplayBuffer(buffer_size, history_length=env.history_length)
 
         # Parameter initialization
         # Note: optimizer will be created in train() with LR schedule to preserve momentum
         rng = jax.random.PRNGKey(42)
         sample_board = jnp.zeros((1, 9, 9), dtype=jnp.int8)
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
-        sample_history = jnp.zeros((1, 8, 9, 9), dtype=jnp.int8)  # 8 history positions
+        sample_history = jnp.zeros((1, env.history_length, 9, 9), dtype=jnp.int8)
         self.params = network.init(rng, sample_board, sample_marbles, sample_history)
 
         # Statistics
@@ -369,24 +381,26 @@ class AbaloneTrainerSync:
     def _setup_jax_functions(self):
         """Configure JAX functions for generation and training."""
         # Use our optimized generator (LOCAL devices - each host generates independently)
-        self.generate_games_pmap = create_optimized_game_generator(self.num_simulations)
+        self.generate_games_pmap = create_optimized_game_generator(
+            self.num_simulations, self.max_num_considered_actions)
 
         # Note: optimizer will be created in train() with proper LR schedule
         # to avoid resetting momentum when LR changes
 
-        # CRITICAL: Training uses GLOBAL devices for cross-host gradient averaging
-        # This enables true distributed training where gradients are averaged across ALL TPU cores
+        # All pmaps run over LOCAL devices. In a multi-process JAX program the
+        # collectives inside them (pmean / psum on `axis_name`) already span every
+        # process, so gradients are still averaged across ALL hosts. Passing
+        # devices=jax.devices() instead asked each host to place data on devices
+        # it does not own, which recent JAX versions reject.
         self.train_step_pmap = jax.pmap(
             partial(train_step_pmap_impl, network=self.network, value_weight=self.value_weight),
             axis_name='devices',
-            devices=self.global_devices  # ✅ GLOBAL devices for distributed training
         )
 
-        # Sum across ALL devices (all hosts) for evaluation aggregation
+        # psum over the local axis -> also sums across hosts
         self.sum_across_devices = jax.pmap(
             lambda x: jax.lax.psum(x, axis_name='devices'),
             axis_name='devices',
-            devices=self.global_devices  # ✅ GLOBAL devices
         )
 
     def train(self, num_iterations=100, games_per_iteration=64,
@@ -431,7 +445,6 @@ class AbaloneTrainerSync:
         self.optimizer_update_pmap = jax.pmap(
             lambda g, o, p: self.optimizer.update(g, o, p),
             axis_name='devices',
-            devices=self.global_devices  # ✅ GLOBAL devices
         )
 
         if self.verbose:
@@ -527,7 +540,7 @@ class AbaloneTrainerSync:
                     logger.info(f"Training: {training_steps_per_iteration} steps in {t_train:.2f}s ({training_steps_per_iteration/t_train:.1f} steps/s)")
                     logger.info(f"  Total loss: {metrics['total_loss']:.4f}")
                     logger.info(f"  Policy loss: {metrics['policy_loss']:.4f}, Value loss: {metrics['value_loss']:.4f}")
-                    logger.info(f"  Policy accuracy: {metrics['policy_accuracy']}%")
+                    logger.info(f"  Policy accuracy: {metrics['policy_accuracy']:.1%}")
 
                 # Log timing metrics for this iteration
                 if self.metrics_logger:
@@ -645,7 +658,7 @@ class AbaloneTrainerSync:
                 # Training metrics
                 training_metrics = {k: v for k, v in final_metrics.items() 
                                 if k in ['total_loss', 'policy_loss', 'value_loss', 
-                                        'policy_accuracy', 'value_sign_match']}
+                                        'policy_accuracy', 'value_sign_accuracy']}
                 self._log_metrics_to_tensorboard(training_metrics, "training")
                 
                 # Learning rate
@@ -729,10 +742,15 @@ class AbaloneTrainerSync:
 
         local_total_games = batch_size_per_device * self.num_devices
 
+        # pmap shards the leading axis over local devices on its own -- no
+        # explicit device placement needed for the per-device RNG keys.
         sharded_rngs = jax.random.split(rng_key, self.num_devices)
-        sharded_rngs = jax.device_put_sharded(list(sharded_rngs), self.devices)
 
-        sharded_params = jax.device_put_replicated(self.params, self.devices)
+        sharded_params = replicate(self.params, self.num_devices)
+
+        # `iteration` is traced (replicated per device), not static: as a static
+        # argument it forced a full recompile of the search loop every iteration.
+        sharded_iterations = jnp.full((self.num_devices,), self.iteration, dtype=jnp.int32)
 
         games_data_pmap = self.generate_games_pmap(
             sharded_rngs,
@@ -740,7 +758,7 @@ class AbaloneTrainerSync:
             self.network,
             self.env,
             batch_size_per_device,
-            self.iteration
+            sharded_iterations
         )
 
         games_data = jax.device_get(games_data_pmap)
@@ -875,22 +893,46 @@ class AbaloneTrainerSync:
                 if 'history_2d' in device_data:
                     history_2d = device_data['history_2d'][game_idx][:game_length+1]
                 else:
-                    history_2d = np.zeros((game_length+1, 8, 9, 9), dtype=np.int8)
+                    history_2d = np.zeros((game_length+1, self.env.history_length, 9, 9), dtype=np.int8)
                 
                 final_black_out = device_data['final_black_out'][game_idx]
                 final_white_out = device_data['final_white_out'][game_idx]
                 
+                # Value target, from Black's point of view.
+                #
+                # A real win/loss stays at +/-1. The move limit is NOT an Abalone
+                # rule though -- it is a truncation we impose so self-play ends --
+                # so scoring it 0 asserts "this position is exactly balanced",
+                # which is false and is the one place we would teach the network
+                # something wrong. Worse, with a near-random policy essentially no
+                # game reaches 6 marbles out, so every target would be 0, the value
+                # head would collapse to the constant 0 and MCTS would lose all
+                # signal.
+                #
+                # Instead we score a truncated game by the marble differential,
+                # which is what most Abalone tournament rules use as a tie-break.
+                # The 0.5 factor keeps a truncated game strictly between a loss and
+                # a win: a game reaching the cap has at most 5 marbles out, so the
+                # target lands in [-0.42, +0.42]. As the agent starts winning for
+                # real, truncated games become rare and this term fades out.
+                #
+                # NOTE: this shapes only the TRAINING TARGET of truncated games.
+                # Search rewards stay strictly terminal -- unlike the intermediate
+                # rewards that were removed from mcts/core.py.
                 if final_black_out >= 6:
-                    outcome = -1  # White wins
+                    outcome = -1.0  # White wins
                 elif final_white_out >= 6:
-                    outcome = 1   # Black wins
+                    outcome = 1.0   # Black wins
                 else:
-                    outcome = 0   # Draw
+                    marble_diff = float(final_white_out) - float(final_black_out)
+                    outcome = float(np.clip(0.5 * marble_diff / 6.0, -1.0, 1.0))
                 
                 if using_gcs_buffer:
                     game_id = self.buffer.start_new_game()
                 else:
-                    game_id = self.total_games + game_idx
+                    # game_idx restarts at 0 on every device, so `total_games + game_idx`
+                    # gave the same id to one game per device. Offset by the device too.
+                    game_id = self.total_games + device_idx * games_per_device + game_idx
                     
                 for move_idx in range(game_length):
                     player = actual_players[move_idx]
@@ -902,7 +944,7 @@ class AbaloneTrainerSync:
                                         black_outs[move_idx])
                     marbles_out = np.array([our_marbles, opp_marbles], dtype=np.int8)
                     
-                    outcome_for_player = outcome * player
+                    outcome_for_player = float(outcome) * float(player)
                     
                     self.buffer.add(
                         boards_2d[move_idx],
@@ -951,20 +993,23 @@ class AbaloneTrainerSync:
             if self.verbose:
                 logger.info("Buffer vide, impossible d'entraîner le réseau.")
             return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0,
-                    'policy_accuracy': 0.0, 'value_sign_match': 0.0}
+                    'policy_accuracy': 0.0, 'value_sign_accuracy': 0.0}
 
         using_gcs_buffer = hasattr(self.buffer, 'gcs_index')
 
-        # CRITICAL: Shard parameters on GLOBAL devices for distributed training
-        params_sharded = jax.device_put_replicated(self.params, self.global_devices)
-        opt_state_sharded = jax.device_put_replicated(self.opt_state, self.global_devices)
+        # Replicate on LOCAL devices; the pmean inside train_step still averages
+        # gradients across every host.
+        params_sharded = replicate(self.params, self.num_devices)
+        opt_state_sharded = replicate(self.opt_state, self.num_devices)
 
         cumulative_metrics = None
         steps_completed = 0
 
         for step in range(num_steps):
-            # CRITICAL: Batch size must account for ALL devices (all hosts)
-            total_batch_size = self.batch_size * self.num_global_devices
+            # Each host samples for its OWN devices only. The effective global batch
+            # is still batch_size * num_global_devices because gradients are averaged
+            # across hosts inside train_step_pmap.
+            total_batch_size = self.batch_size * self.num_devices
 
             try:
                 if using_gcs_buffer:
@@ -995,14 +1040,17 @@ class AbaloneTrainerSync:
             if 'history' in batch_data:
                 history = jnp.array(batch_data['history'])
             else:
-                history = jnp.zeros((boards.shape[0], 8, 9, 9), dtype=jnp.int8)
+                history = jnp.zeros((boards.shape[0], self.env.history_length, 9, 9), dtype=jnp.int8)
 
-            # CRITICAL: Reshape for GLOBAL devices (distributed across all hosts)
-            boards = boards.reshape(self.num_global_devices, -1, *boards.shape[1:])
-            marbles = marbles.reshape(self.num_global_devices, -1, *marbles.shape[1:])
-            history = history.reshape(self.num_global_devices, -1, *history.shape[1:])
-            policies = policies.reshape(self.num_global_devices, -1, *policies.shape[1:])
-            values = values.reshape(self.num_global_devices, -1, *values.shape[1:])
+            # Reshape onto this host's LOCAL devices. The per-device size is
+            # spelled out rather than inferred with -1: with history_length == 0
+            # the history array has a zero-sized axis and -1 cannot be resolved.
+            per_device = total_batch_size // self.num_devices
+            boards = boards.reshape(self.num_devices, per_device, *boards.shape[1:])
+            marbles = marbles.reshape(self.num_devices, per_device, *marbles.shape[1:])
+            history = history.reshape(self.num_devices, per_device, *history.shape[1:])
+            policies = policies.reshape(self.num_devices, per_device, *policies.shape[1:])
+            values = values.reshape(self.num_devices, per_device, *values.shape[1:])
 
             metrics_sharded, grads_averaged = self.train_step_pmap(
                 params_sharded, (boards, marbles, history), policies, values
@@ -1023,12 +1071,12 @@ class AbaloneTrainerSync:
             steps_completed += 1
             self.global_training_step += 1  # Track global step for LR schedule
 
-        self.params = jax.tree.map(lambda x: x[0], params_sharded)
-        self.opt_state = jax.tree.map(lambda x: x[0], opt_state_sharded)
+        self.params = unreplicate(params_sharded)
+        self.opt_state = unreplicate(opt_state_sharded)
 
         if cumulative_metrics is None or steps_completed == 0:
             return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0,
-                    'policy_accuracy': 0.0, 'value_sign_match': 0.0}
+                    'policy_accuracy': 0.0, 'value_sign_accuracy': 0.0}
 
         avg_metrics = {k: v / steps_completed for k, v in cumulative_metrics.items()}
 
@@ -1076,7 +1124,7 @@ class AbaloneTrainerSync:
                 policy_loss=avg_metrics.get('policy_loss', 0.0),
                 value_loss=avg_metrics.get('value_loss', 0.0),
                 policy_accuracy=avg_metrics.get('policy_accuracy', 0.0),
-                value_sign_match=avg_metrics.get('value_sign_match', 0.0),
+                value_sign_match=avg_metrics.get('value_sign_accuracy', 0.0),
                 learning_rate=self.current_lr,
                 training_steps_completed=steps_completed,
                 training_steps_requested=num_steps,
@@ -1258,8 +1306,10 @@ class AbaloneTrainerSync:
 
             evaluator = ModelsEvaluator(
                 network=self.network,
-                num_simulations=500,  
-                games_per_model=games_per_model
+                num_simulations=self.eval_simulations,
+                games_per_model=games_per_model,
+                max_moves=self.env.max_moves,
+                max_num_considered_actions=self.max_num_considered_actions,
             )
 
       
@@ -1396,14 +1446,20 @@ class AbaloneTrainerSync:
             return {}
         all_models_data = jnp.stack([aggregated_data[ref] for ref in model_iterations])
 
-        # CRITICAL: Aggregate across ALL devices (all hosts) using global pmap
-        replicated_data = jnp.repeat(all_models_data[None, :, :], self.num_global_devices, axis=0)
-        devices_data = jax.device_put_sharded(list(replicated_data), self.global_devices)
+        # Replicate this host's local tallies onto its LOCAL devices, then psum:
+        # the collective spans every host, so each host contributes once per local
+        # device. Replicating onto the GLOBAL device list made each host claim
+        # devices it does not own and multi-counted the tallies.
+        devices_data = jnp.repeat(all_models_data[None, :, :], self.num_devices, axis=0)
 
         # sum_across_devices now uses global pmap, so it sums across all hosts
         summed_data = self.sum_across_devices(devices_data)
 
         global_results = jax.device_get(summed_data)[0]
+
+        # psum counted each host's tally once per local device -> divide it back out.
+        # Round before int(): float division can land on 15.999999 and truncate to 15.
+        global_results = np.rint(np.asarray(global_results) / self.num_devices).astype(np.int64)
 
         final_results = {}
         for i, ref_iter in enumerate(model_iterations):
