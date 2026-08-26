@@ -6,7 +6,6 @@ import jax
 import threading
 import queue
 from typing import Dict, List, Any, Optional
-from google.cloud import storage
 
 import logging
 
@@ -176,6 +175,7 @@ class GameLogger:
         self.flush_interval = flush_interval
         self.game_queue = queue.Queue()
         self.buffer = []
+        from google.cloud import storage  # import paresseux : GCS seulement
         self.client = storage.Client()
         self.bucket = self.client.bucket(bucket_name)
         self.running = True

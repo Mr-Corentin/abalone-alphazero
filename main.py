@@ -1,7 +1,13 @@
-import jax
-jax.distributed.initialize() 
-
 import os
+
+import jax
+
+# jax.distributed.initialize() sets up a multi-host TPU pod. On a single host
+# (Colab, one TPU VM, CPU, GPU) it is unnecessary and can fail or hang, so allow
+# skipping it. Default behaviour is unchanged for pod runs.
+if os.environ.get("ABALONE_NO_DISTRIBUTED", "").lower() not in ("1", "true", "yes"):
+    jax.distributed.initialize()
+
 import sys
 import json
 import argparse

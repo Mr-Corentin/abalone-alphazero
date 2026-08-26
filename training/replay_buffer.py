@@ -3,8 +3,7 @@ import jax
 import jax.numpy as jnp
 import time
 import os
-import tensorflow as tf
-from google.cloud import storage
+
 from typing import Dict, List, Tuple, Any, Optional
 import math
 import logging
@@ -15,6 +14,31 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger("alphazero.buffer")
+
+
+# TensorFlow and google-cloud-storage are only needed by GCSReplayBufferSync.
+# They used to be imported at module level, which pulled TensorFlow into every
+# run -- including local-buffer runs on TPU, where importing TensorFlow next to
+# a JAX TPU runtime costs startup time and can fight over the device.
+_TF = None
+_STORAGE = None
+
+
+def _tf():
+    global _TF
+    if _TF is None:
+        import tensorflow
+        _TF = tensorflow
+    return _TF
+
+
+def _storage():
+    global _STORAGE
+    if _STORAGE is None:
+        from google.cloud import storage
+        _STORAGE = storage
+    return _STORAGE
+
 
 class CPUReplayBuffer:
     def __init__(self, capacity, board_size=9, action_space=1734, history_length=8):
@@ -268,7 +292,7 @@ class GCSReplayBufferSync:
         self.total_size = 0  # Total size including GCS
         
         # Initialize GCS client
-        self.client = storage.Client()
+        self.client = _storage().Client()
         self.bucket = self.client.bucket(bucket_name)
         
         # Index of available data on GCS
@@ -445,6 +469,7 @@ class GCSReplayBufferSync:
     
     def _write_tfrecord(self, file_path: str, data: Dict[str, np.ndarray]):
         """Écrit les données en format TFRecord sur GCS avec métadonnées de comptage"""
+        tf = _tf()
         temp_path = f"/tmp/{os.path.basename(file_path)}"
         
         example_count = len(data['board'])
@@ -740,6 +765,7 @@ class GCSReplayBufferSync:
     
     def _parse_tfrecord(self, example):
         """Parse un exemple TFRecord en dictionnaire numpy"""
+        tf = _tf()
         # Define feature schema
         feature_description = {
             'board': tf.io.FixedLenFeature([], tf.string),
@@ -945,6 +971,7 @@ class GCSReplayBufferSync:
 
     def _load_examples_from_gcs(self, file_path, max_examples):
         """Charge des exemples depuis un fichier TFRecord sur GCS"""
+        tf = _tf()
         blob = self.bucket.blob(file_path)
         temp_path = f"/tmp/{os.path.basename(file_path)}"
         blob.download_to_filename(temp_path)

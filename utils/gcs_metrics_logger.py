@@ -1,7 +1,6 @@
 import time
 import json
 from typing import Dict, Any, Optional
-from google.cloud import storage
 from datetime import datetime
 import logging
 
@@ -28,6 +27,7 @@ class SimpleGCSLogger:
         
         # Initialize GCS client once
         try:
+            from google.cloud import storage  # import paresseux : GCS seulement
             self.client = storage.Client()
             self.bucket = self.client.bucket(bucket_name)
             self.enabled = True
@@ -258,6 +258,7 @@ class IterationMetricsAggregator:
         
         if self.use_gcs:
             try:
+                from google.cloud import storage  # import paresseux : GCS seulement
                 self.client = storage.Client()
                 self.bucket = self.client.bucket(bucket_name)
                 self.enabled = True
