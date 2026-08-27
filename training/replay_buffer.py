@@ -41,6 +41,12 @@ def _storage():
 
 
 class CPUReplayBuffer:
+    # La politique represente 98,6 % du buffer (1734 valeurs par position contre
+    # 81 pour le plateau). En float32, 1M de positions = 7,0 Go de RAM, de quoi
+    # saturer une VM Colab. En float16 on descend a 3,5 Go, pour une precision
+    # relative de ~5e-4 : largement suffisant pour une cible de cross-entropie.
+    POLICY_DTYPE = np.float16
+
     def __init__(self, capacity, board_size=9, action_space=1734, history_length=8):
         self.capacity = capacity
         self.size = 0
@@ -50,7 +56,7 @@ class CPUReplayBuffer:
         self.buffer = {
             'board': np.zeros((capacity, board_size, board_size), dtype=np.int8),
             'marbles_out': np.zeros((capacity, 2), dtype=np.int8),
-            'policy': np.zeros((capacity, action_space), dtype=np.float32),
+            'policy': np.zeros((capacity, action_space), dtype=self.POLICY_DTYPE),
             # float32, pas int8 : le resultat d'une partie tronquee a la limite
             # de coups vaut le differentiel de billes (voir _update_buffer), donc
             # une valeur continue. En int8 elle etait silencieusement tronquee a 0.
@@ -169,33 +175,47 @@ class CPUReplayBuffer:
         return batch
 
     def sample_with_recency_bias(self, batch_size, temperature=1.0, rng_key=None):
-        """Échantillonne avec priorité aux données récentes"""
+        """
+        Échantillonne avec priorité aux données récentes.
+
+        Slot `i` a le rang de récence `r = (i - position) % size`, 0 = le plus
+        ancien, et doit être tiré avec une probabilité proportionnelle à
+        `exp(temperature * r / (size - 1))`.
+
+        On n'énumère PAS ces poids. Matérialiser `arange(size)`, `exp(...)` puis
+        la normalisation coûtait trois passes O(taille du buffer) à chaque appel,
+        pour ne tirer que `batch_size` indices : 2,7 ms sur un buffer de 38k mais
+        107 ms sur 1M, soit plusieurs secondes par itération d'entraînement et un
+        coût qui grandit avec le buffer.
+
+        La densité étant une exponentielle, sa CDF s'inverse analytiquement. Avec
+        x = r / (size - 1) dans [0, 1] et une densité ∝ e^(T·x) :
+            F(x) = (e^(T·x) - 1) / (e^T - 1)
+            F⁻¹(u) = ln(1 + u·(e^T - 1)) / T
+        On tire donc `batch_size` uniformes et on les transforme : O(batch_size),
+        indépendant de la taille du buffer.
+        """
         if self.size == 0:
             raise ValueError("Buffer vide, impossible d'échantillonner")
 
-        # Rank each filled slot by recency: 0 = oldest, size-1 = most recent.
-        # `self.position` is the next slot to write, so it is also the oldest one
-        # once the buffer has wrapped; before wrapping, position == size and the
-        # formula degenerates to rank == index, which is what we want.
-        ranks = (np.arange(self.size) - self.position) % self.size
-
-        # Normalise by size-1 so the exponent stays in [0, temperature]. Dividing
-        # by `size` while ranks were offset by `capacity` used to make the exponent
-        # reach ~800 for a small buffer inside a large capacity: exp overflowed to
-        # inf, the probabilities became NaN, and jax.random.choice then silently
-        # returned a degenerate batch instead of raising.
-        recency_weights = np.exp((ranks / max(self.size - 1, 1)) * temperature)
-        sampling_probs = recency_weights / np.sum(recency_weights)
-
-        # Sample with these probabilities
         if rng_key is None:
-            sampled_indices = np.random.choice(
-                self.size, size=batch_size, p=sampling_probs, replace=True
-            )
+            uniforms = np.random.random(batch_size)
         else:
-            sampled_indices = np.array(jax.random.choice(
-                rng_key, self.size, shape=(batch_size,), p=sampling_probs, replace=True
-            ))
+            uniforms = np.asarray(jax.random.uniform(rng_key, shape=(batch_size,)),
+                                  dtype=np.float64)
+
+        span = max(self.size - 1, 1)
+        if abs(temperature) < 1e-9:
+            # Température nulle : distribution uniforme, F⁻¹ dégénère en identité.
+            positions_along = uniforms
+        else:
+            positions_along = np.log1p(uniforms * np.expm1(temperature)) / temperature
+
+        ranks = np.rint(positions_along * span).astype(np.int64)
+        np.clip(ranks, 0, self.size - 1, out=ranks)
+
+        # rang -> index de slot (inverse de r = (i - position) % size)
+        sampled_indices = (ranks + self.position) % self.size
 
         # Retrieve samples
         actual_indices = np.arange(self.size)[sampled_indices]
@@ -275,7 +295,7 @@ class GCSReplayBufferSync:
         self.local_buffer = {
             'board': np.zeros((max_local_size, board_size, board_size), dtype=np.int8),
             'marbles_out': np.zeros((max_local_size, 2), dtype=np.int8),
-            'policy': np.zeros((max_local_size, action_space), dtype=np.float32),
+            'policy': np.zeros((max_local_size, action_space), dtype=CPUReplayBuffer.POLICY_DTYPE),
             'outcome': np.zeros(max_local_size, dtype=np.float32),  # cf. CPUReplayBuffer
             'player': np.zeros(max_local_size, dtype=np.int8),
             'history': np.zeros((max_local_size, history_length, board_size, board_size), dtype=np.int8),
@@ -785,7 +805,8 @@ class GCSReplayBufferSync:
         return {
             'board': tf.io.decode_raw(parsed['board'], tf.int8).numpy().reshape(self.board_size, self.board_size),
             'marbles_out': tf.io.decode_raw(parsed['marbles_out'], tf.int8).numpy().reshape(2),
-            'policy': tf.io.decode_raw(parsed['policy'], tf.float32).numpy().reshape(self.action_space),
+            # doit suivre CPUReplayBuffer.POLICY_DTYPE
+            'policy': tf.io.decode_raw(parsed['policy'], tf.float16).numpy().reshape(self.action_space),
             'history': tf.io.decode_raw(parsed['history'], tf.int8).numpy().reshape(self.history_length, self.board_size, self.board_size),
             'outcome': parsed['outcome'].numpy(),
             'player': parsed['player'].numpy(),

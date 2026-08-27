@@ -1035,7 +1035,10 @@ class AbaloneTrainerSync:
 
             boards = jnp.array(batch_data['board'])
             marbles = jnp.array(batch_data['marbles_out'])
-            policies = jnp.array(batch_data['policy'])
+            # Le buffer stocke la politique en float16 ; on repasse en float32 ici,
+            # sinon le lissage d'etiquettes (epsilon = 1e-7, et epsilon/1734 = 6e-11)
+            # tomberait sous le plus petit denormal float16 et s'annulerait.
+            policies = jnp.array(batch_data['policy'], dtype=jnp.float32)
             values = jnp.array(batch_data['outcome'])
             if 'history' in batch_data:
                 history = jnp.array(batch_data['history'])
