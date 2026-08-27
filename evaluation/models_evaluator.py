@@ -2,6 +2,10 @@ import os
 import subprocess
 import jax
 import jax.numpy as jnp
+# Import explicite : ce sous-module n'est pas charge par `import jax`.
+# Le code marchait par accident, quand une autre dependance l'avait
+# importe avant nous -- et echouait sinon (AttributeError).
+import jax.experimental.multihost_utils
 import pickle
 import math
 from functools import partial
