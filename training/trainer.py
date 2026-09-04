@@ -1252,6 +1252,32 @@ class AbaloneTrainerSync:
 
 
     
+    def _get_evaluator(self):
+        """
+        Build the model-vs-model evaluator once and reuse it across evaluation
+        rounds.
+
+        ModelsEvaluator wraps a jax.pmap'd MCTS search loop over the full
+        eval_simulations budget. Rebuilding ModelsEvaluator on every reference
+        checkpoint -- as this used to do -- gives pmap a brand new Python
+        function object each time, so JAX's compilation cache never hits and
+        the whole search graph is retraced/recompiled from scratch on every
+        evaluation round. Self-play generation avoids this on purpose (see
+        create_optimized_game_generator, which is built once in
+        _setup_jax_functions); evaluation was not getting the same treatment,
+        which is the main reason evaluation could take much longer than a
+        generation phase despite playing far fewer games.
+        """
+        if getattr(self, '_evaluator', None) is None:
+            from evaluation.models_evaluator import ModelsEvaluator
+            self._evaluator = ModelsEvaluator(
+                network=self.network,
+                num_simulations=self.eval_simulations,
+                max_moves=self.env.max_moves,
+                max_num_considered_actions=self.max_num_considered_actions,
+            )
+        return self._evaluator
+
     def evaluate_against_previous_models(self, total_iterations, num_reference_models=8):
         """
         Évalue le modèle actuel contre des versions précédentes.
@@ -1268,7 +1294,6 @@ class AbaloneTrainerSync:
             check_checkpoint_exists,
             download_checkpoint,
             load_checkpoint_params,
-            ModelsEvaluator
         )
 
         current_iter = self.iteration
@@ -1277,12 +1302,32 @@ class AbaloneTrainerSync:
 
 
         sync_refs = [ref for ref in target_references if ref < current_iter]
-        
-        available_refs = []
-        for ref in sync_refs:
-            ref_path = self._get_checkpoint_path(ref)
-            if check_checkpoint_exists(ref_path):
-                available_refs.append(ref)
+
+        # Only the main process checks GCS for which checkpoints exist, then
+        # broadcasts the result to every host -- same pattern as session_id in
+        # __init__. evaluate_model_pair() below contains an UNCONDITIONAL
+        # sync_global_devices("between_eval_rounds") barrier; if each host ran
+        # its own check_checkpoint_exists() independently, a single transient
+        # gsutil/network hiccup on one host would make it disagree with the
+        # others about which refs are "available", so some hosts would call
+        # evaluate_model_pair() (and its barrier) while others skipped it --
+        # deadlocking the whole job forever.
+        if sync_refs:
+            if self.is_main_process:
+                availability = [1 if check_checkpoint_exists(self._get_checkpoint_path(ref)) else 0
+                                 for ref in sync_refs]
+            else:
+                availability = [0] * len(sync_refs)
+
+            availability = jnp.array(availability, dtype=jnp.int32)
+            availability = jax.device_put(availability, self.devices[0])
+            availability = jax.experimental.multihost_utils.broadcast_one_to_all(
+                availability, is_source=self.is_main_process)
+            availability = jax.device_get(availability)
+
+            available_refs = [ref for ref, flag in zip(sync_refs, availability) if flag]
+        else:
+            available_refs = []
 
         jax.experimental.multihost_utils.sync_global_devices("pre_evaluation")
 
@@ -1311,13 +1356,7 @@ class AbaloneTrainerSync:
                 logger.info(f"Parties totales par modèle: {games_per_model}")
             logger.info(f"Processus {self.process_id}: jouera {local_games_per_model} parties par modèle")
 
-            evaluator = ModelsEvaluator(
-                network=self.network,
-                num_simulations=self.eval_simulations,
-                games_per_model=games_per_model,
-                max_moves=self.env.max_moves,
-                max_num_considered_actions=self.max_num_considered_actions,
-            )
+            evaluator = self._get_evaluator()
 
       
         for ref_iter in sync_refs:

@@ -1,4 +1,3 @@
-import os
 import subprocess
 import jax
 import jax.numpy as jnp
@@ -75,21 +74,30 @@ def generate_evaluation_checkpoints(total_iterations: int, num_checkpoints: int 
     return checkpoints
 
 def check_checkpoint_exists(checkpoint_path):
-    """Vérifie si un checkpoint existe au chemin spécifié."""
-    # Vérifier le système de fichiers local
+    """
+    Vérifie si un checkpoint existe au chemin spécifié.
+
+    `checkpoint_path` peut contenir un wildcard (voir
+    AbaloneTrainerSync._get_checkpoint_path, qui insère un `*` pour le
+    timestamp). `os.path.exists` et `gsutil stat` traitent tous les deux un
+    chemin avec `*` comme un nom littéral -- ni l'un ni l'autre ne
+    l'expansent -- donc les deux renvoyaient toujours False et aucune
+    évaluation contre un ancien modèle ne se déclenchait jamais. `glob` (local)
+    et `gsutil ls` (GCS) expansent bien le wildcard.
+    """
     if not checkpoint_path.startswith("gs://"):
-        return os.path.exists(checkpoint_path)
-    
-    # Vérifier GCS
+        import glob
+        return len(glob.glob(checkpoint_path)) > 0
+
     try:
         result = subprocess.run(
-            f"gsutil -q stat {checkpoint_path}",
+            f"gsutil ls {checkpoint_path}",
             shell=True,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
-        return result.returncode == 0
+        return result.returncode == 0 and bool(result.stdout.strip())
     except Exception:
         return False
 
