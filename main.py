@@ -275,6 +275,7 @@ def create_trainer(config, args):
         recency_temperature=config['buffer'].get('recency_temperature', 0.8),
         initial_lr=config['optimizer']['initial_lr'],
         momentum=config['optimizer']['momentum'],
+        weight_decay=config['optimizer'].get('weight_decay', 1e-4),
         lr_schedule=config['optimizer'].get('lr_schedule', None),
         checkpoint_path=config['checkpoint']['path'],
         log_dir=args.log_dir,

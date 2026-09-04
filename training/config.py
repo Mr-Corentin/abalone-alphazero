@@ -35,6 +35,8 @@ DEFAULT_CONFIG = {
     "optimizer": {
         "initial_lr": 0.2,
         "momentum": 0.9,
+        # L2 weight regularization (c*||theta||^2 in the AlphaZero loss).
+        "weight_decay": 1e-4,
         "lr_schedule": [
             (0.0, 0.2),      
             (0.3, 0.02),     
@@ -97,6 +99,8 @@ MINIMAL_CONFIG = {
     "optimizer": {
         "initial_lr": 0.2,
         "momentum": 0.9,
+        # L2 weight regularization (c*||theta||^2 in the AlphaZero loss).
+        "weight_decay": 1e-4,
         "lr_schedule": [
             (0.0, 0.2),      
             (0.3, 0.02),     

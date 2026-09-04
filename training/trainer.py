@@ -52,6 +52,7 @@ class AbaloneTrainerSync:
             recency_temperature=0.8,
             initial_lr=0.2,
             momentum=0.9,
+            weight_decay=1e-4,
             lr_schedule=None,
             checkpoint_path="checkpoints/model",
             log_dir=None,
@@ -83,6 +84,9 @@ class AbaloneTrainerSync:
             recency_temperature: Temperature for recency bias
             initial_lr: Initial learning rate (0.2 as in AlphaZero)
             momentum: Momentum for SGD (0.9 standard)
+            weight_decay: L2 weight regularization coefficient, matching the
+                c*||theta||^2 term in the AlphaZero loss (typical value 1e-4).
+                Applied directly to gradients before clipping, see train().
             lr_schedule: List of tuples (iteration_percentage, learning_rate) or None
             checkpoint_path: Path to save checkpoints
             log_dir: Path for tensorboard logs
@@ -143,6 +147,7 @@ class AbaloneTrainerSync:
         self.initial_lr = initial_lr
         self.current_lr = initial_lr
         self.momentum = momentum
+        self.weight_decay = weight_decay
 
         # Default AlphaZero schedule if not specified
         if lr_schedule is None:
@@ -437,7 +442,19 @@ class AbaloneTrainerSync:
 
         # Create optimizer with LR schedule and gradient clipping
         # This is done ONCE - no more resets, momentum is preserved!
+        #
+        # add_decayed_weights adds weight_decay * params to the gradient --
+        # equivalent to the c*||theta||^2 term AlphaZero adds to the loss.
+        # It runs first, before clipping and momentum, so the L2 term is
+        # folded into the same gradient that gets clipped and accumulated by
+        # momentum, matching the classic (coupled) L2 formulation the
+        # original paper uses -- not decoupled/AdamW-style decay, which would
+        # instead apply after the optimizer step, independent of momentum.
+        # Applied to every parameter including biases/norm scale for
+        # simplicity; excluding those is a common refinement but not what the
+        # paper's plain c*||theta||^2 term does.
         self.optimizer = optax.chain(
+            optax.add_decayed_weights(self.weight_decay),
             optax.clip_by_global_norm(1.0),
             optax.sgd(learning_rate=lr_schedule_fn, momentum=self.momentum)
         )
