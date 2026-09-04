@@ -3,6 +3,11 @@ chex==0.1.89
 etils==1.5.2
 flax==0.8.5
 fsspec==2025.3.0
+# Unpinned: trainer.py imports tensorboardX unconditionally but it was missing
+# here entirely, so every run crashed at import time before touching the TPU.
+tensorboardX
+# Unpinned: optional Vertex AI TensorBoard streaming (--vertex-tensorboard-id).
+google-cloud-aiplatform
 humanize==4.12.1
 importlib_metadata==8.6.1
 importlib_resources==6.5.2

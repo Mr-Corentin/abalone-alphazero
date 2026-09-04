@@ -67,7 +67,10 @@ class AbaloneTrainerSync:
             eval_simulations=None,
             verbose=True,
             enable_comprehensive_logging=True,
-            metrics_logging_interval=30):
+            metrics_logging_interval=30,
+            vertex_tensorboard_id=None,
+            gcp_project=None,
+            gcp_location='europe-west4'):
 
         """
         Initialize training coordinator with step-by-step synchronized approach.
@@ -98,6 +101,14 @@ class AbaloneTrainerSync:
             gcs_buffer_dir: Folder in GCS bucket for buffer
             eval_games: Number of games to play for evaluation
             verbose: If True, display detailed logs
+            vertex_tensorboard_id: Vertex AI TensorBoard instance ID. If set,
+                streams scalars there in near real time in addition to the
+                local/GCS event files SummaryWriter already writes. Best
+                effort -- missing package, wrong ID or an IAM problem logs a
+                warning and training proceeds without it rather than failing.
+            gcp_project: Project for the Vertex AI TensorBoard instance
+                (defaults to the ambient ADC project when None)
+            gcp_location: Region of the Vertex AI TensorBoard instance
         """
         # Device configuration
         self.global_devices = jax.devices()
@@ -142,6 +153,10 @@ class AbaloneTrainerSync:
         self.enable_comprehensive_logging = enable_comprehensive_logging
         self.metrics_logging_interval = metrics_logging_interval
         self.gcs_bucket = gcs_bucket
+        self.vertex_tensorboard_id = vertex_tensorboard_id
+        self.gcp_project = gcp_project
+        self.gcp_location = gcp_location
+        self._vertex_tb_started = False
 
         # Learning rate and optimizer configuration
         self.initial_lr = initial_lr
@@ -240,11 +255,57 @@ class AbaloneTrainerSync:
         # Metrics aggregator initialization (main process only)
         self._setup_metrics_aggregator(gcs_bucket, enable_comprehensive_logging)
 
+        # Vertex AI TensorBoard streaming (main process only, best effort)
+        if self.is_main_process and self.vertex_tensorboard_id:
+            self._start_vertex_tensorboard()
+
         # JAX functions configuration
         self._setup_jax_functions()
         
         # Evaluation configuration
         self.eval_enabled = False
+
+    def _start_vertex_tensorboard(self):
+        """
+        Stream this run's TensorBoard scalars to a Vertex AI TensorBoard
+        instance in near real time, on top of the local/GCS event files
+        SummaryWriter already writes on its own.
+
+        Best effort by design: an observability convenience failing (package
+        not installed, wrong instance ID, an IAM permission missing) must
+        never take down a training run that may be burning TPU time, so every
+        step here is wrapped and only ever logs a warning.
+        """
+        try:
+            from google.cloud import aiplatform
+        except ImportError:
+            logger.warning("google-cloud-aiplatform not installed -- skipping Vertex AI TensorBoard streaming")
+            return
+
+        try:
+            aiplatform.init(project=self.gcp_project, location=self.gcp_location)
+            aiplatform.start_upload_tb_log(
+                tensorboard_experiment_name=f"abalone-{self.session_id}",
+                logdir=self.log_dir,
+                tensorboard_id=self.vertex_tensorboard_id,
+            )
+            self._vertex_tb_started = True
+            logger.info(
+                f"Streaming TensorBoard logs to Vertex AI "
+                f"(tensorboard_id={self.vertex_tensorboard_id}, experiment=abalone-{self.session_id})")
+        except Exception as e:
+            logger.warning(f"Could not start Vertex AI TensorBoard streaming, continuing without it: {e}")
+            self._vertex_tb_started = False
+
+    def _stop_vertex_tensorboard(self):
+        """Flush and stop the Vertex AI TensorBoard uploader thread, if running."""
+        if not self._vertex_tb_started:
+            return
+        try:
+            from google.cloud import aiplatform
+            aiplatform.end_upload_tb_log()
+        except Exception as e:
+            logger.warning(f"Error stopping Vertex AI TensorBoard streaming: {e}")
 
     def _setup_tensorboard(self, log_dir):
         """Configure TensorBoard logging"""
@@ -724,6 +785,7 @@ class AbaloneTrainerSync:
             if self.is_main_process:
                 self.writer.close()
                 logger.info(f"Process {self.process_id}: TensorBoard writer closed")
+                self._stop_vertex_tensorboard()
 
             if self.save_games and hasattr(self, 'game_logger'):
                 self.game_logger.stop()

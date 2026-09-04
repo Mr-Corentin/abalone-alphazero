@@ -28,6 +28,9 @@ ITERATIONS="$(meta abalone-iterations 200)"
 GAMES_PER_ITER="$(meta abalone-games-per-iter 64)"
 SAVE_FREQUENCY="$(meta abalone-save-frequency 1)"
 EXTRA_ARGS="$(meta abalone-extra-args "")"
+VERTEX_TENSORBOARD_ID="$(meta abalone-vertex-tensorboard-id "")"
+GCP_PROJECT="$(meta abalone-gcp-project "")"
+GCP_LOCATION="$(meta abalone-gcp-location europe-west4)"
 
 if [ -z "$GCS_BUCKET" ]; then
   echo "abalone-gcs-bucket metadata key is required, aborting" >&2
@@ -44,10 +47,18 @@ else
   echo "No existing checkpoint found under $CHECKPOINT_PATH, starting fresh"
 fi
 
+VERTEX_ARGS=()
+if [ -n "$VERTEX_TENSORBOARD_ID" ]; then
+  VERTEX_ARGS=(--vertex-tensorboard-id "$VERTEX_TENSORBOARD_ID" --gcp-location "$GCP_LOCATION")
+  if [ -n "$GCP_PROJECT" ]; then
+    VERTEX_ARGS+=(--gcp-project "$GCP_PROJECT")
+  fi
+fi
+
 exec python3 main.py --mode train \
   --gcs-bucket "$GCS_BUCKET" \
   --checkpoint-path "$CHECKPOINT_PATH" \
   --iterations "$ITERATIONS" \
   --games-per-iter "$GAMES_PER_ITER" \
   --save-frequency "$SAVE_FREQUENCY" \
-  "${RESUME_ARGS[@]}" $EXTRA_ARGS
+  "${RESUME_ARGS[@]}" "${VERTEX_ARGS[@]}" $EXTRA_ARGS

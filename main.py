@@ -76,6 +76,12 @@ def parse_args():
                        help='Checkpoint to load for resuming training')
     parser.add_argument('--save-frequency', type=int, default=None,
                        help='Iterations between periodic checkpoint saves')
+    parser.add_argument('--vertex-tensorboard-id', type=str, default=None,
+                       help='Vertex AI TensorBoard instance ID to stream metrics to (optional)')
+    parser.add_argument('--gcp-project', type=str, default=None,
+                       help='GCP project for --vertex-tensorboard-id (defaults to the ambient ADC project)')
+    parser.add_argument('--gcp-location', type=str, default='europe-west4',
+                       help='Region of the Vertex AI TensorBoard instance')
     parser.add_argument('--no-eval', action='store_true',
                    help='Disable evaluation during training')
     parser.add_argument('--use-gcs-buffer', action='store_true',
@@ -285,7 +291,10 @@ def create_trainer(config, args):
         use_gcs_buffer=args.use_gcs_buffer,
         gcs_buffer_dir=args.gcs_buffer_dir,
         verbose=args.verbose,
-        enable_comprehensive_logging=(args.enable_comprehensive_logging and not args.disable_comprehensive_logging) if hasattr(args, 'enable_comprehensive_logging') else config.get('logging', {}).get('enable_comprehensive_logging', True))
+        enable_comprehensive_logging=(args.enable_comprehensive_logging and not args.disable_comprehensive_logging) if hasattr(args, 'enable_comprehensive_logging') else config.get('logging', {}).get('enable_comprehensive_logging', True),
+        vertex_tensorboard_id=args.vertex_tensorboard_id,
+        gcp_project=args.gcp_project,
+        gcp_location=args.gcp_location)
 
     # Load checkpoint if specified
     if args.checkpoint:
