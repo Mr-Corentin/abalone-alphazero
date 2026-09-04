@@ -74,6 +74,8 @@ def parse_args():
                        help='GCS bucket name to store games')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Checkpoint to load for resuming training')
+    parser.add_argument('--save-frequency', type=int, default=None,
+                       help='Iterations between periodic checkpoint saves')
     parser.add_argument('--no-eval', action='store_true',
                    help='Disable evaluation during training')
     parser.add_argument('--use-gcs-buffer', action='store_true',
@@ -160,6 +162,9 @@ def get_merged_config(args):
     
     if args.checkpoint_path:
         config['checkpoint']['path'] = args.checkpoint_path
+
+    if args.save_frequency:
+        config['checkpoint']['save_frequency'] = args.save_frequency
     
     # If using GCS bucket, update paths for cloud storage
     if args.gcs_bucket:

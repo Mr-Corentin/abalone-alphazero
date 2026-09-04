@@ -442,8 +442,16 @@ class AbaloneTrainerSync:
             optax.sgd(learning_rate=lr_schedule_fn, momentum=self.momentum)
         )
 
-        # Initialize optimizer state (only once!)
-        self.opt_state = self.optimizer.init(self.params)
+        # Initialize optimizer state -- UNLESS load_checkpoint() already set one
+        # before train() was called. optax's LR schedule position and SGD
+        # momentum both live inside opt_state (there is no separate step
+        # counter), so overwriting it here unconditionally silently restarted
+        # every resumed run at the initial LR with zeroed momentum, no matter
+        # what checkpoint was loaded.
+        if not hasattr(self, 'opt_state'):
+            self.opt_state = self.optimizer.init(self.params)
+        elif self.verbose:
+            logger.info(f"Resuming optimizer state from checkpoint (iteration {self.iteration})")
 
         # Create optimizer update pmap function (GLOBAL devices for distributed training)
         self.optimizer_update_pmap = jax.pmap(
@@ -454,8 +462,10 @@ class AbaloneTrainerSync:
         if self.verbose:
             logger.info(f"Optimizer initialized with momentum={self.momentum} (momentum will be preserved across LR changes)")
 
-        # Track global training step for LR schedule
-        self.global_training_step = 0
+        # Track global training step for LR schedule (display only -- the real
+        # schedule position lives in opt_state). Same resume rule as above.
+        if not hasattr(self, 'global_training_step'):
+            self.global_training_step = 0
 
         # Determine reference iterations for entire training
         from evaluation.models_evaluator import generate_evaluation_checkpoints
@@ -469,7 +479,11 @@ class AbaloneTrainerSync:
         logger.info(f"Process {self.process_id}: Starting training")
 
         try:
-            for iteration in range(num_iterations):
+            # self.iteration defaults to 0 (fresh run) or was set by
+            # load_checkpoint() to the last saved iteration -- resuming from
+            # there instead of always 0 is what makes --checkpoint actually
+            # "continue" a run instead of restarting the whole schedule.
+            for iteration in range(self.iteration, num_iterations):
                 self.iteration = iteration
                 iter_start_time = time.time()
                 
@@ -1161,7 +1175,11 @@ class AbaloneTrainerSync:
             'metrics': self.metrics_history,
             'total_games': self.total_games,
             'total_positions': self.total_positions,
-            'is_reference': is_reference
+            'is_reference': is_reference,
+            # Display-only (see train()): the real LR-schedule position lives
+            # inside opt_state, but this keeps logged LR values accurate right
+            # after a resume, before the first _get_current_lr_from_step call.
+            'global_training_step': getattr(self, 'global_training_step', 0),
         }
 
         # Créer le répertoire si nécessaire
@@ -1242,6 +1260,8 @@ class AbaloneTrainerSync:
         self.opt_state = checkpoint['opt_state']
         self.iteration = checkpoint['iteration']
         self.current_lr = checkpoint['current_lr']
+        # .get(): older checkpoints saved before this field existed still load fine.
+        self.global_training_step = checkpoint.get('global_training_step', 0)
         self.metrics_history = checkpoint['metrics']
         self.total_games = checkpoint['total_games']
         self.total_positions = checkpoint['total_positions']
