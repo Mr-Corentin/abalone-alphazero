@@ -113,6 +113,15 @@ SAVE_FREQUENCY="$(meta abalone-save-frequency 1)"
 # on-demand -- e.g. for the 32-chip v4 on-demand quota, which isn't subject
 # to the preemption/stockout cycle spot capacity is.
 SPOT="$(meta abalone-tpu-spot true)"
+# Forwarded to the TPU's own metadata below -- these live on the WATCHER's
+# metadata but run_training.sh reads them from the TPU it ends up running on,
+# so they have to be passed through explicitly or they're silently empty on
+# the recreated node (this is exactly how --num-simulations got dropped and
+# training silently ran at the config default instead).
+EXTRA_ARGS="$(meta abalone-extra-args "")"
+VERTEX_TENSORBOARD_ID="$(meta abalone-vertex-tensorboard-id "")"
+GCP_PROJECT_META="$(meta abalone-gcp-project "")"
+GCP_LOCATION_META="$(meta abalone-gcp-location "")"
 
 log() { logger -t abalone-watcher "$*"; echo "$(date -u +%FT%TZ) $*"; }
 
@@ -138,6 +147,12 @@ fi
 log "TPU node $NODE_ID state=$STATE, requesting a new slice (spot=$SPOT)"
 QR_ID="abalone-qr-$(date +%s)"
 
+METADATA="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=$ITERATIONS,abalone-games-per-iter=$GAMES_PER_ITER,abalone-save-frequency=$SAVE_FREQUENCY"
+[ -n "$EXTRA_ARGS" ] && METADATA="$METADATA,abalone-extra-args=$EXTRA_ARGS"
+[ -n "$VERTEX_TENSORBOARD_ID" ] && METADATA="$METADATA,abalone-vertex-tensorboard-id=$VERTEX_TENSORBOARD_ID"
+[ -n "$GCP_PROJECT_META" ] && METADATA="$METADATA,abalone-gcp-project=$GCP_PROJECT_META"
+[ -n "$GCP_LOCATION_META" ] && METADATA="$METADATA,abalone-gcp-location=$GCP_LOCATION_META"
+
 CREATE_ARGS=(
   --project="$PROJECT_ID"
   --zone="$ZONE"
@@ -145,7 +160,7 @@ CREATE_ARGS=(
   --accelerator-type="$ACCELERATOR_TYPE"
   --runtime-version="$RUNTIME_VERSION"
   --metadata-from-file=startup-script=/opt/abalone-watcher/tpu_startup.sh
-  --metadata="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=$ITERATIONS,abalone-games-per-iter=$GAMES_PER_ITER,abalone-save-frequency=$SAVE_FREQUENCY"
+  --metadata="$METADATA"
 )
 if [ "$SPOT" = "true" ]; then
   CREATE_ARGS+=(--spot)

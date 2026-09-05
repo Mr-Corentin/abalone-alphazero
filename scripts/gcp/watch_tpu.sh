@@ -19,6 +19,7 @@ NODE_ID="abalone-v6e"
 GCS_BUCKET="your-bucket-name"
 STARTUP_SCRIPT_GCS="gs://your-bucket-name/deploy/tpu_startup.sh"
 SPOT=true  # false for an on-demand quota (e.g. the v4 on-demand allocation)
+EXTRA_ARGS=""  # e.g. "--num-simulations 400" -- forwarded to the TPU's metadata below
 
 log() { logger -t abalone-watcher "$*"; echo "$(date -u +%FT%TZ) $*"; }
 
@@ -49,6 +50,9 @@ gsutil cp "$STARTUP_SCRIPT_GCS" "$LOCAL_STARTUP"
 
 QR_ID="abalone-qr-$(date +%s)"
 
+METADATA="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=200,abalone-games-per-iter=64,abalone-save-frequency=1"
+[ -n "$EXTRA_ARGS" ] && METADATA="$METADATA,abalone-extra-args=$EXTRA_ARGS"
+
 CREATE_ARGS=(
   --project="$PROJECT_ID"
   --zone="$ZONE"
@@ -56,7 +60,7 @@ CREATE_ARGS=(
   --accelerator-type="$ACCELERATOR_TYPE"
   --runtime-version="$RUNTIME_VERSION"
   --metadata-from-file=startup-script="$LOCAL_STARTUP"
-  --metadata="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=200,abalone-games-per-iter=64,abalone-save-frequency=1"
+  --metadata="$METADATA"
 )
 if [ "$SPOT" = "true" ]; then
   CREATE_ARGS+=(--spot)
