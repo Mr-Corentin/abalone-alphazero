@@ -64,7 +64,7 @@ cd "$REPO_DIR"
 chmod +x scripts/run_training.sh
 
 pip install -r requirements.txt
-pip install -U "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+pip install "jax[tpu]==0.4.30" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 cat > /etc/systemd/system/abalone-training.service <<EOF
 [Unit]
@@ -109,6 +109,10 @@ GCS_BUCKET="$(meta abalone-gcs-bucket)"
 ITERATIONS="$(meta abalone-iterations 200)"
 GAMES_PER_ITER="$(meta abalone-games-per-iter 64)"
 SAVE_FREQUENCY="$(meta abalone-save-frequency 1)"
+# "true" (default) requests spot/preemptible capacity; "false" requests
+# on-demand -- e.g. for the 32-chip v4 on-demand quota, which isn't subject
+# to the preemption/stockout cycle spot capacity is.
+SPOT="$(meta abalone-tpu-spot true)"
 
 log() { logger -t abalone-watcher "$*"; echo "$(date -u +%FT%TZ) $*"; }
 
@@ -131,21 +135,26 @@ if [ -n "$IN_FLIGHT" ]; then
   exit 0
 fi
 
-log "TPU node $NODE_ID state=$STATE, requesting a new slice"
+log "TPU node $NODE_ID state=$STATE, requesting a new slice (spot=$SPOT)"
 QR_ID="abalone-qr-$(date +%s)"
 
-if gcloud compute tpus queued-resources create "$QR_ID" \
-    --project="$PROJECT_ID" \
-    --zone="$ZONE" \
-    --node-id="$NODE_ID" \
-    --accelerator-type="$ACCELERATOR_TYPE" \
-    --runtime-version="$RUNTIME_VERSION" \
-    --spot \
-    --metadata-from-file=startup-script=/opt/abalone-watcher/tpu_startup.sh \
-    --metadata="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=$ITERATIONS,abalone-games-per-iter=$GAMES_PER_ITER,abalone-save-frequency=$SAVE_FREQUENCY"; then
+CREATE_ARGS=(
+  --project="$PROJECT_ID"
+  --zone="$ZONE"
+  --node-id="$NODE_ID"
+  --accelerator-type="$ACCELERATOR_TYPE"
+  --runtime-version="$RUNTIME_VERSION"
+  --metadata-from-file=startup-script=/opt/abalone-watcher/tpu_startup.sh
+  --metadata="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=$ITERATIONS,abalone-games-per-iter=$GAMES_PER_ITER,abalone-save-frequency=$SAVE_FREQUENCY"
+)
+if [ "$SPOT" = "true" ]; then
+  CREATE_ARGS+=(--spot)
+fi
+
+if gcloud compute tpus queued-resources create "$QR_ID" "${CREATE_ARGS[@]}"; then
   log "Requested $QR_ID for node $NODE_ID"
 else
-  log "Failed to request $QR_ID (spot capacity likely unavailable right now, will retry next tick)"
+  log "Failed to request $QR_ID (capacity likely unavailable right now, will retry next tick)"
 fi
 WATCH_EOF
 chmod +x /opt/abalone-watcher/watch_tpu.sh

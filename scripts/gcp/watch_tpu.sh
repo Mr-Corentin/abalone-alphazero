@@ -18,6 +18,7 @@ RUNTIME_VERSION="v2-alpha-tpuv6e"
 NODE_ID="abalone-v6e"
 GCS_BUCKET="your-bucket-name"
 STARTUP_SCRIPT_GCS="gs://your-bucket-name/deploy/tpu_startup.sh"
+SPOT=true  # false for an on-demand quota (e.g. the v4 on-demand allocation)
 
 log() { logger -t abalone-watcher "$*"; echo "$(date -u +%FT%TZ) $*"; }
 
@@ -48,16 +49,21 @@ gsutil cp "$STARTUP_SCRIPT_GCS" "$LOCAL_STARTUP"
 
 QR_ID="abalone-qr-$(date +%s)"
 
-if gcloud compute tpus queued-resources create "$QR_ID" \
-    --project="$PROJECT_ID" \
-    --zone="$ZONE" \
-    --node-id="$NODE_ID" \
-    --accelerator-type="$ACCELERATOR_TYPE" \
-    --runtime-version="$RUNTIME_VERSION" \
-    --spot \
-    --metadata-from-file=startup-script="$LOCAL_STARTUP" \
-    --metadata="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=200,abalone-games-per-iter=64,abalone-save-frequency=1"; then
+CREATE_ARGS=(
+  --project="$PROJECT_ID"
+  --zone="$ZONE"
+  --node-id="$NODE_ID"
+  --accelerator-type="$ACCELERATOR_TYPE"
+  --runtime-version="$RUNTIME_VERSION"
+  --metadata-from-file=startup-script="$LOCAL_STARTUP"
+  --metadata="abalone-gcs-bucket=$GCS_BUCKET,abalone-iterations=200,abalone-games-per-iter=64,abalone-save-frequency=1"
+)
+if [ "$SPOT" = "true" ]; then
+  CREATE_ARGS+=(--spot)
+fi
+
+if gcloud compute tpus queued-resources create "$QR_ID" "${CREATE_ARGS[@]}"; then
   log "Requested $QR_ID for node $NODE_ID"
 else
-  log "Failed to request $QR_ID (spot capacity likely unavailable right now, will retry next tick)"
+  log "Failed to request $QR_ID (capacity likely unavailable right now, will retry next tick)"
 fi

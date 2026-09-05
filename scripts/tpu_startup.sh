@@ -53,8 +53,16 @@ chmod +x scripts/run_training.sh
 # --- Deps. jax[tpu] MUST be installed after requirements.txt: requirements.txt
 # pins a generic (CPU) jaxlib, and jax[tpu] needs to win so jax.devices()
 # actually reports TPU devices.
+#
+# Pinned to the SAME version as requirements.txt's jax/jaxlib entries (not -U
+# / latest): flax==0.8.5 reaches into a JAX trace-stack internal
+# (flax/core/tracers.py's trace_level) that a much newer JAX no longer
+# exposes the same way, which surfaces as
+# "AttributeError: 'EvalTrace' object has no attribute 'level'" the moment
+# the network is initialized. Pinning keeps jax/jaxlib matched to the
+# flax/chex/optax versions they were presumably tested against.
 pip install -r requirements.txt
-pip install -U "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+pip install "jax[tpu]==0.4.30" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 # --- Run training as a systemd service. Restart=on-failure gives us
 # process-level auto-restart on a plain crash/OOM, on top of the
