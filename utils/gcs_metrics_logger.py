@@ -103,6 +103,28 @@ class SimpleGCSLogger:
         }
         
         self._write_log('evaluation', iteration, log_data)
+
+    def log_curriculum_metrics(self, iteration: int, **metrics):
+        """
+        Etat du curriculum, ecrit APRES la decision de montee/descente.
+
+        Phase distincte de 'generation' a dessein : la decision se prend en fin
+        d'iteration alors que les metriques de generation partent juste apres le
+        self-play. Les melanger faisait annoncer une montee avant qu'elle ait eu
+        lieu, et affichait un seuil different de celui reellement applique.
+        """
+        if getattr(self, 'enabled', True) is False:
+            return
+        log_data = {
+            'timestamp': time.time(),
+            'datetime': datetime.now().isoformat(),
+            'session_id': self.session_id,
+            'worker_id': self.process_id,
+            'iteration': iteration,
+            'phase': 'curriculum',
+            **metrics
+        }
+        self._write_log('curriculum', iteration, log_data)
     
     def _write_log(self, log_type: str, iteration: int, data: Dict[str, Any]):
         """Write a single log entry to GCS."""
@@ -146,7 +168,7 @@ class LocalMetricsLogger:
         self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Create log directories
-        for subdir in ['generation', 'training', 'timing', 'evaluation', 'summaries']:
+        for subdir in ['generation', 'training', 'timing', 'evaluation', 'curriculum', 'summaries']:
             os.makedirs(os.path.join(log_dir, 'training_logs', subdir), exist_ok=True)
         
         logger.info(f"Local Logger initialized for worker {process_id}, session {self.session_id}")
@@ -206,6 +228,28 @@ class LocalMetricsLogger:
         }
         
         self._write_log('evaluation', iteration, log_data)
+
+    def log_curriculum_metrics(self, iteration: int, **metrics):
+        """
+        Etat du curriculum, ecrit APRES la decision de montee/descente.
+
+        Phase distincte de 'generation' a dessein : la decision se prend en fin
+        d'iteration alors que les metriques de generation partent juste apres le
+        self-play. Les melanger faisait annoncer une montee avant qu'elle ait eu
+        lieu, et affichait un seuil different de celui reellement applique.
+        """
+        if getattr(self, 'enabled', True) is False:
+            return
+        log_data = {
+            'timestamp': time.time(),
+            'datetime': datetime.now().isoformat(),
+            'session_id': self.session_id,
+            'worker_id': self.process_id,
+            'iteration': iteration,
+            'phase': 'curriculum',
+            **metrics
+        }
+        self._write_log('curriculum', iteration, log_data)
     
     def _write_log(self, log_type: str, iteration: int, data: Dict[str, Any]):
         """Write a single log entry to local file."""
@@ -494,6 +538,17 @@ class IterationMetricsAggregator:
                 stats['total_games_per_sec'] = sum(games_per_sec)
                 stats['avg_games_per_sec'] = sum(games_per_sec) / len(games_per_sec)
         
+        elif metric_type == 'curriculum':
+            # Tous les workers decident a l'identique (compteurs reduits
+            # globalement avant la decision), donc on prend simplement le premier
+            # enregistrement plutot que d'en moyenner des copies identiques.
+            if data_list:
+                base = next((d for d in data_list if d.get('worker_id') == 0), data_list[0])
+                for k, v in base.items():
+                    if k not in ('timestamp', 'datetime', 'session_id', 'worker_id',
+                                 'iteration', 'phase'):
+                        stats[k] = v
+
         elif metric_type == 'evaluation':
             # Aggregate evaluation results
             if data_list:
@@ -564,15 +619,17 @@ Last updated: {datetime}
             training_data = self._collect_worker_data('training', iteration, num_workers, session_id)
             timing_data = self._collect_worker_data('timing', iteration, num_workers, session_id)
             evaluation_data = self._collect_worker_data('evaluation', iteration, num_workers, session_id)
+            curriculum_data = self._collect_worker_data('curriculum', iteration, num_workers, session_id)
             
             # Calculate aggregated stats
             gen_stats = self._calculate_stats(generation_data, 'generation')
             train_stats = self._calculate_stats(training_data, 'training')
             time_stats = self._calculate_stats(timing_data, 'timing')
             eval_stats = self._calculate_stats(evaluation_data, 'evaluation') if evaluation_data else {}
+            curr_stats = self._calculate_stats(curriculum_data, 'curriculum') if curriculum_data else {}
             
             # Create readable summary
-            summary = self._format_readable_summary(iteration, session_id, gen_stats, train_stats, time_stats, eval_stats, num_workers, generation_data, training_data, timing_data, evaluation_data)
+            summary = self._format_readable_summary(iteration, session_id, gen_stats, train_stats, time_stats, eval_stats, num_workers, generation_data, training_data, timing_data, evaluation_data, curr_stats)
             
             # Append to consolidated file
             self._append_to_consolidated_log(summary)
@@ -581,6 +638,8 @@ Last updated: {datetime}
             cleanup_types = ['generation', 'training', 'timing']
             if evaluation_data:
                 cleanup_types.append('evaluation')
+            if curriculum_data:
+                cleanup_types.append('curriculum')
             self._cleanup_worker_files(iteration, num_workers, cleanup_types)
             
             logger.info(f"Consolidated readable summary written for iteration {iteration}")
@@ -588,7 +647,7 @@ Last updated: {datetime}
         except Exception as e:
             logger.error(f"Failed to write consolidated readable summary for iteration {iteration}: {e}")
     
-    def _format_readable_summary(self, iteration: int, session_id: str, gen_stats: dict, train_stats: dict, time_stats: dict, eval_stats: dict, num_workers: int, generation_data: list, training_data: list, timing_data: list, evaluation_data: list = None):
+    def _format_readable_summary(self, iteration: int, session_id: str, gen_stats: dict, train_stats: dict, time_stats: dict, eval_stats: dict, num_workers: int, generation_data: list, training_data: list, timing_data: list, evaluation_data: list = None, curr_stats: dict = None):
         """Format the metrics into a human-readable text summary."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -612,7 +671,7 @@ WIN/LOSS DISTRIBUTION:
 MARBLE OUT DISTRIBUTION:
   • White Marbles Out: {self._format_marble_distribution(gen_stats.get('white_marble_counts', {}), gen_stats.get('white_marble_proportions', {}))}
   • Black Marbles Out: {self._format_marble_distribution(gen_stats.get('black_marble_counts', {}), gen_stats.get('black_marble_proportions', {}))}
-{self._format_curriculum_section(gen_stats)}
+{self._format_curriculum_section(curr_stats, gen_stats)}
 TRAINING METRICS:
   • Total Loss: {train_stats.get('avg_total_loss', 0):.4f} (±{train_stats.get('std_total_loss', 0):.4f})
   • Policy Loss: {train_stats.get('avg_policy_loss', 0):.4f} (±{train_stats.get('std_policy_loss', 0):.4f})
@@ -632,56 +691,89 @@ WORKER BREAKDOWN:
 """
         return summary
     
-    # Reference mesuree : le jeu UNIFORMEMENT ALEATOIRE ejecte 2.62 billes par
-    # partie sur 300 plis. Un agent entraine sous cette valeur n'apprend pas
-    # l'attaque, il apprend l'evitement -- c'est le mode d'echec qui a motive
-    # tout le curriculum. Sert de plancher d'alerte.
-    RANDOM_PLAY_EJECTIONS_PER_GAME = 2.62
+    def _format_curriculum_section(self, curr_stats, gen_stats=None):
+        """
+        Bloc CURRICULUM : etat du palier et decision REELLEMENT prise.
 
-    def _format_curriculum_section(self, gen_stats: dict):
-        """Bloc CURRICULUM : etat du palier et critere de montee."""
-        threshold = gen_stats.get('avg_win_threshold')
+        Les donnees viennent de la phase 'curriculum', ecrite par le trainer
+        APRES sa decision. L'ancienne version recalculait le critere ici a partir
+        des metriques de generation, avec ses propres constantes : elle affichait
+        "CRITERE DE MONTEE ATTEINT" des la premiere iteration ou les conditions
+        etaient vraies, sans tenir compte des 2 iterations consecutives exigees,
+        annoncait un seuil de decisives de 80% quand le code en utilise 60%, et
+        invitait a relancer a la main un curriculum devenu automatique.
+        """
+        curr_stats = curr_stats or {}
+        threshold = curr_stats.get('win_threshold')
         if threshold is None:
             return ""
         threshold = int(round(threshold))
+        new_threshold = int(round(curr_stats.get('new_win_threshold', threshold)))
 
-        decisive = gen_stats.get('avg_decisive_rate', 0)
-        length = gen_stats.get('avg_mean_decisive_length', 0)
-        projected = gen_stats.get('avg_projected_length_next_threshold', 0)
-        budget = gen_stats.get('avg_projection_budget', 0)
-        near = gen_stats.get('avg_near_win_rate', 0)
-        ejections = gen_stats.get('avg_total_ejections_per_game', 0)
+        decisive = curr_stats.get('decisive_rate', 0)
+        ejections = curr_stats.get('total_ejections_per_game', 0)
+        projected = curr_stats.get('projected_length_next_threshold', 0)
+        budget = curr_stats.get('projection_budget', 0)
+        min_dec = curr_stats.get('min_decisive_rate', 0.60)
+        consecutive = int(curr_stats.get('consecutive_ready', 0))
+        required = int(curr_stats.get('required_ready', 2))
+        cooldown = int(curr_stats.get('cooldown_left', 0))
+        target = int(round(curr_stats.get('curriculum_target', 6)))
+        baseline = curr_stats.get('random_play_baseline', 0)
+        raised = bool(curr_stats.get('raised', False))
+        rolled_back = bool(curr_stats.get('rolled_back', False))
+        criterion_met = bool(curr_stats.get('criterion_met', False))
 
-        cond1 = decisive >= 0.80
-        cond2 = 0 < projected <= budget
-        met = cond1 and cond2
+        near = (gen_stats or {}).get('avg_near_win_rate')
+        length = (gen_stats or {}).get('avg_mean_decisive_length')
 
-        if met:
-            verdict = ">>> CRITERE DE MONTEE ATTEINT -- relancer avec --win-threshold %d --reset-buffer" % (threshold + 1)
-        elif not cond1:
-            verdict = ">>> Pas encore : palier %d pas maitrise (decisives %.1f%% < 80%%)" % (threshold, decisive * 100)
+        if raised:
+            verdict = (">>> MONTEE APPLIQUEE : seuil %d -> %d\n"
+                       "      buffer vide, generation recompilee "
+                       "(prochaine iteration plus lente)" % (threshold, new_threshold))
+        elif rolled_back:
+            verdict = (">>> REDESCENTE APPLIQUEE : seuil %d -> %d (effondrement detecte)\n"
+                       "      buffer vide ; le retour a %d exigera %d iterations consecutives"
+                       % (threshold, new_threshold, threshold, required * 2))
+        elif threshold >= target:
+            verdict = (">>> Palier terminal %d atteint (regle reelle du jeu). Plus de montee ; "
+                       "des nulles ici sont legitimes." % target)
+        elif cooldown > 0:
+            verdict = ">>> Cooldown apres changement de palier : %d iteration(s) restante(s)" % cooldown
+        elif criterion_met:
+            verdict = (">>> Critere rempli cette iteration (%d/%d). Montee vers %d des qu'il "
+                       "tiendra %d iterations consecutives." % (consecutive, required,
+                                                                threshold + 1, required))
+        elif decisive < min_dec:
+            verdict = (">>> Pas encore : palier %d pas maitrise (decisives %.1f%% < %.0f%%). "
+                       "Compteur remis a 0." % (threshold, decisive * 100, min_dec * 100))
         else:
-            verdict = ">>> Pas encore : projection %.0f plis > budget %.0f" % (projected, budget)
+            verdict = (">>> Pas encore : projection %.0f plis > budget %.0f. Compteur remis a 0."
+                       % (projected, budget))
 
         alert = ""
-        if ejections and ejections < self.RANDOM_PLAY_EJECTIONS_PER_GAME:
-            alert = (
-                "\n  !! ALERTE PASSIVITE : %.2f ejection/partie, SOUS le jeu aleatoire (%.2f).\n"
-                "     L'agent evite le contact au lieu d'attaquer."
-                % (ejections, self.RANDOM_PLAY_EJECTIONS_PER_GAME))
+        if baseline and ejections and ejections < baseline:
+            alert = ("\n  !! ALERTE PASSIVITE : %.2f ejection/partie, SOUS le jeu aleatoire (%.2f)."
+                     "\n     L'agent evite le contact au lieu d'attaquer." % (ejections, baseline))
 
-        return """
-CURRICULUM:
-  • Seuil actuel: {th} billes (regle reelle: 6)
-  • Parties decisives: {dec:.1f}%  [critere: >= 80%]
-  • Longueur moyenne des decisives: {ln:.0f} plis
-  • Parties atteignant {near_th} billes: {near:.1f}%
-  • Ejections par partie: {ej:.2f}  (jeu aleatoire: {rnd:.2f})
-  • Projection a {nxt} billes: {proj:.0f} plis  [budget: <= {bud:.0f}]
-  {verdict}{alert}
-""".format(th=threshold, dec=decisive * 100, ln=length, near_th=threshold - 1,
-           near=near * 100, ej=ejections, rnd=self.RANDOM_PLAY_EJECTIONS_PER_GAME,
-           nxt=threshold + 1, proj=projected, bud=budget, verdict=verdict, alert=alert)
+        rows = ["", "CURRICULUM:",
+                "  * Seuil actuel: %d billes (cible finale: %d)" % (threshold, target),
+                "  * Parties decisives: %.1f%%  [critere: >= %.0f%%]" % (decisive * 100, min_dec * 100)]
+        if length:
+            rows.append("  * Longueur moyenne des decisives: %.0f plis" % length)
+        if near is not None:
+            rows.append("  * Parties atteignant %d billes: %.1f%%" % (threshold - 1, near * 100))
+        rows.append("  * Ejections par partie: %.2f  (jeu aleatoire: %.2f)" % (ejections, baseline))
+        # Au palier terminal il n'y a plus de palier suivant : projeter vers
+        # threshold+1 et afficher un compteur de montee n'aurait aucun sens.
+        if threshold < target:
+            rows.append("  * Projection a %d billes: %.0f plis  [budget: <= %.0f]"
+                        % (threshold + 1, projected, budget))
+            rows.append("  * Critere tenu: %d/%d iterations consecutives" % (consecutive, required))
+        rows.append("  " + verdict + alert)
+        rows.append("")
+        return "\n".join(rows)
+
 
     def _format_worker_breakdown(self, generation_data: list, training_data: list, timing_data: list):
         """Format per-worker metrics breakdown."""

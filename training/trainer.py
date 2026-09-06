@@ -632,12 +632,6 @@ class AbaloneTrainerSync:
                 if self.verbose:
                     logger.info(f"Generation: {games_per_iteration} games in {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} games/s)")
 
-                # Curriculum decision BEFORE the buffer update: a threshold
-                # change empties the buffer, and the games just generated were
-                # played under the OLD threshold, so they must not be written
-                # back into the freshly cleared buffer.
-                self._maybe_advance_curriculum(games_data)
-
                 # 2. Buffer update
                 logger.info(f"Process {self.process_id}: Waiting for post-generation synchronization")
                 jax.experimental.multihost_utils.sync_global_devices(f"post_generation_iter_{iteration}")
@@ -697,6 +691,23 @@ class AbaloneTrainerSync:
                         games_per_sec=games_per_iteration / t_gen if t_gen > 0 else 0,
                         steps_per_sec=training_steps_per_iteration / t_train if t_train > 0 else 0
                     )
+
+                # Curriculum decision, deliberately AFTER the buffer update and
+                # the training step.
+                #
+                # It used to run right after generation, which corrupted a whole
+                # iteration: _update_buffer reads self.env.win_threshold when it
+                # labels games, so raising the threshold first made it score games
+                # that had just been PLAYED under the old threshold with the new
+                # one. A game won 3-2 under win_threshold=3 stopped counting as a
+                # win (3 < 4) and was labelled truncated, 0.5*1/4 = 0.125 instead
+                # of +1.0. The value loss gave it away: 0.597 -> 0.039 in a single
+                # iteration while 95% of games were decisive.
+                #
+                # Running last means the games are labelled and trained on under
+                # the threshold they were actually played with, and only then is
+                # the buffer cleared for the next stage.
+                self._maybe_advance_curriculum(games_data)
 
                 # Synchronization after training
                 jax.experimental.multihost_utils.sync_global_devices(f"post_training_iter_{iteration}")
@@ -980,40 +991,18 @@ class AbaloneTrainerSync:
             black_win_rate = black_wins / total_finished_games if total_finished_games > 0 else 0
             draw_rate = draws / total_finished_games if total_finished_games > 0 else 0
             
-            # --- Criterion for raising the curriculum threshold ---------------
-            # Ejections accumulate at a roughly constant rate over a game (measured:
-            # ~0.45 per 50 plies across the whole game), so the time to reach N
-            # ejections is roughly linear in N. A decisive game of mean length L at
-            # threshold N therefore projects to L * (N+1)/N at threshold N+1.
-            # Raise when (a) the current threshold is mastered and (b) the projection
-            # leaves headroom under the move limit. 0.65 is the safety factor: it is
-            # the MEAN we project, and the distribution's tail still has to finish.
-            decisive_rate = (white_wins + black_wins) / total_finished_games if total_finished_games > 0 else 0
-            mean_decisive_length = (sum(decisive_lengths) / len(decisive_lengths)
-                                    if decisive_lengths else 0.0)
-            projected_next = (mean_decisive_length * (win_threshold + 1) / win_threshold
-                              if win_threshold > 0 else 0.0)
-            projection_budget = 0.65 * self.env.max_moves
-            ready_to_raise = bool(
-                decisive_rate >= 0.80
-                and mean_decisive_length > 0
-                and projected_next <= projection_budget
-            )
-
+            # La longueur des parties decisives et le taux de 'presque victoire'
+            # servent au suivi humain. Le CRITERE lui-meme vit dans
+            # _maybe_advance_curriculum : il travaille sur des compteurs reduits
+            # globalement (tous les hosts doivent decider a l'identique) et il
+            # est journalise separement, en phase 'curriculum', APRES la decision
+            # -- sinon le resume annoncerait une montee avant qu'elle ait eu lieu.
             self.metrics_logger.log_generation_metrics(
                 iteration=self.iteration,
-                win_threshold=win_threshold,
-                decisive_rate=decisive_rate,
-                mean_decisive_length=mean_decisive_length,
+                mean_decisive_length=(sum(decisive_lengths) / len(decisive_lengths)
+                                      if decisive_lengths else 0.0),
                 num_decisive_games=len(decisive_lengths),
                 near_win_rate=near_win_games / total_finished_games if total_finished_games > 0 else 0,
-                projected_length_next_threshold=projected_next,
-                projection_budget=projection_budget,
-                ready_to_raise=ready_to_raise,
-                total_ejections_per_game=(
-                    sum(k * v for k, v in white_marble_counts.items()) +
-                    sum(k * v for k, v in black_marble_counts.items())
-                ) / games_completed if games_completed > 0 else 0,
                 positions_generated=positions_generated,
                 games_generated=games_completed,
                 games_requested=local_total_games,
@@ -1037,10 +1026,21 @@ class AbaloneTrainerSync:
     # Curriculum: automatic win-threshold advancement
     # ------------------------------------------------------------------
 
-    # Reference measured on 128 uniformly random games: 2.62 marbles ejected per
-    # game over 300 plies. An agent BELOW this is not failing to attack, it is
-    # actively avoiding contact -- the collapse this curriculum exists to prevent.
-    RANDOM_PLAY_EJECTIONS_PER_GAME = 2.62
+    # Marbles ejected PER PLY under uniformly random play, measured on 128 games:
+    # 0.87 ejections at a 100-ply cap, 1.41 at 150, 1.88 at 200, 2.33 at 250, 2.78
+    # at 300 -- i.e. a flat ~0.0093 per ply, which matches the measured ejection
+    # profile (~0.45 per 50 plies from opening to move limit).
+    #
+    # Stored per ply and NOT as a per-game constant: the previous 2.62 was only
+    # valid at max_moves=300. At max_moves=200 the real baseline is 1.88, so a
+    # perfectly healthy agent at 2.2 ejections/game was being compared against
+    # 2.62 and counted as collapsed -- which feeds the rollback trigger.
+    RANDOM_PLAY_EJECTIONS_PER_PLY = 0.0093
+
+    @property
+    def random_play_ejections_per_game(self):
+        """Reference de jeu aleatoire, a la limite de coups courante."""
+        return self.RANDOM_PLAY_EJECTIONS_PER_PLY * self.env.max_moves
 
     def _collect_curriculum_counters(self, games_data):
         """
@@ -1155,11 +1155,11 @@ class AbaloneTrainerSync:
         projected_next = (threshold + 1) / rate if rate > 0 else float("inf")
         budget = self.CURRICULUM_PROJECTION_FACTOR * self.env.max_moves
 
-        cooldown_left = (self.curriculum_last_change_iteration
-                         + self.CURRICULUM_COOLDOWN - self.iteration)
+        cooldown_left = max(0, self.curriculum_last_change_iteration
+                            + self.CURRICULUM_COOLDOWN - self.iteration)
 
         # --- rollback: the raise triggered the passivity collapse -----------
-        collapsed = (ejections_per_game < self.RANDOM_PLAY_EJECTIONS_PER_GAME
+        collapsed = (ejections_per_game < self.random_play_ejections_per_game
                      and decisive_rate < 0.20)
         if collapsed and threshold > self.curriculum_min_threshold and cooldown_left <= 0:
             self.curriculum_consecutive_collapse += 1
@@ -1171,9 +1171,14 @@ class AbaloneTrainerSync:
                 self.curriculum_required_ready[threshold - 1] = prev * 2
                 self._set_win_threshold(
                     threshold - 1,
-                    "effondrement: %.2f ejection/partie < %.2f (aleatoire), decisives %.0f%%"
-                    % (ejections_per_game, self.RANDOM_PLAY_EJECTIONS_PER_GAME,
-                       decisive_rate * 100))
+                    "effondrement: %.2f ejection/partie < %.2f (aleatoire a %d plis), decisives %.0f%%"
+                    % (ejections_per_game, self.random_play_ejections_per_game,
+                       self.env.max_moves, decisive_rate * 100))
+                self._log_curriculum(threshold, decisive_rate, ejections_per_game,
+                                     projected_next, budget, False,
+                                     self.CURRICULUM_SUSTAIN, 0,
+                                     rolled_back=True,
+                                     new_threshold=self.env.win_threshold)
                 return
         else:
             self.curriculum_consecutive_collapse = 0
@@ -1187,6 +1192,9 @@ class AbaloneTrainerSync:
                     "montee. Decisives %.0f%%, ejections/partie %.2f -- des nulles "
                     "ici sont legitimes entre deux joueurs forts.",
                     threshold, decisive_rate * 100, ejections_per_game)
+            self._log_curriculum(threshold, decisive_rate, ejections_per_game,
+                                 projected_next, budget, False,
+                                 self.CURRICULUM_SUSTAIN, cooldown_left)
             return
 
         ready = (decisive_rate >= self.CURRICULUM_MIN_DECISIVE_RATE
@@ -1197,12 +1205,12 @@ class AbaloneTrainerSync:
             self.curriculum_consecutive_ready = 0
 
         required = self.curriculum_required_ready.get(threshold, self.CURRICULUM_SUSTAIN)
-        if self.curriculum_consecutive_ready >= required:
+        raised = self.curriculum_consecutive_ready >= required
+        if raised:
             self._set_win_threshold(
                 threshold + 1,
                 "critere tenu %d/%d iterations: decisives %.0f%%, projection %.0f plis <= %.0f"
-                % (self.curriculum_consecutive_ready, required,
-                   decisive_rate * 100, projected_next, budget))
+                % (required, required, decisive_rate * 100, projected_next, budget))
         elif self.verbose:
             logger.info(
                 "Curriculum: seuil %d | decisives %.0f%% (min %.0f%%) | projection a "
@@ -1212,6 +1220,42 @@ class AbaloneTrainerSync:
                 threshold + 1, projected_next, budget, ejections_per_game,
                 self.curriculum_consecutive_ready, required,
                 (" (cooldown %d)" % cooldown_left) if cooldown_left > 0 else "")
+
+        self._log_curriculum(threshold, decisive_rate, ejections_per_game,
+                             projected_next, budget, ready, required, cooldown_left,
+                             raised=raised, new_threshold=self.env.win_threshold)
+
+    def _log_curriculum(self, threshold, decisive_rate, ejections_per_game,
+                        projected_next, budget, ready, required, cooldown_left,
+                        raised=False, new_threshold=None, rolled_back=False):
+        """
+        Journalise l'etat du curriculum APRES la decision.
+
+        Emis en phase 'curriculum' et non avec les metriques de generation : la
+        decision se prend en fin d'iteration, alors que les metriques de
+        generation sont ecrites juste apres le self-play. Les melanger faisait
+        annoncer au resume une montee qui n'avait pas encore eu lieu.
+        """
+        if not self.metrics_logger:
+            return
+        self.metrics_logger.log_curriculum_metrics(
+            iteration=self.iteration,
+            win_threshold=threshold,
+            new_win_threshold=new_threshold if new_threshold is not None else threshold,
+            decisive_rate=decisive_rate,
+            total_ejections_per_game=ejections_per_game,
+            projected_length_next_threshold=projected_next,
+            projection_budget=budget,
+            min_decisive_rate=self.CURRICULUM_MIN_DECISIVE_RATE,
+            criterion_met=bool(ready),
+            consecutive_ready=self.curriculum_consecutive_ready,
+            required_ready=required,
+            cooldown_left=cooldown_left,
+            raised=bool(raised),
+            rolled_back=bool(rolled_back),
+            curriculum_target=self.curriculum_target,
+            random_play_baseline=self.random_play_ejections_per_game,
+        )
 
     def _log_metrics_to_tensorboard(self, metrics_dict, prefix="training"):
         """
