@@ -63,7 +63,7 @@ class AbaloneTrainerSync:
             use_gcs_buffer=False,
             gcs_buffer_dir='buffer',
             eval_games=5,
-            max_num_considered_actions=16,
+            max_num_considered_actions=64,
             eval_simulations=None,
             verbose=True,
             enable_comprehensive_logging=True,

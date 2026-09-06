@@ -22,7 +22,7 @@ class AbaloneState(NamedTuple):
 class AbaloneEnv:
     HISTORY_LENGTH_DEFAULT = 0
 
-    def __init__(self, radius: int = 4, max_moves: int = 150,
+    def __init__(self, radius: int = 4, max_moves: int = 200,
                  history_length: int = HISTORY_LENGTH_DEFAULT):
       """
       Args:

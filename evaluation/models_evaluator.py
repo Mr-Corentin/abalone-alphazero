@@ -145,7 +145,7 @@ class ModelsEvaluator:
     """Classe pour évaluer le modèle actuel contre des versions antérieures."""
 
     def __init__(self, network, radius=4, num_simulations=50, games_per_model=10,
-                 max_moves=150, max_num_considered_actions=16):
+                 max_moves=200, max_num_considered_actions=64):
         """
         Initialise l'évaluateur.
         

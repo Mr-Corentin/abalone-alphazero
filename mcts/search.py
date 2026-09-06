@@ -212,7 +212,7 @@ def generate_game_mcts_batch(rng_key, params, network, env, batch_size,
     }
 
 
-def create_optimized_game_generator(num_simulations: int, max_num_considered_actions: int = 16):
+def create_optimized_game_generator(num_simulations: int, max_num_considered_actions: int = 64):
     """
     Create the pmapped self-play generator.
 

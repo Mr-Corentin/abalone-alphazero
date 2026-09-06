@@ -17,7 +17,7 @@ def get_best_move(state: AbaloneState,
                  env: AbaloneEnv,
                  num_simulations: int,
                  rng_key=None,
-                 max_num_considered_actions: int = 16,
+                 max_num_considered_actions: int = 64,
                  iteration: int = 0):
     """
     Obtient le meilleur coup à jouer dans un état donné selon MCTS+réseau.
@@ -64,7 +64,7 @@ def get_move_probabilities(state: AbaloneState,
                           env: AbaloneEnv,
                           num_simulations: int,
                           temperature: float = 1.0,
-                          max_num_considered_actions: int = 16,
+                          max_num_considered_actions: int = 64,
                           iteration: int = 0):
     """
     Return move probabilities according to MCTS+network.
@@ -131,7 +131,7 @@ def sample_move(state: AbaloneState,
                 rng_key=None,
                 num_simulations: int = None,
                 temperature: float = 1.0,
-                max_num_considered_actions: int = 16,
+                max_num_considered_actions: int = 64,
                 iteration: int = 0):
     """
     Sample move according to MCTS probability distribution.

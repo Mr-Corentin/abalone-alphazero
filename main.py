@@ -104,10 +104,16 @@ def parse_args():
     # MCTS options  
     parser.add_argument('--num-simulations', type=int, default=None,
                        help='Number of MCTS simulations per action')
+    parser.add_argument('--max-considered-actions', type=int, default=None,
+                       help='Root actions sampled by Gumbel MuZero (default 64). '
+                            'Actions outside this set are unplayable at the root, '
+                            'so it must stay comparable to the branching factor '
+                            '(~66 legal moves in Abalone). Costs no extra compute: '
+                            'Sequential Halving splits the same --num-simulations.')
 
     # Game options
     parser.add_argument('--max-moves', type=int, default=None,
-                       help='Move limit before a game is truncated (default 150)')
+                       help='Move limit before a game is truncated (default 200)')
     parser.add_argument('--history-length', type=int, default=None,
                        help='Past positions fed to the network (0 = disabled)')
 
@@ -157,6 +163,9 @@ def get_merged_config(args):
     if args.num_simulations:
         config['mcts']['num_simulations'] = args.num_simulations
 
+    if args.max_considered_actions:
+        config['mcts']['max_num_considered_actions'] = args.max_considered_actions
+
     if args.max_moves is not None:
         config.setdefault('game', {})['max_moves'] = args.max_moves
 
@@ -200,9 +209,10 @@ def display_config_summary(config):
     main_process_log(f"Buffer: {config['buffer']['size']} positions")
     main_process_log(f"Training: {config['training']['num_iterations']} iterations, {config['training']['games_per_iteration']} games/iter")
     main_process_log(f"Batch: {config['training']['batch_size']}, {config['training']['training_steps_per_iteration']} steps/iter")
-    main_process_log(f"MCTS: {config['mcts']['num_simulations']} simulations per action")
+    main_process_log(f"MCTS: {config['mcts']['num_simulations']} simulations per action, "
+                     f"{config['mcts'].get('max_num_considered_actions', 64)} root actions considered")
     game_cfg = config.get('game', {})
-    main_process_log(f"Game: move limit {game_cfg.get('max_moves', 150)}, "
+    main_process_log(f"Game: move limit {game_cfg.get('max_moves', 200)}, "
                      f"history length {game_cfg.get('history_length', 0)}")
     main_process_log(f"Checkpoints: {config['checkpoint']['path']}")
     
@@ -259,7 +269,7 @@ def create_trainer(config, args):
     # Create the environment
     game_cfg = config.get('game', {})
     env = AbaloneEnv(
-        max_moves=game_cfg.get('max_moves', 150),
+        max_moves=game_cfg.get('max_moves', 200),
         history_length=game_cfg.get('history_length', 0),
     )
 
@@ -275,7 +285,7 @@ def create_trainer(config, args):
         batch_size=config['training']['batch_size'],
         value_weight=config['training']['value_weight'],
         num_simulations=config['mcts']['num_simulations'],
-        max_num_considered_actions=config['mcts'].get('max_num_considered_actions', 16),
+        max_num_considered_actions=config['mcts'].get('max_num_considered_actions', 64),
         eval_simulations=config['mcts'].get('eval_simulations'),
         recency_bias=config['buffer'].get('recency_bias', True),
         recency_temperature=config['buffer'].get('recency_temperature', 0.8),

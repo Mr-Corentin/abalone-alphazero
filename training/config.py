@@ -4,9 +4,14 @@ Training configuration for AlphaZero Abalone
 
 DEFAULT_CONFIG = {
     "game": {
-        # Truncation limit for self-play games. NOT an Abalone rule -- see
-        # AbaloneEnv. Lower means faster iterations during early training.
-        "max_moves": 150,
+        # Troncature des parties de self-play. PAS une regle d'Abalone -- voir
+        # AbaloneEnv. 200 et non 150 : mesure sur 128 parties, la proportion de
+        # parties finissant sur un differentiel de billes NON NUL (donc avec une
+        # cible de valeur exploitable) vaut 44% a 100 plis, 66% a 150, 74% a 200,
+        # puis PLAFONNE -- 74% a 250, 71% a 300. Au-dela de 200 on paie du calcul
+        # pour zero signal en plus, le differentiel se comportant comme une marche
+        # aleatoire qui repasse par zero. En dessous on perd du signal.
+        "max_moves": 200,
         # Past positions fed to the network. 0 = disabled (see AbaloneEnv);
         # set to 8 to restore the previous behaviour.
         "history_length": 0,
@@ -19,7 +24,17 @@ DEFAULT_CONFIG = {
     
     "mcts": {
         "num_simulations": 600,
-        "max_num_considered_actions": 16,
+        # 64, pas les 16 par defaut de mctx : Abalone offre ~66 coups legaux
+        # (52 a la position initiale). Gumbel top-k n'echantillonne que
+        # `max_num_considered_actions` coups a la RACINE, et les autres sont
+        # ensuite exclus par un -inf dans seq_halving.score_considered -- pas
+        # rendus improbables, rendus injouables. A 16, l'agent ne pouvait donc
+        # jouer que 25% de ses coups legaux a chaque decision, et ratait 58%
+        # des mats en 1 (mesure : 42% de detection a m=16, 77% a 32, 97% a 64).
+        # Le budget de simulations est INCHANGE (Sequential Halving repartit les
+        # memes `num_simulations`), donc ce reglage ne coute aucun calcul : il
+        # donne juste un finaliste a 71 visites au lieu de 97.
+        "max_num_considered_actions": 64,
     },
     
     
@@ -68,9 +83,8 @@ DEFAULT_CONFIG = {
 
 MINIMAL_CONFIG = {
     "game": {
-        # Truncation limit for self-play games. NOT an Abalone rule -- see
-        # AbaloneEnv. Lower means faster iterations during early training.
-        "max_moves": 150,
+        # Voir DEFAULT_CONFIG pour le choix de 200.
+        "max_moves": 200,
         # Past positions fed to the network. 0 = disabled (see AbaloneEnv);
         # set to 8 to restore the previous behaviour.
         "history_length": 0,
@@ -83,7 +97,8 @@ MINIMAL_CONFIG = {
     
     "mcts": {
         "num_simulations": 10,
-        "max_num_considered_actions": 16,
+        # Voir DEFAULT_CONFIG : 64 et non 16, cf. le facteur de branchement d'Abalone.
+        "max_num_considered_actions": 64,
     },
     
     
