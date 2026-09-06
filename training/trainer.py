@@ -41,6 +41,23 @@ class AbaloneTrainerSync:
     Supports multi-process and multi-host TPU/GPU environments.
     """
 
+    # --- Curriculum tuning ------------------------------------------------
+    # Consecutive iterations the raise criterion must hold. Self-play metrics are
+    # noisy over ~1000 games; one good iteration is not evidence.
+    CURRICULUM_SUSTAIN = 2
+    # Iterations to wait after any threshold change before considering another:
+    # the buffer has just been emptied and needs to refill before its metrics
+    # mean anything.
+    CURRICULUM_COOLDOWN = 3
+    # Fraction of max_moves the projected next-stage game length must fit under.
+    CURRICULUM_PROJECTION_FACTOR = 0.65
+    # Minimum share of decisive games before a raise is considered. Kept well
+    # below 1.0 on purpose: once the network is strong, genuine draws appear and
+    # a stricter bar would deadlock the curriculum.
+    CURRICULUM_MIN_DECISIVE_RATE = 0.60
+    # Consecutive collapsed iterations before rolling the threshold back.
+    CURRICULUM_COLLAPSE_PATIENCE = 3
+
     def __init__(self,
             network,
             env,
@@ -70,7 +87,9 @@ class AbaloneTrainerSync:
             metrics_logging_interval=30,
             vertex_tensorboard_id=None,
             gcp_project=None,
-            gcp_location='europe-west4'):
+            gcp_location='europe-west4',
+            curriculum_enabled=True,
+            curriculum_target=6):
 
         """
         Initialize training coordinator with step-by-step synchronized approach.
@@ -109,6 +128,13 @@ class AbaloneTrainerSync:
             gcp_project: Project for the Vertex AI TensorBoard instance
                 (defaults to the ambient ADC project when None)
             gcp_location: Region of the Vertex AI TensorBoard instance
+            curriculum_enabled: If True, the trainer raises env.win_threshold on
+                its own as the agent learns to convert, up to curriculum_target.
+                Set False to pin the threshold at its starting value.
+            curriculum_target: Threshold to stop at. 6 is the real rule of
+                Abalone -- the curriculum exists only to get there, never to
+                replace it. Once reached, no further change is made and draws
+                become a legitimate outcome between two strong players.
         """
         # Device configuration
         self.global_devices = jax.devices()
@@ -213,6 +239,21 @@ class AbaloneTrainerSync:
         sample_marbles = jnp.zeros((1, 2), dtype=jnp.int8)
         sample_history = jnp.zeros((1, env.history_length, 9, 9), dtype=jnp.int8)
         self.params = network.init(rng, sample_board, sample_marbles, sample_history)
+
+        # Curriculum state.
+        # CURRICULUM_PROJECTION_FACTOR: we project the MEAN game length, but the
+        # tail of the distribution still has to finish inside the move limit, so
+        # the projection must land well under it. 0.65 lands the next threshold
+        # around the decisive rate we require here, making the criterion
+        # self-consistent from one stage to the next.
+        self.curriculum_enabled = curriculum_enabled
+        self.curriculum_target = curriculum_target
+        self.curriculum_min_threshold = env.win_threshold
+        self.curriculum_consecutive_ready = 0
+        self.curriculum_consecutive_collapse = 0
+        self.curriculum_last_change_iteration = -10 ** 9
+        self.curriculum_required_ready = {}
+        self._evaluator = None
 
         # Statistics
         self.iteration = 0
@@ -591,6 +632,12 @@ class AbaloneTrainerSync:
                 if self.verbose:
                     logger.info(f"Generation: {games_per_iteration} games in {t_gen:.2f}s ({games_per_iteration/t_gen:.1f} games/s)")
 
+                # Curriculum decision BEFORE the buffer update: a threshold
+                # change empties the buffer, and the games just generated were
+                # played under the OLD threshold, so they must not be written
+                # back into the freshly cleared buffer.
+                self._maybe_advance_curriculum(games_data)
+
                 # 2. Buffer update
                 logger.info(f"Process {self.process_id}: Waiting for post-generation synchronization")
                 jax.experimental.multihost_utils.sync_global_devices(f"post_generation_iter_{iteration}")
@@ -869,12 +916,20 @@ class AbaloneTrainerSync:
             total_game_lengths = 0
             games_completed = 0
             
-            white_marble_counts = {i: 0 for i in range(7)}  # 0-6 marbles out
-            black_marble_counts = {i: 0 for i in range(7)}  # 0-6 marbles out
+            win_threshold = self.env.win_threshold
+            white_marble_counts = {i: 0 for i in range(win_threshold + 1)}
+            black_marble_counts = {i: 0 for i in range(win_threshold + 1)}
             
             white_wins = 0
             black_wins = 0
             draws = 0
+            # Longueur des parties DECISIVES uniquement. `mean_plays_per_game`
+            # melange decisives et tronquees, donc sature vers max_moves et ne
+            # peut pas servir a projeter le cout du palier suivant.
+            decisive_lengths = []
+            # Parties ou un camp a atteint win_threshold - 1 : l'agent arrive au
+            # bord de la victoire, indicateur avance de la montee de palier.
+            near_win_games = 0
             
             for device_idx in range(self.num_devices):
                 device_data = jax.tree_util.tree_map(lambda x: x[device_idx], games_data)
@@ -891,17 +946,22 @@ class AbaloneTrainerSync:
                         final_white_out = int(device_data['final_white_out'][game_idx])
                         final_black_out = int(device_data['final_black_out'][game_idx])
                         
-                        # Ensure counts are within valid range (0-6)
-                        final_white_out = min(max(final_white_out, 0), 6)
-                        final_black_out = min(max(final_black_out, 0), 6)
+                        # Ensure counts are within valid range
+                        final_white_out = min(max(final_white_out, 0), win_threshold)
+                        final_black_out = min(max(final_black_out, 0), win_threshold)
                         
                         # Count actual winners
-                        if final_black_out >= 6:
-                            white_wins += 1  # White won (pushed out 6 black marbles)
-                        elif final_white_out >= 6:
-                            black_wins += 1  # Black won (pushed out 6 white marbles)
+                        if final_black_out >= win_threshold:
+                            white_wins += 1  # White pushed out enough black marbles
+                            decisive_lengths.append(game_length)
+                        elif final_white_out >= win_threshold:
+                            black_wins += 1  # Black pushed out enough white marbles
+                            decisive_lengths.append(game_length)
                         else:
-                            draws += 1  # Draw or max moves reached
+                            draws += 1  # Truncated at the move limit
+                        
+                        if max(final_white_out, final_black_out) >= win_threshold - 1:
+                            near_win_games += 1
                         
                         white_marble_counts[final_white_out] += 1
                         black_marble_counts[final_black_out] += 1
@@ -920,8 +980,40 @@ class AbaloneTrainerSync:
             black_win_rate = black_wins / total_finished_games if total_finished_games > 0 else 0
             draw_rate = draws / total_finished_games if total_finished_games > 0 else 0
             
+            # --- Criterion for raising the curriculum threshold ---------------
+            # Ejections accumulate at a roughly constant rate over a game (measured:
+            # ~0.45 per 50 plies across the whole game), so the time to reach N
+            # ejections is roughly linear in N. A decisive game of mean length L at
+            # threshold N therefore projects to L * (N+1)/N at threshold N+1.
+            # Raise when (a) the current threshold is mastered and (b) the projection
+            # leaves headroom under the move limit. 0.65 is the safety factor: it is
+            # the MEAN we project, and the distribution's tail still has to finish.
+            decisive_rate = (white_wins + black_wins) / total_finished_games if total_finished_games > 0 else 0
+            mean_decisive_length = (sum(decisive_lengths) / len(decisive_lengths)
+                                    if decisive_lengths else 0.0)
+            projected_next = (mean_decisive_length * (win_threshold + 1) / win_threshold
+                              if win_threshold > 0 else 0.0)
+            projection_budget = 0.65 * self.env.max_moves
+            ready_to_raise = bool(
+                decisive_rate >= 0.80
+                and mean_decisive_length > 0
+                and projected_next <= projection_budget
+            )
+
             self.metrics_logger.log_generation_metrics(
                 iteration=self.iteration,
+                win_threshold=win_threshold,
+                decisive_rate=decisive_rate,
+                mean_decisive_length=mean_decisive_length,
+                num_decisive_games=len(decisive_lengths),
+                near_win_rate=near_win_games / total_finished_games if total_finished_games > 0 else 0,
+                projected_length_next_threshold=projected_next,
+                projection_budget=projection_budget,
+                ready_to_raise=ready_to_raise,
+                total_ejections_per_game=(
+                    sum(k * v for k, v in white_marble_counts.items()) +
+                    sum(k * v for k, v in black_marble_counts.items())
+                ) / games_completed if games_completed > 0 else 0,
                 positions_generated=positions_generated,
                 games_generated=games_completed,
                 games_requested=local_total_games,
@@ -941,6 +1033,186 @@ class AbaloneTrainerSync:
             )
 
         return games_data
+    # ------------------------------------------------------------------
+    # Curriculum: automatic win-threshold advancement
+    # ------------------------------------------------------------------
+
+    # Reference measured on 128 uniformly random games: 2.62 marbles ejected per
+    # game over 300 plies. An agent BELOW this is not failing to attack, it is
+    # actively avoiding contact -- the collapse this curriculum exists to prevent.
+    RANDOM_PLAY_EJECTIONS_PER_GAME = 2.62
+
+    def _collect_curriculum_counters(self, games_data):
+        """
+        Raw per-host tallies for the curriculum decision.
+
+        Deliberately independent of self.metrics_logger: the curriculum must keep
+        working when comprehensive logging is disabled.
+        """
+        threshold = self.env.win_threshold
+        n_games = 0
+        n_decisive = 0
+        sum_rate = 0.0        # sum over games of leader_marbles_out / game_length
+        sum_ejections = 0.0
+
+        for device_idx in range(self.num_devices):
+            d = jax.tree_util.tree_map(lambda x: x[device_idx], games_data)
+            for game_idx in range(len(d["moves_per_game"])):
+                length = int(d["moves_per_game"][game_idx])
+                if length <= 0:
+                    continue
+                wo = min(max(int(d["final_white_out"][game_idx]), 0), threshold)
+                bo = min(max(int(d["final_black_out"][game_idx]), 0), threshold)
+                n_games += 1
+                if wo >= threshold or bo >= threshold:
+                    n_decisive += 1
+                sum_rate += max(wo, bo) / length
+                sum_ejections += wo + bo
+
+        return np.array([n_games, n_decisive, sum_rate, sum_ejections], dtype=np.float64)
+
+    def _globalise_counters(self, local_counters):
+        """
+        Sum the tallies across every host so all processes decide identically.
+
+        A per-host decision would let workers drift onto different thresholds,
+        which silently corrupts the run: each host would then generate games
+        under its own rules while still sharing gradients.
+        """
+        if self.num_processes == 1:
+            return local_counters
+        replicated = jnp.repeat(jnp.asarray(local_counters, dtype=jnp.float32)[None, :],
+                                self.num_devices, axis=0)
+        summed = jax.device_get(self.sum_across_devices(replicated))[0]
+        # psum counted each host once per LOCAL device -> divide it back out.
+        return np.asarray(summed, dtype=np.float64) / self.num_devices
+
+    def _set_win_threshold(self, new_threshold, reason):
+        """
+        Change the curriculum threshold at runtime.
+
+        Rebuilds AbaloneEnv rather than mutating it. `env` is a
+        static_broadcasted argument of generate_games_pmap, and AbaloneEnv
+        defines no __hash__/__eq__, so JAX keys its compilation cache on the
+        object IDENTITY. Mutating self.env.win_threshold in place would leave
+        that hash unchanged and silently reuse the function compiled for the OLD
+        threshold: self-play would keep ending games at the old value while every
+        metric reported the new one. A fresh instance forces the recompile.
+        """
+        old = self.env.win_threshold
+        self.env = AbaloneEnv(radius=self.env.radius,
+                              max_moves=self.env.max_moves,
+                              history_length=self.env.history_length,
+                              win_threshold=new_threshold)
+        # The cached evaluator holds its own AbaloneEnv built on the old threshold.
+        self._evaluator = None
+        # Every stored value target was computed under the old threshold: a game
+        # won at 3 is +1 under win_threshold=3 but only +0.25 under 4.
+        # The tag gives the GCS buffer a per-stage directory; the local buffer
+        # ignores it. It is derived from the threshold alone, so every host
+        # computes the same name and a rollback lands back on the old directory.
+        self.buffer.clear(tag="wt%d" % new_threshold)
+
+        self.curriculum_last_change_iteration = self.iteration
+        self.curriculum_consecutive_ready = 0
+        self.curriculum_consecutive_collapse = 0
+
+        bar = "=" * 70
+        logger.warning(
+            "%s\nCURRICULUM: win_threshold %d -> %d a l'iteration %d (%s)\n"
+            "  - buffer vide (les cibles de valeur changent de sens)\n"
+            "  - evaluateur reconstruit\n"
+            "  - la generation va se RECOMPILER (une iteration lente attendue)\n%s",
+            bar, old, new_threshold, self.iteration, reason, bar)
+
+    def _maybe_advance_curriculum(self, games_data):
+        """
+        Decide whether to raise -- or roll back -- the win threshold.
+
+        Ejections accumulate at a roughly constant rate over a game (measured:
+        ~0.45 per 50 plies, flat from opening to move limit), so the time to
+        reach N ejections is roughly linear in N. Letting r be the leading
+        side's ejections per ply, reaching N+1 takes about (N+1)/r plies, and we
+        raise only when that fits inside the move limit with headroom.
+
+        r is estimated over ALL games, decisive or not, and that is deliberate.
+        A criterion resting on the decisive rate alone would deadlock once the
+        network is strong enough for genuine draws to appear: two equally strong
+        players can legitimately fail to reach the threshold without the agent
+        being passive at all. The rate keeps measuring progress in that regime.
+        """
+        if not self.curriculum_enabled:
+            return
+        threshold = self.env.win_threshold
+        counters = self._globalise_counters(self._collect_curriculum_counters(games_data))
+        n_games, n_decisive, sum_rate, sum_ejections = counters
+        if n_games <= 0:
+            return
+
+        decisive_rate = n_decisive / n_games
+        rate = sum_rate / n_games                      # ejections per ply, leading side
+        ejections_per_game = sum_ejections / n_games
+        projected_next = (threshold + 1) / rate if rate > 0 else float("inf")
+        budget = self.CURRICULUM_PROJECTION_FACTOR * self.env.max_moves
+
+        cooldown_left = (self.curriculum_last_change_iteration
+                         + self.CURRICULUM_COOLDOWN - self.iteration)
+
+        # --- rollback: the raise triggered the passivity collapse -----------
+        collapsed = (ejections_per_game < self.RANDOM_PLAY_EJECTIONS_PER_GAME
+                     and decisive_rate < 0.20)
+        if collapsed and threshold > self.curriculum_min_threshold and cooldown_left <= 0:
+            self.curriculum_consecutive_collapse += 1
+            if self.curriculum_consecutive_collapse >= self.CURRICULUM_COLLAPSE_PATIENCE:
+                # Make the transition that just failed harder to re-attempt, so
+                # the threshold cannot ping-pong every few iterations.
+                prev = self.curriculum_required_ready.get(threshold - 1,
+                                                          self.CURRICULUM_SUSTAIN)
+                self.curriculum_required_ready[threshold - 1] = prev * 2
+                self._set_win_threshold(
+                    threshold - 1,
+                    "effondrement: %.2f ejection/partie < %.2f (aleatoire), decisives %.0f%%"
+                    % (ejections_per_game, self.RANDOM_PLAY_EJECTIONS_PER_GAME,
+                       decisive_rate * 100))
+                return
+        else:
+            self.curriculum_consecutive_collapse = 0
+
+        # --- terminus: 6 is the real game, we never go past it ---------------
+        if threshold >= self.curriculum_target:
+            self.curriculum_consecutive_ready = 0
+            if self.verbose:
+                logger.info(
+                    "Curriculum: seuil %d atteint (regle reelle du jeu), plus de "
+                    "montee. Decisives %.0f%%, ejections/partie %.2f -- des nulles "
+                    "ici sont legitimes entre deux joueurs forts.",
+                    threshold, decisive_rate * 100, ejections_per_game)
+            return
+
+        ready = (decisive_rate >= self.CURRICULUM_MIN_DECISIVE_RATE
+                 and projected_next <= budget)
+        if ready and cooldown_left <= 0:
+            self.curriculum_consecutive_ready += 1
+        elif not ready:
+            self.curriculum_consecutive_ready = 0
+
+        required = self.curriculum_required_ready.get(threshold, self.CURRICULUM_SUSTAIN)
+        if self.curriculum_consecutive_ready >= required:
+            self._set_win_threshold(
+                threshold + 1,
+                "critere tenu %d/%d iterations: decisives %.0f%%, projection %.0f plis <= %.0f"
+                % (self.curriculum_consecutive_ready, required,
+                   decisive_rate * 100, projected_next, budget))
+        elif self.verbose:
+            logger.info(
+                "Curriculum: seuil %d | decisives %.0f%% (min %.0f%%) | projection a "
+                "%d billes %.0f plis (budget %.0f) | ejections/partie %.2f | "
+                "critere %d/%d%s",
+                threshold, decisive_rate * 100, self.CURRICULUM_MIN_DECISIVE_RATE * 100,
+                threshold + 1, projected_next, budget, ejections_per_game,
+                self.curriculum_consecutive_ready, required,
+                (" (cooldown %d)" % cooldown_left) if cooldown_left > 0 else "")
+
     def _log_metrics_to_tensorboard(self, metrics_dict, prefix="training"):
         """
         Centralise l'écriture des métriques dans TensorBoard
@@ -1009,20 +1281,26 @@ class AbaloneTrainerSync:
                 # Instead we score a truncated game by the marble differential,
                 # which is what most Abalone tournament rules use as a tie-break.
                 # The 0.5 factor keeps a truncated game strictly between a loss and
-                # a win: a game reaching the cap has at most 5 marbles out, so the
-                # target lands in [-0.42, +0.42]. As the agent starts winning for
-                # real, truncated games become rare and this term fades out.
+                # a win: a truncated game has at most win_threshold-1 marbles out,
+                # so the target stays inside +/-0.5 and a real win is always worth
+                # strictly more. As the agent starts winning for real, truncated
+                # games become rare and this term fades out.
+                #
+                # The denominator follows win_threshold rather than a hard-coded 6:
+                # at threshold 3, being 2 marbles up is nearly decisive and must not
+                # be scored the same as being 2 up out of 6.
                 #
                 # NOTE: this shapes only the TRAINING TARGET of truncated games.
                 # Search rewards stay strictly terminal -- unlike the intermediate
                 # rewards that were removed from mcts/core.py.
-                if final_black_out >= 6:
+                win_threshold = self.env.win_threshold
+                if final_black_out >= win_threshold:
                     outcome = -1.0  # White wins
-                elif final_white_out >= 6:
+                elif final_white_out >= win_threshold:
                     outcome = 1.0   # Black wins
                 else:
                     marble_diff = float(final_white_out) - float(final_black_out)
-                    outcome = float(np.clip(0.5 * marble_diff / 6.0, -1.0, 1.0))
+                    outcome = float(np.clip(0.5 * marble_diff / win_threshold, -1.0, 1.0))
                 
                 if using_gcs_buffer:
                     game_id = self.buffer.start_new_game()
@@ -1251,6 +1529,17 @@ class AbaloneTrainerSync:
             'opt_state': self.opt_state,
             'iteration': self.iteration,
             'current_lr': self.current_lr,
+            # Memorise pour detecter un changement de palier au resume : les
+            # etiquettes du buffer sont calculees SOUS ce seuil et deviennent
+            # fausses s'il change (voir l'avertissement dans load_checkpoint).
+            'win_threshold': self.env.win_threshold,
+            'curriculum_state': {
+                'consecutive_ready': self.curriculum_consecutive_ready,
+                'consecutive_collapse': self.curriculum_consecutive_collapse,
+                'last_change_iteration': self.curriculum_last_change_iteration,
+                'required_ready': dict(self.curriculum_required_ready),
+                'min_threshold': self.curriculum_min_threshold,
+            },
             'metrics': self.metrics_history,
             'total_games': self.total_games,
             'total_positions': self.total_positions,
@@ -1344,10 +1633,45 @@ class AbaloneTrainerSync:
         self.metrics_history = checkpoint['metrics']
         self.total_games = checkpoint['total_games']
         self.total_positions = checkpoint['total_positions']
-        
+
+        # Changement de palier au resume : tout ce que le buffer contient a ete
+        # etiquete sous l'ANCIEN seuil (une partie gagnee a 3 billes vaut +1 sous
+        # win_threshold=3 et seulement +0.25 sous 4). Avec le recency bias actuel
+        # (densite ~ e^0.8x), 61% du premier batch post-changement vient encore de
+        # l'ancien regime, et il faut 4 iterations pour purger. D'ou --reset-buffer.
+        saved_threshold = checkpoint.get('win_threshold')
+        if saved_threshold is not None and saved_threshold != self.env.win_threshold:
+            logger.warning(
+                f"Le checkpoint a ete entraine avec win_threshold={saved_threshold}, "
+                f"la session courante utilise {self.env.win_threshold}. "
+                f"Les etiquettes de valeur du buffer ont ete calculees sous "
+                f"l'ancien seuil : relancez avec --reset-buffer, sinon les "
+                f"premieres iterations s'entrainent sur des cibles fausses.")
+        self.previous_win_threshold = saved_threshold
+
+        # Reprendre le palier atteint : sans ca, un run repris redemarrerait au
+        # seuil de depart et referait tout le curriculum.
+        if saved_threshold is not None and saved_threshold != self.env.win_threshold:
+            self.env = AbaloneEnv(radius=self.env.radius,
+                                  max_moves=self.env.max_moves,
+                                  history_length=self.env.history_length,
+                                  win_threshold=saved_threshold)
+            self._evaluator = None
+            logger.info(f"Palier repris depuis le checkpoint: win_threshold={saved_threshold}")
+
+        cur = checkpoint.get('curriculum_state')
+        if cur:
+            self.curriculum_consecutive_ready = cur.get('consecutive_ready', 0)
+            self.curriculum_consecutive_collapse = cur.get('consecutive_collapse', 0)
+            self.curriculum_last_change_iteration = cur.get('last_change_iteration', -10 ** 9)
+            self.curriculum_required_ready = dict(cur.get('required_ready', {}))
+            self.curriculum_min_threshold = cur.get('min_threshold', self.env.win_threshold)
+
         if self.verbose:
             logger.info(f"Checkpoint loaded: {checkpoint_path}")
             logger.info(f"Iteration: {self.iteration}, Positions: {self.total_positions}")
+            if saved_threshold is not None:
+                logger.info(f"Palier du checkpoint: win_threshold={saved_threshold}")
 
 
     
@@ -1374,6 +1698,7 @@ class AbaloneTrainerSync:
                 num_simulations=self.eval_simulations,
                 max_moves=self.env.max_moves,
                 max_num_considered_actions=self.max_num_considered_actions,
+                win_threshold=self.env.win_threshold,
             )
         return self._evaluator
 

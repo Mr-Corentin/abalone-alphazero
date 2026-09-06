@@ -15,6 +15,20 @@ DEFAULT_CONFIG = {
         # Past positions fed to the network. 0 = disabled (see AbaloneEnv);
         # set to 8 to restore the previous behaviour.
         "history_length": 0,
+        # Billes a ejecter pour gagner. 6 est la vraie regle ; on demarre a 3.
+        # A 6 depuis zero, le self-play donnait ~96% de nuls, la cible de valeur
+        # s'effondrait vers 0 partout et l'agent apprenait l'evitement pur
+        # (0.82 ejection/partie contre 2.62 pour du jeu aleatoire). Un seuil bas
+        # fabrique de vrais resultats +/-1 pour amorcer le value head.
+        # Monter le palier a la main via --win-threshold, cf. le bloc CURRICULUM
+        # du resume d'iteration.
+        "win_threshold": 3,
+        # Palier terminal du curriculum : 6, la vraie regle. Le curriculum
+        # n'existe que pour y arriver, jamais pour la remplacer. Une fois 6
+        # atteint le seuil ne bouge plus, et les nulles y sont un resultat
+        # legitime entre deux joueurs forts.
+        "curriculum_target": 6,
+        "curriculum_enabled": True,
     },
 
     "model": {
@@ -88,6 +102,20 @@ MINIMAL_CONFIG = {
         # Past positions fed to the network. 0 = disabled (see AbaloneEnv);
         # set to 8 to restore the previous behaviour.
         "history_length": 0,
+        # Billes a ejecter pour gagner. 6 est la vraie regle ; on demarre a 3.
+        # A 6 depuis zero, le self-play donnait ~96% de nuls, la cible de valeur
+        # s'effondrait vers 0 partout et l'agent apprenait l'evitement pur
+        # (0.82 ejection/partie contre 2.62 pour du jeu aleatoire). Un seuil bas
+        # fabrique de vrais resultats +/-1 pour amorcer le value head.
+        # Monter le palier a la main via --win-threshold, cf. le bloc CURRICULUM
+        # du resume d'iteration.
+        "win_threshold": 3,
+        # Palier terminal du curriculum : 6, la vraie regle. Le curriculum
+        # n'existe que pour y arriver, jamais pour la remplacer. Une fois 6
+        # atteint le seuil ne bouge plus, et les nulles y sont un resultat
+        # legitime entre deux joueurs forts.
+        "curriculum_target": 6,
+        "curriculum_enabled": True,
     },
 
     "model": {
@@ -145,7 +173,7 @@ MINIMAL_CONFIG = {
 }
 
 CPU_CONFIG = {
-    "game": {"max_moves": 30, "history_length": 0},
+    "game": {"max_moves": 30, "history_length": 0, "win_threshold": 2},
 
     "model": {"num_filters": 32, "num_blocks": 3},
     "mcts": {"num_simulations": 5, "max_num_considered_actions": 8},

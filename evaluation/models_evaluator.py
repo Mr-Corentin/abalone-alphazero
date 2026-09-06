@@ -145,7 +145,7 @@ class ModelsEvaluator:
     """Classe pour évaluer le modèle actuel contre des versions antérieures."""
 
     def __init__(self, network, radius=4, num_simulations=50, games_per_model=10,
-                 max_moves=200, max_num_considered_actions=64):
+                 max_moves=200, max_num_considered_actions=64, win_threshold=None):
         """
         Initialise l'évaluateur.
         
@@ -163,7 +163,15 @@ class ModelsEvaluator:
 
         # Même limite de coups qu'à l'entraînement (auparavant 200 ici contre 300
         # à l'entraînement, ce qui faussait la comparaison des taux de nul).
-        self.env = AbaloneEnv(radius=radius, max_moves=max_moves)
+        # Idem pour win_threshold : évaluer à 6 un modèle entraîné à 3 mesurerait
+        # une compétence qu'on ne lui a jamais demandé d'acquérir, et renverrait
+        # 100 % de nuls.
+        from environment.env import WIN_THRESHOLD_DEFAULT
+        if win_threshold is None:
+            win_threshold = WIN_THRESHOLD_DEFAULT
+        self.win_threshold = win_threshold
+        self.env = AbaloneEnv(radius=radius, max_moves=max_moves,
+                              win_threshold=win_threshold)
         
         # Stocker les dispositifs locaux pour les opérations TPU
         self.devices = jax.local_devices()
@@ -190,6 +198,7 @@ class ModelsEvaluator:
         network = self.network
         num_simulations = self.num_simulations
         max_considered = self.max_num_considered_actions
+        win_threshold = self.win_threshold
 
         @partial(jax.pmap, axis_name='devices', static_broadcasted_argnums=(3,))
         def play_evaluation_games(rng_key, black_params, white_params, games_per_device):
@@ -239,8 +248,8 @@ class ModelsEvaluator:
                  jnp.int32(0)))
 
             outcomes = jnp.where(
-                final_states.black_out >= 6, jnp.int8(-1),      # les Blancs gagnent
-                jnp.where(final_states.white_out >= 6, jnp.int8(1),  # les Noirs gagnent
+                final_states.black_out >= win_threshold, jnp.int8(-1),      # les Blancs gagnent
+                jnp.where(final_states.white_out >= win_threshold, jnp.int8(1),  # les Noirs gagnent
                           jnp.int8(0))).astype(jnp.int8)
 
             return {'outcomes': outcomes, 'move_counts': move_counts}

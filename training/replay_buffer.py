@@ -71,6 +71,23 @@ class CPUReplayBuffer:
 
         self.current_game_id = 0  
 
+    def clear(self, tag=None):
+        """
+        Vide le buffer sans reallouer les tableaux.
+
+        Sert lors d'un changement de palier du curriculum : les etiquettes de
+        valeur deja stockees ont ete calculees sous l'ANCIEN win_threshold et
+        sont fausses sous le nouveau. On ne remet a zero que les compteurs --
+        les cases au-dela de `size` ne sont jamais echantillonnees.
+
+        `tag` n'a de sens que pour le buffer GCS (voir GCSReplayBufferSync.clear)
+        et est accepte ici pour que les deux buffers aient la meme interface.
+        """
+        del tag
+        self.size = 0
+        self.position = 0
+        self.current_game_id = 0
+
     def add(self, board, marbles_out, policy, outcome, player, history=None, game_id=None, move_num=0, 
             iteration=0, model_version=0):
         """Add individual transition to buffer"""
@@ -273,6 +290,9 @@ class GCSReplayBufferSync:
         """
         self.bucket_name = bucket_name
         self.buffer_dir = buffer_dir
+        # Racine immuable : clear() bascule buffer_dir sur un sous-repertoire par
+        # palier, et doit repartir de la racine et non s'imbriquer a chaque fois.
+        self.base_buffer_dir = buffer_dir
         self.max_local_size = max_local_size
         self.max_buffer_size = max_buffer_size
         self.buffer_cleanup_threshold = buffer_cleanup_threshold
@@ -334,6 +354,50 @@ class GCSReplayBufferSync:
         
         logger.info(f"GCSReplayBufferSync initialized - Max buffer size: {self.max_buffer_size} positions")
     
+    def clear(self, tag=None):
+        """
+        Repart d'un buffer vide lors d'un changement de palier du curriculum.
+
+        On ne SUPPRIME rien : les fichiers sont partages entre les hosts, et les
+        effacer depuis huit workers simultanement serait destructeur et sujet aux
+        courses. On BASCULE le repertoire de travail sur un sous-repertoire propre
+        au palier (`<racine>/<tag>`), puis on repart d'un index vide.
+
+        Effet : les nouvelles ecritures vont sous le nouveau prefixe, et
+        _update_gcs_index ne scanne plus que celui-la -- les anciens fichiers
+        deviennent donc invisibles a l'echantillonnage sans etre detruits. Chaque
+        host applique la meme bascule au meme moment (la decision du curriculum
+        est reduite globalement avant d'etre appliquee), donc pas de divergence.
+        Et si le curriculum redescend d'un palier, l'ancien repertoire est
+        toujours la et se retrouve automatiquement.
+
+        Vider seulement le cache local ne suffirait PAS : sample() repart de
+        gcs_index des qu'il est non vide, et continuerait a servir des etiquettes
+        calculees sous l'ancien seuil.
+        """
+        self.local_size = 0
+        self.position = 0
+        self.current_game_id = 0
+
+        if tag:
+            self.buffer_dir = "%s/%s" % (self.base_buffer_dir, tag)
+        # Index remis a zero, et last_index_update force le rescan au prochain
+        # sample() malgre index_update_interval.
+        self.gcs_index = {}
+        self.gcs_file_metadata = {}
+        self.total_size = 0
+        self.last_index_update = 0
+        try:
+            self._update_gcs_index(force=True)
+        except Exception as exc:                                  # pragma: no cover
+            # Un echec de scan n'est pas fatal : l'index vide fait retomber
+            # sample() sur le cache local, qui se remplit des l'iteration suivante.
+            logger.warning("Rescan de l'index GCS apres purge impossible: %s", exc)
+
+        logger.warning(
+            "Buffer GCS bascule sur '%s' (les anciens fichiers sont conserves "
+            "mais ne sont plus echantillonnes).", self.buffer_dir)
+
     def add(self, board, marbles_out, policy, outcome, player, history=None, game_id=None, move_num=0, 
             iteration=0, model_version=0):
         """Add individual transition to buffer"""

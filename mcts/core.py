@@ -9,23 +9,27 @@ from environment.env import AbaloneEnv, AbaloneState
 from model.neural_net import AbaloneModel
 from core.coord_conversion import prepare_input_legacy, cube_to_2d, convert_and_canonicalize_history_batch
 
-@partial(jax.jit)
-def calculate_reward_terminal_only(current_state: AbaloneState, next_state: AbaloneState) -> float:
+@partial(jax.jit, static_argnames=['win_threshold'])
+def calculate_reward_terminal_only(current_state: AbaloneState, next_state: AbaloneState,
+                                   win_threshold: int = 6) -> float:
     """
     TERMINAL REWARDS ONLY (AlphaZero approach)
     Calculate transition reward - rewards only at game end
     - +1.0 for winning the game (from current player perspective)
     - -1.0 for losing the game (from current player perspective)
     - 0.0 for all other transitions
+
+    `win_threshold` is the curriculum threshold (AbaloneEnv.win_threshold), not
+    necessarily Abalone's 6. It is static: it is a Python int at trace time.
     """
-    game_over = (next_state.black_out >= 6) | (next_state.white_out >= 6)
+    game_over = (next_state.black_out >= win_threshold) | (next_state.white_out >= win_threshold)
     
     reward = jnp.where(~game_over, 0.0,
         jnp.where(
-            next_state.white_out >= 6,
+            next_state.white_out >= win_threshold,
             1.0 * current_state.actual_player,
             jnp.where(
-                next_state.black_out >= 6, 
+                next_state.black_out >= win_threshold, 
                 -1.0 * current_state.actual_player,
                 0.0
             )
@@ -34,8 +38,9 @@ def calculate_reward_terminal_only(current_state: AbaloneState, next_state: Abal
     
     return reward
 
-@partial(jax.jit)
-def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: AbaloneState, weight: float = 0.1) -> float:
+@partial(jax.jit, static_argnames=['win_threshold'])
+def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: AbaloneState,
+                                       weight: float = 0.1, win_threshold: int = 6) -> float:
     """
     INTERMEDIATE REWARDS VERSION - FOR TESTING
     Calculate reward with intermediate rewards for pushing marbles
@@ -56,14 +61,14 @@ def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: 
     
     intermediate_reward = weight * opponent_marbles_pushed
     
-    game_over = (next_state.black_out >= 6) | (next_state.white_out >= 6)
+    game_over = (next_state.black_out >= win_threshold) | (next_state.white_out >= win_threshold)
     
     terminal_reward = jnp.where(~game_over, 0.0,
         jnp.where(
-            next_state.white_out >= 6,
+            next_state.white_out >= win_threshold,
             1.0 * current_state.actual_player,
             jnp.where(
-                next_state.black_out >= 6, 
+                next_state.black_out >= win_threshold, 
                 -1.0 * current_state.actual_player,
                 0.0
             )
@@ -72,8 +77,9 @@ def calculate_reward_with_intermediate(current_state: AbaloneState, next_state: 
     
     return intermediate_reward + terminal_reward
 
-@partial(jax.jit)
-def calculate_reward_curriculum(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
+@partial(jax.jit, static_argnames=['win_threshold'])
+def calculate_reward_curriculum(current_state: AbaloneState, next_state: AbaloneState, iteration: int,
+                                win_threshold: int = 6) -> float:
     """
     CURRICULUM REWARD VERSION
     Switches between intermediate and terminal rewards based on iteration
@@ -106,13 +112,14 @@ def calculate_reward_curriculum(current_state: AbaloneState, next_state: Abalone
     intermediate_reward_part = weight * opponent_marbles_pushed
 
     # Always add the terminal reward
-    terminal_reward = calculate_reward_terminal_only(current_state, next_state)
+    terminal_reward = calculate_reward_terminal_only(current_state, next_state, win_threshold)
     
     return intermediate_reward_part + terminal_reward
 
 # Default function (can be switched for testing)
-@partial(jax.jit)
-def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, iteration: int) -> float:
+@partial(jax.jit, static_argnames=['win_threshold'])
+def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, iteration: int,
+                     win_threshold: int = 6) -> float:
     """
     Reward used by the search. Terminal outcomes only (standard AlphaZero).
 
@@ -126,12 +133,13 @@ def calculate_reward(current_state: AbaloneState, next_state: AbaloneState, iter
     If you want to reward pushing marbles, do it on the TRAINING TARGET instead
     (e.g. score the move limit by the marble differential), not here.
     """
-    return calculate_reward_terminal_only(current_state, next_state)
+    return calculate_reward_terminal_only(current_state, next_state, win_threshold)
     # return calculate_reward_curriculum(current_state, next_state, iteration)
     # return calculate_reward_with_intermediate(current_state, next_state)
     
-@partial(jax.jit, static_argnames=['max_moves'])
-def calculate_discount(state: AbaloneState, max_moves: int = 300) -> float:
+@partial(jax.jit, static_argnames=['max_moves', 'win_threshold'])
+def calculate_discount(state: AbaloneState, max_moves: int = 300,
+                       win_threshold: int = 6) -> float:
     """
     Discount for a two-player zero-sum game under mctx.
 
@@ -144,7 +152,8 @@ def calculate_discount(state: AbaloneState, max_moves: int = 300) -> float:
     Terminal states return 0.0 so nothing below them propagates: the terminal
     outcome is already carried by the reward of the transition into them.
     """
-    is_terminal = (state.black_out >= 6) | (state.white_out >= 6) | (state.moves_count >= max_moves)
+    is_terminal = ((state.black_out >= win_threshold) | (state.white_out >= win_threshold)
+                   | (state.moves_count >= max_moves))
     return jnp.where(is_terminal, 0.0, -1.0)
 
 
@@ -182,9 +191,14 @@ class AbaloneMCTSRecurrentFn:
         next_states = jax.vmap(self.env.step)(current_states, action)
 
         iteration = embedding['iteration']
-        reward = jax.vmap(calculate_reward)(current_states, next_states, iteration)
+        # win_threshold est capture depuis l'env : c'est un int Python, donc un
+        # argument statique valide meme a l'interieur du vmap.
+        win_threshold = self.env.win_threshold
+        reward = jax.vmap(
+            lambda c, n, it: calculate_reward(c, n, it, win_threshold)
+        )(current_states, next_states, iteration)
         discount = jax.vmap(
-            lambda s: calculate_discount(s, self.env.max_moves)
+            lambda s: calculate_discount(s, self.env.max_moves, win_threshold)
         )(next_states)
         our_marbles = jnp.where(next_states.actual_player == 1,
                                next_states.black_out,

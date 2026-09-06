@@ -19,16 +19,31 @@ class AbaloneState(NamedTuple):
     white_out: int  # Number of white marbles out
     moves_count: int
 
+# Marbles to push out to win. 6 is the real Abalone rule; training starts at 3
+# and raises it as the agent learns to convert (see AbaloneEnv.__init__).
+WIN_THRESHOLD_DEFAULT = 3
+
+
 class AbaloneEnv:
     HISTORY_LENGTH_DEFAULT = 0
 
     def __init__(self, radius: int = 4, max_moves: int = 200,
-                 history_length: int = HISTORY_LENGTH_DEFAULT):
+                 history_length: int = HISTORY_LENGTH_DEFAULT,
+                 win_threshold: int = WIN_THRESHOLD_DEFAULT):
       """
       Args:
           radius: board radius
           max_moves: draw / truncation limit. NOT a rule of Abalone -- it is an
               artificial cutoff so self-play games terminate.
+          win_threshold: marbles a player must push out to win. The real game
+              uses 6; training starts lower and raises it (curriculum).
+              At 6 from scratch, self-play produced ~96% draws, the value target
+              collapsed to ~0 everywhere and the agent learnt pure avoidance --
+              it ended up ejecting 0.82 marbles per game against 2.62 for
+              uniformly random play. A lower threshold manufactures real +/-1
+              outcomes so the value head has something to learn from, and also
+              shortens the minimum distance to a terminal from 2*(6-k)-1 plies
+              to 2*(N-k)-1, bringing it inside the search horizon.
           history_length: number of past positions fed to the network.
               Defaults to 0: Abalone is fully observable and has no repetition
               rule here, so past positions carry no information the current board
@@ -39,6 +54,7 @@ class AbaloneEnv:
       self.radius = radius
       self.max_moves = max_moves
       self.history_length = history_length
+      self.win_threshold = win_threshold
       self.moves_index = self._load_moves_index()
       self.legality_tables = build_fast_tables(self.moves_index, radius)
       self.coord_map = compute_coord_map(radius)
@@ -175,8 +191,8 @@ class AbaloneEnv:
       # Replace or with jnp.logical_or
       return jnp.logical_or(
           jnp.logical_or(
-              state.black_out >= 6,
-              state.white_out >= 6
+              state.black_out >= self.win_threshold,
+              state.white_out >= self.win_threshold
           ),
           state.moves_count >= self.max_moves
       )
@@ -190,9 +206,9 @@ class AbaloneEnv:
         Returns:
             1 if black wins, -1 if white wins, 0 if draw
         """
-        if state.white_out >= 6:
+        if state.white_out >= self.win_threshold:
             return 1  # Black wins
-        elif state.black_out >= 6:
+        elif state.black_out >= self.win_threshold:
             return -1  # White wins
         elif state.moves_count >= self.max_moves:
             return 0  # Draw
@@ -200,10 +216,10 @@ class AbaloneEnv:
     @partial(jax.jit, static_argnames=['self'])
     def get_winner_batch(self, states: AbaloneState) -> chex.Array:
         return jax.vmap(lambda s: jnp.where(
-            s.white_out >= 6,
+            s.white_out >= self.win_threshold,
             1,  # Black wins
             jnp.where(
-                s.black_out >= 6,
+                s.black_out >= self.win_threshold,
                 -1,  # White wins
                 0  # Draw or in progress
             )

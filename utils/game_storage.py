@@ -41,13 +41,17 @@ def convert_game_to_sgf_like(game_data: Dict, env, game_id: Optional[str] = None
     black_outs = game_data['black_outs'][:moves_per_game+1]
     white_outs = game_data['white_outs'][:moves_per_game+1]
     
-    # Déterminer le résultat final
-    if game_data['final_black_out'] >= 6:
-        result = "W+6"  # Victoire des blancs
-    elif game_data['final_white_out'] >= 6:
-        result = "B+6"  # Victoire des noirs
+    # Déterminer le résultat final.
+    # Le seuil vient de l'env et suit donc le curriculum. Code en dur a 6, cette
+    # fonction etiquetait "Draw" toutes les parties gagnees a 3 billes, ce qui
+    # rendait les archives inutilisables pendant les premiers paliers.
+    win_threshold = getattr(env, 'win_threshold', 6)
+    if game_data['final_black_out'] >= win_threshold:
+        result = "W+%d" % win_threshold  # Victoire des blancs
+    elif game_data['final_white_out'] >= win_threshold:
+        result = "B+%d" % win_threshold  # Victoire des noirs
     else:
-        result = "Draw"  # Match nul
+        result = "Draw"  # Partie tronquee a la limite de coups
     
     # Construire la séquence des mouvements
     moves_sequence = []

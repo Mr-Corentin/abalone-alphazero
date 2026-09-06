@@ -400,15 +400,26 @@ class IterationMetricsAggregator:
                 stats['min_mean_plays_per_game'] = min(mean_plays)
                 stats['max_mean_plays_per_game'] = max(mean_plays)
             
-            # Aggregate marble counts across workers
-            white_total_counts = {i: 0 for i in range(7)}
-            black_total_counts = {i: 0 for i in range(7)}
+            # Aggregate marble counts across workers.
+            # La plage vient des donnees et non d'un range(7) fige : sous le
+            # curriculum, win_threshold vaut 3 au depart, donc les compteurs vont
+            # de 0 a 3 et un range(7) afficherait trois colonnes vides.
+            max_out = 0
+            for data in data_list:
+                for counts in (data.get('white_marble_counts', {}),
+                               data.get('black_marble_counts', {})):
+                    for k in counts:
+                        max_out = max(max_out, int(k))
+            marble_range = range(max_out + 1)
+
+            white_total_counts = {i: 0 for i in marble_range}
+            black_total_counts = {i: 0 for i in marble_range}
             
             for data in data_list:
                 white_counts = data.get('white_marble_counts', {})
                 black_counts = data.get('black_marble_counts', {})
                 
-                for i in range(7):
+                for i in marble_range:
                     white_total_counts[i] += white_counts.get(str(i), white_counts.get(i, 0))
                     black_total_counts[i] += black_counts.get(str(i), black_counts.get(i, 0))
             
@@ -421,6 +432,18 @@ class IterationMetricsAggregator:
                 stats['white_marble_proportions'] = {i: count / total_games for i, count in white_total_counts.items()}
                 stats['black_marble_proportions'] = {i: count / total_games for i, count in black_total_counts.items()}
             
+            # Curriculum metrics: moyenne simple sur les workers. Chacun genere
+            # le meme nombre de parties, donc la moyenne non ponderee est exacte.
+            for field in ('win_threshold', 'decisive_rate', 'mean_decisive_length',
+                          'near_win_rate', 'projected_length_next_threshold',
+                          'projection_budget', 'total_ejections_per_game'):
+                values = [d[field] for d in data_list if d.get(field) is not None]
+                if values:
+                    stats[f'avg_{field}'] = sum(values) / len(values)
+            stats['total_decisive_games'] = sum(d.get('num_decisive_games', 0) for d in data_list)
+            stats['all_workers_ready_to_raise'] = all(
+                d.get('ready_to_raise', False) for d in data_list) if data_list else False
+
             # Aggregate win/loss statistics across workers
             stats['total_white_wins'] = sum(d.get('white_wins', 0) for d in data_list)
             stats['total_black_wins'] = sum(d.get('black_wins', 0) for d in data_list)
@@ -589,7 +612,7 @@ WIN/LOSS DISTRIBUTION:
 MARBLE OUT DISTRIBUTION:
   • White Marbles Out: {self._format_marble_distribution(gen_stats.get('white_marble_counts', {}), gen_stats.get('white_marble_proportions', {}))}
   • Black Marbles Out: {self._format_marble_distribution(gen_stats.get('black_marble_counts', {}), gen_stats.get('black_marble_proportions', {}))}
-
+{self._format_curriculum_section(gen_stats)}
 TRAINING METRICS:
   • Total Loss: {train_stats.get('avg_total_loss', 0):.4f} (±{train_stats.get('std_total_loss', 0):.4f})
   • Policy Loss: {train_stats.get('avg_policy_loss', 0):.4f} (±{train_stats.get('std_policy_loss', 0):.4f})
@@ -609,6 +632,57 @@ WORKER BREAKDOWN:
 """
         return summary
     
+    # Reference mesuree : le jeu UNIFORMEMENT ALEATOIRE ejecte 2.62 billes par
+    # partie sur 300 plis. Un agent entraine sous cette valeur n'apprend pas
+    # l'attaque, il apprend l'evitement -- c'est le mode d'echec qui a motive
+    # tout le curriculum. Sert de plancher d'alerte.
+    RANDOM_PLAY_EJECTIONS_PER_GAME = 2.62
+
+    def _format_curriculum_section(self, gen_stats: dict):
+        """Bloc CURRICULUM : etat du palier et critere de montee."""
+        threshold = gen_stats.get('avg_win_threshold')
+        if threshold is None:
+            return ""
+        threshold = int(round(threshold))
+
+        decisive = gen_stats.get('avg_decisive_rate', 0)
+        length = gen_stats.get('avg_mean_decisive_length', 0)
+        projected = gen_stats.get('avg_projected_length_next_threshold', 0)
+        budget = gen_stats.get('avg_projection_budget', 0)
+        near = gen_stats.get('avg_near_win_rate', 0)
+        ejections = gen_stats.get('avg_total_ejections_per_game', 0)
+
+        cond1 = decisive >= 0.80
+        cond2 = 0 < projected <= budget
+        met = cond1 and cond2
+
+        if met:
+            verdict = ">>> CRITERE DE MONTEE ATTEINT -- relancer avec --win-threshold %d --reset-buffer" % (threshold + 1)
+        elif not cond1:
+            verdict = ">>> Pas encore : palier %d pas maitrise (decisives %.1f%% < 80%%)" % (threshold, decisive * 100)
+        else:
+            verdict = ">>> Pas encore : projection %.0f plis > budget %.0f" % (projected, budget)
+
+        alert = ""
+        if ejections and ejections < self.RANDOM_PLAY_EJECTIONS_PER_GAME:
+            alert = (
+                "\n  !! ALERTE PASSIVITE : %.2f ejection/partie, SOUS le jeu aleatoire (%.2f).\n"
+                "     L'agent evite le contact au lieu d'attaquer."
+                % (ejections, self.RANDOM_PLAY_EJECTIONS_PER_GAME))
+
+        return """
+CURRICULUM:
+  • Seuil actuel: {th} billes (regle reelle: 6)
+  • Parties decisives: {dec:.1f}%  [critere: >= 80%]
+  • Longueur moyenne des decisives: {ln:.0f} plis
+  • Parties atteignant {near_th} billes: {near:.1f}%
+  • Ejections par partie: {ej:.2f}  (jeu aleatoire: {rnd:.2f})
+  • Projection a {nxt} billes: {proj:.0f} plis  [budget: <= {bud:.0f}]
+  {verdict}{alert}
+""".format(th=threshold, dec=decisive * 100, ln=length, near_th=threshold - 1,
+           near=near * 100, ej=ejections, rnd=self.RANDOM_PLAY_EJECTIONS_PER_GAME,
+           nxt=threshold + 1, proj=projected, bud=budget, verdict=verdict, alert=alert)
+
     def _format_worker_breakdown(self, generation_data: list, training_data: list, timing_data: list):
         """Format per-worker metrics breakdown."""
         breakdown = "  Generation Time & Loss by Worker:\n"
@@ -661,8 +735,18 @@ WORKER BREAKDOWN:
         if not counts_dict and not proportions_dict:
             return "No data"
         
+        # Plage deduite des cles presentes et non figee a range(7) : sous le
+        # curriculum, win_threshold vaut 3 au depart, et un range(7) fige
+        # masquerait toute distribution allant plus loin si le seuil montait.
+        keys = set()
+        for d in (counts_dict or {}), (proportions_dict or {}):
+            for k in d:
+                try:
+                    keys.add(int(k))
+                except (TypeError, ValueError):
+                    pass
         parts = []
-        for i in range(7):
+        for i in sorted(keys):
             count = counts_dict.get(i, counts_dict.get(str(i), 0))
             proportion = proportions_dict.get(i, proportions_dict.get(str(i), 0))
             if count > 0:

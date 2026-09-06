@@ -116,6 +116,22 @@ def parse_args():
                        help='Move limit before a game is truncated (default 200)')
     parser.add_argument('--history-length', type=int, default=None,
                        help='Past positions fed to the network (0 = disabled)')
+    parser.add_argument('--win-threshold', type=int, default=None,
+                       help='Marbles to push out to win (default 3; the real game is 6). '
+                            'Curriculum knob: raise it by hand when the CURRICULUM block '
+                            'of the iteration summary says the criterion is met, resuming '
+                            'from a checkpoint and passing --reset-buffer.')
+    parser.add_argument('--curriculum-target', type=int, default=None,
+                       help='Threshold the curriculum stops at (default 6, the real '
+                            'rule of Abalone). The curriculum exists only to reach it.')
+    parser.add_argument('--no-curriculum', action='store_true',
+                       help='Pin --win-threshold instead of letting the trainer raise it '
+                            'automatically as the agent learns to convert.')
+    parser.add_argument('--reset-buffer', action='store_true',
+                       help='Empty the replay buffer at startup. Use it whenever you resume '
+                            'a checkpoint with a different --win-threshold: the stored value '
+                            'targets were computed under the old threshold and are wrong '
+                            'under the new one.')
 
     return parser.parse_args()
 
@@ -171,6 +187,15 @@ def get_merged_config(args):
 
     if args.history_length is not None:
         config.setdefault('game', {})['history_length'] = args.history_length
+
+    if args.win_threshold is not None:
+        config.setdefault('game', {})['win_threshold'] = args.win_threshold
+
+    if args.curriculum_target is not None:
+        config.setdefault('game', {})['curriculum_target'] = args.curriculum_target
+
+    if args.no_curriculum:
+        config.setdefault('game', {})['curriculum_enabled'] = False
     
     if args.training_steps:
         config['training']['training_steps_per_iteration'] = args.training_steps
@@ -213,7 +238,14 @@ def display_config_summary(config):
                      f"{config['mcts'].get('max_num_considered_actions', 64)} root actions considered")
     game_cfg = config.get('game', {})
     main_process_log(f"Game: move limit {game_cfg.get('max_moves', 200)}, "
-                     f"history length {game_cfg.get('history_length', 0)}")
+                     f"history length {game_cfg.get('history_length', 0)}, "
+                     f"win threshold {game_cfg.get('win_threshold', 3)} marbles "
+                     f"(real game: 6)")
+    if game_cfg.get('curriculum_enabled', True):
+        main_process_log(f"Curriculum: automatic, raising the threshold up to "
+                         f"{game_cfg.get('curriculum_target', 6)} marbles")
+    else:
+        main_process_log("Curriculum: disabled, threshold pinned")
     main_process_log(f"Checkpoints: {config['checkpoint']['path']}")
     
     # Show logging configuration
@@ -271,6 +303,7 @@ def create_trainer(config, args):
     env = AbaloneEnv(
         max_moves=game_cfg.get('max_moves', 200),
         history_length=game_cfg.get('history_length', 0),
+        win_threshold=game_cfg.get('win_threshold', 3),
     )
 
     # Get evaluation parameters
@@ -304,11 +337,19 @@ def create_trainer(config, args):
         enable_comprehensive_logging=(args.enable_comprehensive_logging and not args.disable_comprehensive_logging) if hasattr(args, 'enable_comprehensive_logging') else config.get('logging', {}).get('enable_comprehensive_logging', True),
         vertex_tensorboard_id=args.vertex_tensorboard_id,
         gcp_project=args.gcp_project,
-        gcp_location=args.gcp_location)
+        gcp_location=args.gcp_location,
+        curriculum_enabled=game_cfg.get('curriculum_enabled', True),
+        curriculum_target=game_cfg.get('curriculum_target', 6))
 
     # Load checkpoint if specified
     if args.checkpoint:
         trainer.load_checkpoint(args.checkpoint)
+
+    # Apres le checkpoint : load_checkpoint() avertit si le palier a change,
+    # et --reset-buffer est justement la reponse a cet avertissement.
+    if args.reset_buffer:
+        trainer.buffer.clear(tag="wt%d" % trainer.env.win_threshold)
+        main_process_log("Replay buffer vide sur demande (--reset-buffer)")
 
     return trainer
 
